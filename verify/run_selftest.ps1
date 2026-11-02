@@ -69,6 +69,8 @@ try {
   & "$PSScriptRoot\run_nativecapture.ps1" -Out "$Out\nativecapture"
   & "$PSScriptRoot\run_xinputtest.ps1" -Out "$Out\xinput"
   if ($LASTEXITCODE) { throw "FAIL xinput suite" }
+  & "$PSScriptRoot\run_dinput1test.ps1" -Out "$Out\dinput1"
+  if ($LASTEXITCODE) { throw "FAIL legacy DirectInput suite" }
   & "$PSScriptRoot\run_actest.ps1" -Out "$Out\actest"
   if ($LASTEXITCODE) { throw "FAIL anti-cheat refusal suite" }
   & "$PSScriptRoot\run_unittests.ps1" -Out "$Out\unit"  #@ocr

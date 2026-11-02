@@ -67,6 +67,9 @@ copy /y %VKT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%VKT% in use - n
 if "%ARCH%"=="x64" (set XIT=vi_xinputtest.exe) else (set XIT=vi_xinputtest32.exe)
 cl %CF% /std:c++17 "%ROOT%test\vi_xinputtest.cpp" /Fe:%XIT% /link /SUBSYSTEM:WINDOWS || goto :afail
 copy /y %XIT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%XIT% in use - not replaced
+if "%ARCH%"=="x64" (set DI1=vi_dinput1test.exe) else (set DI1=vi_dinput1test32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_dinput1test.cpp" /Fe:%DI1% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %DI1% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%DI1% in use - not replaced
 if "%ARCH%"=="x64" (set UT=vi_uitarget.exe& set UU=vi_uitest.exe& set UN=vi_ncctest.exe) else (set UT=vi_uitarget32.exe& set UU=vi_uitest32.exe& set UN=vi_ncctest32.exe)
 cl %CF% /std:c++17 "%ROOT%test\vi_uitarget.cpp" /Fe:%UT% /link /SUBSYSTEM:WINDOWS || goto :afail
 copy /y %UT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%UT% in use - not replaced

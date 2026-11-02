@@ -648,6 +648,9 @@ using PFN_DIGDD = HRESULT(STDMETHODCALLTYPE*)(void*, DWORD, LPDIDEVICEOBJECTDATA
 using PFN_DIACQ = HRESULT(STDMETHODCALLTYPE*)(void*);
 using PFN_DICAPS = HRESULT(STDMETHODCALLTYPE*)(void*, LPDIDEVCAPS);
 PFN_DIGDS o_DIGetDeviceState = nullptr; PFN_DIGDD o_DIGetDeviceData = nullptr; PFN_DIACQ o_DIAcquire = nullptr;
+// legacy dinput.dll (IDirectInputDeviceA, DirectInput 1-7): keyboard and mouse may use different vtable functions
+constexpr int kDiLegacySets = 2;
+PFN_DIGDS o_DILGetDeviceState[kDiLegacySets] = {}; PFN_DIGDD o_DILGetDeviceData[kDiLegacySets] = {}; PFN_DIACQ o_DILAcquire[kDiLegacySets] = {};
 bool g_diHooked = false;
 SRWLOCK g_devLock = SRWLOCK_INIT;
 std::map<void*, int> g_devType;  // 1 kbd, 2 mouse, 0 other
@@ -659,18 +662,20 @@ int DevType(void* self) {
     DIDEVCAPS caps = {}; caps.dwSize = sizeof(caps);
     PFN_DICAPS gc = (PFN_DICAPS)(*(void***)self)[3];
     t = 0;
-    if (SUCCEEDED(gc(self, &caps))) { BYTE dt = GET_DIDEVICE_TYPE(caps.dwDevType); t = dt == DI8DEVTYPE_KEYBOARD ? 1 : dt == DI8DEVTYPE_MOUSE ? 2 : 0; }
+    HRESULT chr = gc(self, &caps);
+    if (FAILED(chr)) { caps = {}; caps.dwSize = 24; chr = gc(self, &caps); }  // DirectInput 3 devices only accept the 24-byte DIDEVCAPS
+    if (SUCCEEDED(chr)) { BYTE dt = GET_DIDEVICE_TYPE(caps.dwDevType); t = (dt == DI8DEVTYPE_KEYBOARD || dt == 3 /*DIDEVTYPE_KEYBOARD*/) ? 1 : (dt == DI8DEVTYPE_MOUSE || dt == 2 /*DIDEVTYPE_MOUSE*/) ? 2 : 0; }  // legacy dinput.dll reports 3 / 2, dinput8 0x13 / 0x12
     AcquireSRWLockExclusive(&g_devLock); g_devType[self] = t; ReleaseSRWLockExclusive(&g_devLock);
     return t;
 }
-HRESULT STDMETHODCALLTYPE h_DIAcquire(void* self) {
+HRESULT DIAcquireImpl(PFN_DIACQ orig, void* self) {
     C.di_acq++;
-    HRESULT hr = o_DIAcquire(self);
+    HRESULT hr = orig(self);
     if (FAILED(hr) && Faking()) { C.di_fake++; return DI_OK; }
     return hr;
 }
-HRESULT STDMETHODCALLTYPE h_DIGetDeviceState(void* self, DWORD cb, LPVOID data) {
-    HRESULT hr = o_DIGetDeviceState(self, cb, data);
+HRESULT DIGetDeviceStateImpl(PFN_DIGDS orig, void* self, DWORD cb, LPVOID data) {
+    HRESULT hr = orig(self, cb, data);
     if (!data) return hr;
     bool kbd = cb == 256, mouse = cb == sizeof(DIMOUSESTATE) || cb == sizeof(DIMOUSESTATE2);
     if (!kbd && !mouse) return hr;
@@ -695,9 +700,9 @@ HRESULT STDMETHODCALLTYPE h_DIGetDeviceState(void* self, DWORD cb, LPVOID data) 
     }
     return hr;
 }
-HRESULT STDMETHODCALLTYPE h_DIGetDeviceData_entry(void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rg, LPDWORD inout, DWORD flags) {
+HRESULT DIGetDeviceDataImpl(PFN_DIGDD orig, void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rg, LPDWORD inout, DWORD flags) {
     DWORD req = inout ? *inout : 0;  // caller's capacity (the real call overwrites it with the count)
-    HRESULT hr = o_DIGetDeviceData(self, cbObj, rg, inout, flags);
+    HRESULT hr = orig(self, cbObj, rg, inout, flags);
     int t = DevType(self);
     if (t == 0 || !inout) return hr;
     if (t == 1) C.di_data_kbd++; else C.di_data_mouse++;
@@ -722,6 +727,13 @@ HRESULT STDMETHODCALLTYPE h_DIGetDeviceData_entry(void* self, DWORD cbObj, LPDID
     *inout = have;
     return hr;
 }
+
+HRESULT STDMETHODCALLTYPE h_DIAcquire(void* self) { return DIAcquireImpl(o_DIAcquire, self); }
+HRESULT STDMETHODCALLTYPE h_DIGetDeviceState(void* self, DWORD cb, LPVOID data) { return DIGetDeviceStateImpl(o_DIGetDeviceState, self, cb, data); }
+HRESULT STDMETHODCALLTYPE h_DIGetDeviceData_entry(void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rg, LPDWORD inout, DWORD flags) { return DIGetDeviceDataImpl(o_DIGetDeviceData, self, cbObj, rg, inout, flags); }
+template<int N> HRESULT STDMETHODCALLTYPE h_DILAcquire(void* self) { return DIAcquireImpl(o_DILAcquire[N], self); }
+template<int N> HRESULT STDMETHODCALLTYPE h_DILGetDeviceState(void* self, DWORD cb, LPVOID data) { return DIGetDeviceStateImpl(o_DILGetDeviceState[N], self, cb, data); }
+template<int N> HRESULT STDMETHODCALLTYPE h_DILGetDeviceData(void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rg, LPDWORD inout, DWORD flags) { return DIGetDeviceDataImpl(o_DILGetDeviceData[N], self, cbObj, rg, inout, flags); }
 
 // ----------------------------------------------------------------------------------------------
 // XInput
@@ -1090,6 +1102,43 @@ void TryHookDInput() {
     }
     di->Release();
     Log("dinput8 hooks installed");
+}
+// Legacy dinput.dll (DirectInputCreateA, DirectInput 1-7: Fallout, many 1990s games). Its devices have their own vtable,
+// so dinput8 hooks never see them. Keyboard and mouse may share implementation functions: each distinct one is hooked once.
+bool g_diLegacyHooked = false;
+void TryHookDInputLegacy() {
+    if (g_diLegacyHooked) return;
+    HMODULE h = GetModuleHandleW(L"dinput.dll"); if (!h) return;
+    g_diLegacyHooked = true;
+    using PFN_DICA = HRESULT(WINAPI*)(HINSTANCE, DWORD, LPDIRECTINPUTA*, LPUNKNOWN);
+    PFN_DICA create = (PFN_DICA)GetProcAddress(h, "DirectInputCreateA");
+    if (!create) { g_hooksFail += "dinput(no DirectInputCreateA) "; return; }
+    LPDIRECTINPUTA di = nullptr;
+    if (FAILED(create(GetModuleHandleW(nullptr), 0x0300, &di, nullptr)) || !di) { g_hooksFail += "dinput(create failed) "; return; }
+    void* seen[3 * kDiLegacySets] = {}; int nSeen = 0, set = 0;
+    static const GUID* kGuids[2] = {&GUID_SysKeyboard, &GUID_SysMouse};
+    for (const GUID* g : kGuids) {
+        LPDIRECTINPUTDEVICEA dev = nullptr;
+        if (FAILED(di->CreateDevice(*g, &dev, nullptr)) || !dev) continue;
+        void** vt = *(void***)dev;
+        bool dup = false; for (int i = 0; i < nSeen; i++) if (seen[i] == vt[9]) dup = true;
+        if (!dup && set < kDiLegacySets) {
+            seen[nSeen++] = vt[9];
+            bool ok = true;
+            switch (set) {
+                case 0: ok = HookAddr("IDirectInputDeviceA::Acquire", vt[7], (void*)&h_DILAcquire<0>, (void**)&o_DILAcquire[0])
+                          && HookAddr("IDirectInputDeviceA::GetDeviceState", vt[9], (void*)&h_DILGetDeviceState<0>, (void**)&o_DILGetDeviceState[0])
+                          && HookAddr("IDirectInputDeviceA::GetDeviceData", vt[10], (void*)&h_DILGetDeviceData<0>, (void**)&o_DILGetDeviceData[0]); break;
+                case 1: ok = HookAddr("IDirectInputDeviceA#2::Acquire", vt[7], (void*)&h_DILAcquire<1>, (void**)&o_DILAcquire[1])
+                          && HookAddr("IDirectInputDeviceA#2::GetDeviceState", vt[9], (void*)&h_DILGetDeviceState<1>, (void**)&o_DILGetDeviceState[1])
+                          && HookAddr("IDirectInputDeviceA#2::GetDeviceData", vt[10], (void*)&h_DILGetDeviceData<1>, (void**)&o_DILGetDeviceData[1]); break;
+            }
+            (void)ok; set++;
+        }
+        dev->Release();
+    }
+    di->Release();
+    Log("dinput (legacy) hooks installed: %d vtable set(s)", set);
 }
 void TryHookXInput() {
     for (int i = 0; i < 4; i++) {
@@ -1820,7 +1869,7 @@ DWORD WINAPI MonitorThread(LPVOID) {
         DWORD now = GetTickCount();
         if (now - lastSlow > 1000) {
             lastSlow = now;
-            TryHookDInput(); TryHookXInput(); TryHookEcl(); TryHookGL(); TryHookVk();
+            TryHookDInput(); TryHookDInputLegacy(); TryHookXInput(); TryHookEcl(); TryHookGL(); TryHookVk();
             if (!g_hwndForced) {
                 HWND best = FindMainWindow();
                 if (!g_hwnd || !IsWindow(g_hwnd)) { if (best) Retarget(best); }
@@ -1878,7 +1927,7 @@ DWORD WINAPI InitThread(LPVOID) {
     TryHookGL();
     TryHookVk();
     InstallDxgiHooks();
-    TryHookDInput(); TryHookXInput();
+    TryHookDInput(); TryHookDInputLegacy(); TryHookXInput();
     FindRawDevices();
     g_realFg = ComputeRealFg();
     HANDLE t = CreateThread(nullptr, 0, PipeThread, nullptr, 0, nullptr); if (t) CloseHandle(t);

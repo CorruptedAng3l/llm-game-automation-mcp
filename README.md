@@ -35,7 +35,7 @@ game in front, steals your mouse and keyboard, and allows exactly one game at a 
 | | supported | notes |
 |---|---|---|
 | **Capture** | Direct3D 11, Direct3D 12, OpenGL, Vulkan, `PrintWindow` fallback | HDR formats (R10G10B10A2, RGBA16F) converted to 8-bit; Vulkan needs early injection (`launch --early`); D3D9/D3D10 fall back to `PrintWindow` |
-| **Keyboard** | window messages (`WM_KEYDOWN`/`WM_CHAR`, with the game's own `TranslateMessage`), Raw Input (`WM_INPUT`, `GetRawInputBuffer` on x64), DirectInput 8, `GetAsyncKeyState`/`GetKeyState`/`GetKeyboardState` | mirrors the game's own `RegisterRawInputDevices` choices (e.g. `RIDEV_NOLEGACY`) |
+| **Keyboard** | window messages (`WM_KEYDOWN`/`WM_CHAR`, with the game's own `TranslateMessage`), Raw Input (`WM_INPUT`, `GetRawInputBuffer` on x64), DirectInput 8 and legacy `dinput.dll` (DirectInput 1-7), `GetAsyncKeyState`/`GetKeyState`/`GetKeyboardState` | mirrors the game's own `RegisterRawInputDevices` choices (e.g. `RIDEV_NOLEGACY`) |
 | **Mouse** | messages, Raw Input, DirectInput 8, virtual cursor behind `GetCursorPos` / `WindowFromPoint` | absolute (`click`, `move`) and relative (`move_relative`, mouse-look) |
 | **Gamepad** | XInput pad 0 (`XInputGetState`, `XInputGetStateEx`) | buttons, both sticks, triggers |
 | **Vision (CLI side)** | Windows OCR (`Windows.Media.Ocr`), normalised cross-correlation template matching | runs in the CLI, nothing extra is loaded into the game |
