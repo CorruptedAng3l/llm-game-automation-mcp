@@ -13,7 +13,11 @@ $cases = @(
   @{ n = 'state_x64';    exe = 'vi_dinput1test.exe';   a = '' },
   @{ n = 'buffered_x64'; exe = 'vi_dinput1test.exe';   a = '--buffered' },
   @{ n = 'state_x86';    exe = 'vi_dinput1test32.exe'; a = '' },
-  @{ n = 'buffered_x86'; exe = 'vi_dinput1test32.exe'; a = '--buffered' }
+  @{ n = 'buffered_x86'; exe = 'vi_dinput1test32.exe'; a = '--buffered' },
+  # --gated: a never-activated window that ignores input until WM_ACTIVATEAPP(TRUE) (Fallout's GNW95 loop). vinput must
+  # post the activation itself (autoactivate) without the target ever becoming the real foreground.
+  @{ n = 'gated_x64';    exe = 'vi_dinput1test.exe';   a = '--gated' },
+  @{ n = 'gated_x86';    exe = 'vi_dinput1test32.exe'; a = '--gated' }
 )
 $owned = @()
 try {
@@ -24,6 +28,11 @@ try {
     Require ((Test-Path $tl) -and (Select-String -LiteralPath $tl -Pattern READY -Quiet)) "$($c.n) reader started"
     $r = & $V inject --pid $p.Id | ConvertFrom-Json; Require $r.ok "$($c.n) inject"
     Start-Sleep -Milliseconds 600
+    if ($c.a -eq '--gated') {
+      $st = & $V --pid $p.Id status | ConvertFrom-Json
+      Require ((Select-String -LiteralPath $tl -Pattern 'ACTIVATEAPP 1' -Quiet) -and $st.counters.act_synth -ge 1) "$($c.n) background window was told it is active (act_synth=$($st.counters.act_synth))"
+      Require (-not $st.really_foreground) "$($c.n) target is still not the real foreground"
+    }
     $pre = @(Get-Content -LiteralPath $tl | Where-Object { $_ -match 'KEY|MOUSE' }).Count
     Require ($pre -eq 0) "$($c.n) control: no input before any command ($pre lines)"
     & $V --pid $p.Id key a --ms 150 | Out-Null

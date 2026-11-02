@@ -688,7 +688,7 @@ static void Usage() {
         "  vinput --pid N wheel <delta>\n"
         "  vinput --pid N pad <a+b+start...> [ms] [--lx N --ly N --hold]\n"
         "  vinput --pid N capture <out.png> [--method auto|swapchain|printwindow]\n"
-        "  vinput --pid N config fakefocus=true isolate=true blockfocus=true keepvisible=true cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off\n"
+        "  vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true keepvisible=true cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off\n"
         "  vinput --pid N json '{\"cmd\":\"status\"}'\n"
         "  vinput --pid N ocr [--region x,y,w,h] [--lang en-US] [--scale 1] [--lines-only] [--out file.json]\n"
         "  vinput --pid N click-text \"text\" [--nth N] [--exact] [--fuzzy N] [--timeout ms] [--button left] [--dry-run] [--optional]\n"  //@text

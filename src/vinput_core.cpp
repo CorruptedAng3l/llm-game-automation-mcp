@@ -54,6 +54,7 @@ namespace {
 
 struct Config {
     std::atomic<bool> fakefocus{true};    // swallow deactivation, report game as foreground
+    std::atomic<bool> autoactivate{true}; // background game never told it is active: post one activation to its own window
     std::atomic<bool> isolate{true};      // while NOT really foreground: hide real kb/mouse from the game
     std::atomic<bool> blockfocus{true};   // while NOT really foreground: game cannot steal focus
     std::atomic<bool> nofullscreen{true}; // refuse DXGI exclusive fullscreen
@@ -72,6 +73,9 @@ HMODULE g_self = nullptr;
 DWORD   g_t0 = 0;
 std::atomic<bool> g_realFg{false};
 std::atomic<bool> g_hwndForced{false};
+std::atomic<int>  g_appActive{-1};     // last WM_ACTIVATEAPP the game's window procedure saw: -1 none, 0 inactive, 1 active
+std::atomic<DWORD> g_lastSynthAct{0};
+std::atomic<int>  g_synthLeft{3};       // synthetic activations left for this window (refilled when a real deactivation reaches the game)
 bool    g_appContainer = false;   // UWP / Xbox app games: pipe in the container namespace, CoreWindow target
 
 std::atomic<uint8_t> g_vk[256];
@@ -94,7 +98,7 @@ struct Counters {
     std::atomic<long> xinput{0};
     std::atomic<long> wm_key{0}, wm_char{0}, wm_mouse{0}, wm_input{0}, wm_input_dropped{0}, wm_mouse_dropped{0};
     std::atomic<long> min_blocked{0}, min_restored{0};
-    std::atomic<long> act_swallowed{0}, present{0}, present_ours{0}, captures{0};
+    std::atomic<long> act_swallowed{0}, act_synth{0}, present{0}, present_ours{0}, captures{0};
     std::atomic<long> posted{0}, raw_posted{0}, raw_queued{0};
 } C;
 
@@ -606,6 +610,7 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_KILLFOCUS: if (!IsOurWindow((HWND)w)) { C.act_swallowed++; return 0; } break;
         }
     }
+    if (m == WM_ACTIVATEAPP) { g_appActive = w ? 1 : 0; if (!w) g_synthLeft = 3; }   // reaches the game (a swallowed deactivation returned above)
     if (m == WM_SYSCOMMAND && (w & 0xFFF0) == SC_MINIMIZE) {
         Log("WM_SYSCOMMAND SC_MINIMIZE received (fg=%d)", (int)fg);
         if (g_cfg.keepvisible && !fg) { C.min_blocked++; return 0; }
@@ -1200,6 +1205,7 @@ void Retarget(HWND h) {
     g_hwndUnicode = IsWindowUnicode(h) != FALSE;
     WNDPROC prev = g_hwndUnicode ? (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)h_WndProc) : (WNDPROC)SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)h_WndProc);
     g_origWndProc = prev;
+    g_appActive = -1; g_lastSynthAct = 0; g_synthLeft = 3;   // a new window has not been told anything yet
     RECT rc; GetClientRect(h, &rc);
     if (!g_vcurTouched) { g_vcurX = rc.right / 2; g_vcurY = rc.bottom / 2; }
     g_hwnd = h;
@@ -1429,7 +1435,7 @@ std::string StatusJson() {
         o.bol("subclassed", (WNDPROC)GetWindowLongPtrW(g_hwnd, GWLP_WNDPROC) == h_WndProc);
     }
     bool fg = ComputeRealFg(); o.bol("really_foreground", fg);
-    o.bol("fakefocus", g_cfg.fakefocus); o.bol("isolate", g_cfg.isolate); o.bol("blockfocus", g_cfg.blockfocus); o.bol("nofullscreen", g_cfg.nofullscreen); o.bol("keepvisible", g_cfg.keepvisible); if (g_hwnd) o.bol("minimized", IsIconic(g_hwnd) != FALSE);
+    o.bol("fakefocus", g_cfg.fakefocus); o.bol("autoactivate", g_cfg.autoactivate); o.num("app_active", g_appActive); o.bol("isolate", g_cfg.isolate); o.bol("blockfocus", g_cfg.blockfocus); o.bol("nofullscreen", g_cfg.nofullscreen); o.bol("keepvisible", g_cfg.keepvisible); if (g_hwnd) o.bol("minimized", IsIconic(g_hwnd) != FALSE);
     o.num("cursor_mode", g_cfg.cursor); o.num("rawmode", g_cfg.rawmode); o.num("msgmode", g_cfg.msgmode);
     o.num("vcur_x", g_vcurX); o.num("vcur_y", g_vcurY);
     RawReg rr = QueryRawReg();
@@ -1460,7 +1466,7 @@ std::string StatusJson() {
 #define CN(x) c.num(#x, (double)C.x.load())
     CN(gaks); CN(gks); CN(gkbs); CN(gcur); CN(scur); CN(clip); CN(gfg); CN(setfg); CN(setfg_blocked);
     CN(rid); CN(rid_magic); CN(rib); CN(rib_injected); CN(reg_raw); CN(di_kbd); CN(di_mouse); CN(di_data_kbd); CN(di_data_mouse); CN(di_acq); CN(di_fake); CN(xinput);
-    CN(wm_key); CN(wm_char); CN(wm_mouse); CN(wm_input); CN(wm_input_dropped); CN(wm_mouse_dropped); CN(act_swallowed); CN(min_blocked); CN(min_restored); CN(present); CN(present_ours); CN(captures);
+    CN(wm_key); CN(wm_char); CN(wm_mouse); CN(wm_input); CN(wm_input_dropped); CN(wm_mouse_dropped); CN(act_swallowed); CN(act_synth); CN(min_blocked); CN(min_restored); CN(present); CN(present_ours); CN(captures);
     CN(posted); CN(raw_posted); CN(raw_queued);
 #undef CN
     o.raw("counters", c.done());
@@ -1594,6 +1600,7 @@ std::string Exec(const std::string& line) {
     if (cmd == "config") {
         if (JHas(j, "fakefocus")) g_cfg.fakefocus = JBool(j, "fakefocus", true);
         if (JHas(j, "isolate")) g_cfg.isolate = JBool(j, "isolate", true);
+        if (JHas(j, "autoactivate")) g_cfg.autoactivate = JBool(j, "autoactivate", true);
         if (JHas(j, "blockfocus")) g_cfg.blockfocus = JBool(j, "blockfocus", true);
         if (JHas(j, "nofullscreen")) g_cfg.nofullscreen = JBool(j, "nofullscreen", true);
         if (JHas(j, "keepvisible")) g_cfg.keepvisible = JBool(j, "keepvisible", true);
@@ -1832,6 +1839,27 @@ DWORD WINAPI PipeThread(LPVOID) {
     }
 }
 
+// A game started in the background never receives WM_ACTIVATEAPP(TRUE). Games that keep their own "application is
+// active" flag (Fallout 1/2's GNW95 loop, many DirectDraw-era titles) then ignore all input, and fakefocus only swallows
+// DEactivations. Post the activation sequence a real switch would send, once, to the game's own window: posted messages
+// cannot change the real foreground, and blockfocus (required) keeps the game's activation handler from taking it.
+// Re-posted (at most every 2 s, 3 times) while the game's window procedure still has not seen an activation.
+void MaybeSynthActivate() {
+    HWND h = g_hwnd;
+    if (!h || !g_origWndProc || !g_cfg.autoactivate || !g_cfg.fakefocus || !g_cfg.blockfocus || RealFg()) return;
+    if (g_appActive.load() == 1 || g_synthLeft.load() <= 0 || IsIconic(h)) return;
+    DWORD now = GetTickCount();
+    if (g_lastSynthAct && now - g_lastSynthAct < 2000) return;
+    g_lastSynthAct = now ? now : 1; g_synthLeft--;
+    DWORD otherTid = GetWindowThreadProcessId(RealForeground(), nullptr);   // WM_ACTIVATEAPP lParam: the thread losing activation
+    PostMessageW(h, WM_NCACTIVATE, TRUE, 0);
+    PostMessageW(h, WM_ACTIVATEAPP, TRUE, (LPARAM)otherTid);
+    PostMessageW(h, WM_ACTIVATE, WA_ACTIVE, 0);
+    PostMessageW(h, WM_SETFOCUS, 0, 0);
+    C.act_synth++;
+    Log("game window not told it is active (app_active=%d) -> posted WM_NCACTIVATE/WM_ACTIVATEAPP/WM_ACTIVATE/WM_SETFOCUS (no foreground change)", g_appActive.load());
+}
+
 DWORD WINAPI MonitorThread(LPVOID) {
     bool lastFg = ComputeRealFg();
     DWORD lastSlow = 0;
@@ -1869,6 +1897,7 @@ DWORD WINAPI MonitorThread(LPVOID) {
             for (int vk = 1; vk < 256; vk++) g_vkPressed[vk] = 0;
         }
         lastFg = fg;
+        MaybeSynthActivate();
         DWORD now = GetTickCount();
         if (now - lastSlow > 1000) {
             lastSlow = now;

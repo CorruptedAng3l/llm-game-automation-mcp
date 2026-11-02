@@ -29,7 +29,7 @@ vinput --pid N pad off                          stop overriding pad 0
 vinput --pid N capture <out.png> [--method auto|native|swapchain|printwindow] [--after-frames N] [--region x,y,w,h]
 vinput --pid N wait-change [--region x,y,w,h] [--timeout S]
 vinput --pid N trace key <key>
-vinput --pid N config fakefocus=true isolate=true blockfocus=true nofullscreen=true keepvisible=true vk=on|off
+vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true nofullscreen=true keepvisible=true vk=on|off
                       cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off hwnd=0x...
 vinput --pid N json '{"cmd":"key","key":"enter","ms":80}'
 vinput --pid N ocr [--region x,y,w,h] [--lang L] [--scale S] [--tiles] [--lines-only] [--out f.json]
@@ -121,6 +121,11 @@ A command with no owner is refused by a claimed game too. `status` and `list` ar
 - `activate` enables the virtual focus shims only; it does not request the real foreground.
 - `config fakefocus=false` stops the focus API overrides and deactivation-message suppression; `isolate` separately
   controls hiding real background input; `keepvisible=false` stops vinput restoring a minimised background game.
+- A game whose window procedure has never seen `WM_ACTIVATEAPP(TRUE)` (started in the background) is sent the activation
+  messages a real switch would send (`WM_NCACTIVATE`, `WM_ACTIVATEAPP`, `WM_ACTIVATE`, `WM_SETFOCUS`), posted to its own
+  window, while `fakefocus` and `blockfocus` are on and it is not really foreground. Games that keep their own "active"
+  flag (Fallout 1/2 and other DirectDraw-era titles) otherwise ignore all input. The real foreground does not change;
+  `status` shows `app_active` and the `act_synth` counter. `config autoactivate=false` turns it off.
 
 ## Capture
 
