@@ -697,6 +697,9 @@ HRESULT DIGetDeviceStateImpl(PFN_DIGDS orig, void* self, DWORD cb, LPVOID data) 
         m->lX += g_diDX.exchange(0); m->lY += g_diDY.exchange(0); m->lZ += g_diDZ.exchange(0);
         if (g_vk[VK_LBUTTON]) m->rgbButtons[0] = 0x80; if (g_vk[VK_RBUTTON]) m->rgbButtons[1] = 0x80;
         if (g_vk[VK_MBUTTON]) m->rgbButtons[2] = 0x80; if (g_vk[VK_XBUTTON1]) m->rgbButtons[3] = 0x80;
+        // trace: what the game was actually handed for each mouse button (shows in `trace key lbutton`)
+        g_keyTrace[VK_LBUTTON].di_state.record(m->rgbButtons[0]); g_keyTrace[VK_RBUTTON].di_state.record(m->rgbButtons[1]);
+        g_keyTrace[VK_MBUTTON].di_state.record(m->rgbButtons[2]);
     }
     return hr;
 }

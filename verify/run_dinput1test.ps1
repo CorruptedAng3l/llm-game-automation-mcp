@@ -32,6 +32,8 @@ try {
     $txt = Get-Content -LiteralPath $tl -Raw
     Require ($txt -match 'KEY dik=0x1E down' -and $txt -match 'KEY dik=0x1E up') "$($c.n) virtual key A reaches a DirectInput 1-7 keyboard (down and up)"
     Require ($txt -match 'MOUSE b0 down' -and $txt -match 'MOUSE b0 up') "$($c.n) virtual left button reaches a DirectInput 1-7 mouse"
+    $tr = & $V --pid $p.Id trace key lbutton | ConvertFrom-Json
+    Require ($tr.ok -and $tr.channels.DirectInputState.down_reads -gt 0) "$($c.n) trace key lbutton shows the DirectInput mouse reads ($($tr.channels.DirectInputState.down_reads) down reads)"
     Stop-Process -Id $p.Id -Force; Start-Sleep -Milliseconds 200
   }
 } finally { foreach ($p in $owned) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force } } }
