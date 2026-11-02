@@ -971,8 +971,31 @@ HRESULT STDMETHODCALLTYPE h_ResizeBuffers1(IDXGISwapChain3* sc, UINT n, UINT w, 
     return o_ResizeBuffers1(sc, n, w, h, f, fl, mask, q);
 }
 
+// DDraw wrappers (DDrawCompat, dgVoodoo, ...) render into their OWN top-level "presentation" window and leave the game's
+// window empty, so PrintWindow(game) is black (or a stale frame) while the screen shows the game. Find that window (same
+// process, visible, largest) so capture can use it; it wins unless it prints one flat colour and the game window does not.
+struct OverlaySearch { DWORD pid; HWND best; long long area; };
+BOOL CALLBACK OverlayEnumProc(HWND h, LPARAM lp) {
+    OverlaySearch* o = (OverlaySearch*)lp;
+    DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+    if (pid != o->pid || !IsWindowVisible(h) || h == g_hwnd) return TRUE;
+    wchar_t cls[96] = {}; GetClassNameW(h, cls, 96);
+    if (wcsstr(cls, L"PresentationWindow") == nullptr) return TRUE;
+    RECT rc; if (!GetClientRect(h, &rc)) return TRUE;
+    long long a = (long long)rc.right * rc.bottom;
+    if (a > o->area) { o->area = a; o->best = h; }
+    return TRUE;
+}
+// a window that printed nothing is one flat colour (black for a never-painted DDraw window, white for an unpainted one)
+bool PixelsUniform(const std::vector<BYTE>& px) {
+    if (px.size() < 8) return true;
+    for (size_t i = 4; i + 3 < px.size(); i += 4) if (std::memcmp(&px[i], &px[0], 3) != 0) return false;
+    return true;
+}
+std::atomic<bool> g_capViaOverlay{false};
+std::atomic<HWND> g_overlayHint{nullptr};   // presentation window handle sent by the CLI with a capture request
 bool CaptureViaPrintWindow(std::string& err) {
-    g_capPix.clear(); g_capW = g_capH = 0;
+    g_capPix.clear(); g_capW = g_capH = 0; g_capViaOverlay = false;
     if (!g_hwnd) { err = "no window"; return false; }
     RECT rc; GetClientRect(g_hwnd, &rc);
     int w = rc.right, h = rc.bottom; if (w <= 0 || h <= 0) { err = "empty client rect"; return false; }
@@ -983,6 +1006,40 @@ bool CaptureViaPrintWindow(std::string& err) {
     BOOL ok = PrintWindow(g_hwnd, mdc, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
     if (ok) { g_capPix.assign((BYTE*)bits, (BYTE*)bits + (size_t)w * h * 4); for (size_t i = 3; i < g_capPix.size(); i += 4) g_capPix[i] = 255; g_capW = w; g_capH = h; }
     else err = "PrintWindow failed";
+    if (ok) {   // a wrapper's presentation window, when there is one, is what the screen shows: the game window may be blank OR a stale frame
+        OverlaySearch os{ GetCurrentProcessId(), nullptr, 0 };
+        // Walk the z-order with GetWindow instead of EnumWindows: DDraw wrappers hook EnumWindows (and may hide their own windows) in the game process
+        for (HWND w2 = GetTopWindow(nullptr); w2; w2 = GetWindow(w2, GW_HWNDNEXT)) OverlayEnumProc(w2, (LPARAM)&os);
+        if (!os.best) {   // DDrawCompat hides its presentation windows from user32 enumeration INSIDE the game process: the CLI looked it up from outside
+            HWND hint = g_overlayHint.load(); DWORD hp = 0; wchar_t hc[96] = {};
+            if (hint && IsWindow(hint) && GetWindowThreadProcessId(hint, &hp) && hp == os.pid && GetClassNameW(hint, hc, 96) && wcsstr(hc, L"PresentationWindow")) os.best = hint;
+        }
+        RECT oc{}; if (os.best) GetClientRect(os.best, &oc);
+        if (os.best && oc.right > 0 && oc.bottom > 0) {
+            BITMAPINFO bo = bi; bo.bmiHeader.biWidth = oc.right; bo.bmiHeader.biHeight = -oc.bottom;
+            void* obits = nullptr; HBITMAP obmp = CreateDIBSection(wdc, &bo, DIB_RGB_COLORS, &obits, nullptr, 0);
+            HDC odc = CreateCompatibleDC(wdc); HGDIOBJ oold = SelectObject(odc, obmp);
+            BOOL pwo = PrintWindow(os.best, odc, PW_CLIENTONLY);
+            if (pwo) {   // a GDI window answers WM_PRINTCLIENT; a layered/D3D presentation window only prints through DWM
+                GdiFlush(); std::vector<BYTE> chk((BYTE*)obits, (BYTE*)obits + (size_t)oc.right * oc.bottom * 4);
+                if (PixelsUniform(chk)) { pwo = PrintWindow(os.best, odc, PW_CLIENTONLY | PW_RENDERFULLCONTENT); }
+            }
+            if (pwo) {
+                // the wrapper scales the game surface to fit the presentation window, keeping the aspect ratio, centred
+                double sc = (std::min)((double)oc.right / w, (double)oc.bottom / h);
+                int cw = (int)(w * sc + 0.5), ch = (int)(h * sc + 0.5), cx = (oc.right - cw) / 2, cy = (oc.bottom - ch) / 2;
+                SetStretchBltMode(mdc, HALFTONE); SetBrushOrgEx(mdc, 0, 0, nullptr);
+                if (StretchBlt(mdc, 0, 0, w, h, odc, cx, cy, cw, ch, SRCCOPY)) {
+                    GdiFlush();   // the DIB section is read directly below: drain GDI batched drawing first
+                    std::vector<BYTE> shot((BYTE*)bits, (BYTE*)bits + (size_t)w * h * 4);
+                    for (size_t i = 3; i < shot.size(); i += 4) shot[i] = 255;
+                    // keep the game window's own print only when the presentation window printed a flat colour and it did not
+                    if (!PixelsUniform(shot) || PixelsUniform(g_capPix)) { g_capPix = std::move(shot); g_capViaOverlay = true; }
+                }
+            }
+            SelectObject(odc, oold); DeleteObject(obmp); DeleteDC(odc);
+        }
+    }
     SelectObject(mdc, old); DeleteObject(bmp); DeleteDC(mdc); ReleaseDC(g_hwnd, wdc);
     return ok != FALSE;
 }
@@ -1489,6 +1546,7 @@ std::string DoCapture(const JObj& j) {
     std::string method = JStr(j, "method", "auto");
     if (method == "native") method = "swapchain";
     if (method != "auto" && method != "swapchain" && method != "printwindow") return ErrJ("unknown capture method");
+    g_overlayHint = (HWND)(UINT_PTR)(unsigned long long)JNum(j, "overlay", 0);
     int timeout = (int)JNum(j, "timeout_ms", 3000);
     double requestedFrames = JNum(j, "after_frames", 0);
     if (timeout < 1 || timeout > 120000 || requestedFrames < 0 || requestedFrames > 3600 || requestedFrames != std::floor(requestedFrames)) return ErrJ("capture timeout/after-frames out of range");
@@ -1499,10 +1557,13 @@ std::string DoCapture(const JObj& j) {
     std::string used, err, path_ = "printwindow";
     bool got = false;
     DWORD capStart = GetTickCount();
+    // A game window that has never presented through a hooked swapchain (DDraw/GDI games, or DXGI loaded only by a wrapper) will
+    // not start now: do not burn the whole timeout before falling back to PrintWindow.
+    const int nativeWait = (C.present_ours == 0 && timeout > 300) ? 300 : timeout;
     auto native = [&]() -> bool {   // one request to whichever native frame hook fires next for our window
         ResetEvent(g_capEvent);
         g_capReq = 1;
-        bool fired = WaitForSingleObject(g_capEvent, timeout) == WAIT_OBJECT_0;
+        bool fired = WaitForSingleObject(g_capEvent, nativeWait) == WAIT_OBJECT_0;
         if (!fired) {
             LONG exp = 1;
             if (g_capReq.compare_exchange_strong(exp, 0)) { err = "no frame (Present / SwapBuffers / vkQueuePresentKHR) for the game window within timeout"; return false; }
@@ -1531,7 +1592,7 @@ std::string DoCapture(const JObj& j) {
     }
     if (!got && (method == "auto" || method == "printwindow")) {
         std::string e2;
-        if (CaptureViaPrintWindow(e2)) { got = true; used = "printwindow"; path_ = "printwindow"; } else err += (err.empty() ? "" : "; ") + e2;
+        if (CaptureViaPrintWindow(e2)) { got = true; used = "printwindow"; path_ = g_capViaOverlay ? "printwindow_overlay" : "printwindow"; } else err += (err.empty() ? "" : "; ") + e2;
     }
     if (!got) return ErrJ(err);
     RECT rc{}; if (g_hwnd) GetClientRect(g_hwnd, &rc);

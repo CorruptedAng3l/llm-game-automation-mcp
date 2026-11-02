@@ -140,8 +140,27 @@ static std::string StampOwner(const std::string& line) {
     bool emptyObject = body != std::string::npos && line[body] == '}';
     return "{" + add + (emptyObject ? "" : ",") + line.substr(1);
 }
+// DDraw wrappers (DDrawCompat...) draw the game into their own "...PresentationWindow" and hide that window from
+// enumeration INSIDE the game process, so the injected DLL cannot find it. The CLI is outside: look it up here and hand
+// the handle to a capture request ("overlay"), the DLL verifies it (same process, class) before using it.
+struct OverlayFind { DWORD pid; HWND best; long long area; };
+static BOOL CALLBACK OverlayFindProc(HWND h, LPARAM lp) {
+    OverlayFind* o = (OverlayFind*)lp; DWORD p = 0; GetWindowThreadProcessId(h, &p);
+    if (p != o->pid || !IsWindowVisible(h)) return TRUE;
+    wchar_t cls[96] = {}; GetClassNameW(h, cls, 96);
+    if (!wcsstr(cls, L"PresentationWindow")) return TRUE;
+    RECT rc; if (!GetClientRect(h, &rc)) return TRUE;
+    long long a = (long long)rc.right * rc.bottom; if (a > o->area) { o->area = a; o->best = h; }
+    return TRUE;
+}
+static std::string StampOverlay(DWORD pid, const std::string& line) {
+    if (line.find("\"cmd\":\"capture\"") == std::string::npos || line.find("\"overlay\"") != std::string::npos || line.empty() || line[0] != '{') return line;
+    OverlayFind of{ pid, nullptr, 0 }; EnumWindows(OverlayFindProc, (LPARAM)&of);
+    if (!of.best) return line;
+    return "{\"overlay\":" + std::to_string((unsigned long long)(UINT_PTR)of.best) + "," + line.substr(1);
+}
 static bool Request(DWORD pid, const std::string& rawLine, std::string& resp, DWORD connectTimeout = 5000) {
-    std::string line = StampOwner(rawLine);
+    std::string line = StampOverlay(pid, StampOwner(rawLine));
     HANDLE h = OpenPipe(pid, connectTimeout);
     if (h == INVALID_HANDLE_VALUE) { resp = "{\"ok\":false,\"error\":\"cannot connect to \\\\\\\\.\\\\pipe\\\\vinput_" + std::to_string(pid) + " (not injected / process gone)\"}"; return false; }
     bool ok = PipeRequest(h, line, resp);

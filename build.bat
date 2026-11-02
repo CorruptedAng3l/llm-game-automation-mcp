@@ -77,6 +77,9 @@ cl %CF% /std:c++17 "%ROOT%test\vi_uitest.cpp" /Fe:%UU% /link /SUBSYSTEM:CONSOLE 
 copy /y %UU% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%UU% in use - not replaced
 cl %CF% /std:c++17 "%ROOT%test\vi_ncctest.cpp" /Fe:%UN% /link /SUBSYSTEM:CONSOLE || goto :afail
 copy /y %UN% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%UN% in use - not replaced
+if "%ARCH%"=="x64" (set OVT=vi_overlaytarget.exe) else (set OVT=vi_overlaytarget32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_overlaytarget.cpp" /Fe:%OVT% /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib || goto :afail
+copy /y %OVT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%OVT% in use - not replaced
 rem --- anti-cheat refusal test: a plain target + an EMPTY dummy DLL that only has an anti-cheat-like NAME ---
 if "%ARCH%"=="x64" (set ACT=vi_actarget.exe& set ACD=EasyAntiCheat_x64.dll) else (set ACT=vi_actarget32.exe& set ACD=BEClient.dll)
 cl %CF% /std:c++17 "%ROOT%test\vi_actarget.cpp" /Fe:%ACT% /link /SUBSYSTEM:WINDOWS || goto :afail
