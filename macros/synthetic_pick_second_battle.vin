@@ -1,0 +1,6 @@
+# Two identical BATTLE buttons: pick the right-hand one explicitly, then confirm with a pixel read is not needed -
+# the macro simply proves --nth works from a script. Fails (and stops) if BATTLE is not on screen.
+wait-text "MAIN MENU" --timeout 10000
+click-text BATTLE --nth 2
+sleep 200
+click-text "Load Game"

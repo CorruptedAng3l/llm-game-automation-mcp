@@ -1,0 +1,35 @@
+{
+  "name": "llm-game-automation-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that lets an LLM agent play single-player / offline Windows games through vinput: per-process background input and frame capture.",
+  "license": "MIT",
+  "author": "CorruptedAngel",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "llm-game-automation-mcp": "build/index.js"
+  },
+  "files": [
+    "build"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "win32"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node build/index.js",
+    "test": "node test/handshake.mjs",
+    "smoke": "node test/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3"
+  }
+}

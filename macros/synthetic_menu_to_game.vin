@@ -1,0 +1,8 @@
+# Synthetic test target (test\vi_uitarget.cpp): main menu -> PLAY -> Select screen -> SOLO -> game.
+# Run:  vinput --pid N script macros\synthetic_menu_to_game.vin
+assert-text "MAIN MENU" --timeout 10000
+click-text PLAY
+wait-text "Select a game type" --timeout 8000
+click-text SOLO
+wait-text "Game started" --timeout 8000
+echo reached the game screen

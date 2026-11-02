@@ -1,0 +1,24 @@
+# build outputs
+/build/
+/dist/
+/captures/
+*.obj
+*.ilk
+*.exp
+*.iobj
+*.ipdb
+*.pdb
+*.lib
+*.dll
+*.exe
+
+# MCP server
+/mcp/node_modules/
+/mcp/build/
+
+# local scratch / editor
+_scratch*/
+*.log
+.vs/
+.vscode/
+*.user
