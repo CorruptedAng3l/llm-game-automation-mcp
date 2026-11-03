@@ -28,10 +28,11 @@ function LastCursor($t){
   if(-not $rows){ return $null }
   $null=$rows[-1] -match ' CURSOR (-?\d+) (-?\d+)$'; return "$($Matches[1]),$($Matches[2])"
 }
+function Run-Case([string]$exe) {
 $env:VINPUT_TEST_HOOKS='1'
 $t=$null
 try {
-  $t=Start-UiTarget $Out 'owner' @('640','360') 'vi_testinput.exe'
+  $t=Start-UiTarget $Out 'owner' @('640','360') $exe
   $pid_=$t.Pid
   $st=Vi $pid_ @('status')
   $h=[IntPtr][Convert]::ToInt64($st.hwnd,16)
@@ -97,8 +98,10 @@ try {
   Require ((Get-LogText $t) -notmatch 'WM_LBUTTONDOWN 333 222') 'back in the background: real click dropped again'
   Require ($s6.owner_active -eq $false -and $s6.cursor_effective -eq 'virtual') 'back in the background: virtual cursor, owner inactive'
   Write-Output "RESULT pass=$($script:pass) fail=$($script:fail)"; if($script:fail){ throw "owner input test: $($script:fail) failed" }
-  "PASS owner input: pass-through in the real foreground, virtual cursor stands down until the next agent command, guard does not hand back, background isolation unchanged. NOT MEASURED: the true OS foreground check (fake predicate)."
+  "PASS owner input ($exe): pass-through in the real foreground, virtual cursor stands down until the next agent command, guard does not hand back, background isolation unchanged. NOT MEASURED: the true OS foreground check (fake predicate)."
 } finally {
   Remove-Item Env:VINPUT_TEST_HOOKS -ErrorAction SilentlyContinue
   Stop-UiTarget $t
 }
+}
+foreach ($exe in @('vi_testinput.exe','vi_testinput32.exe')) { Write-Output "=== $exe"; $script:pass=0; $script:fail=0; Run-Case $exe }

@@ -7,9 +7,10 @@ $script:pass=0;$script:fail=0
 function Require($condition,[string]$description){ if($condition){$script:pass++;Write-Output "PASS $description"}else{$script:fail++;Write-Output "FAIL $description"} }
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out=(Resolve-Path $Out).Path
+function Run-Case([string]$exe) {
 $t=$null
 try {
-  $t=Start-UiTarget $Out 'chord' @('640','360') 'vi_testinput.exe'
+  $t=Start-UiTarget $Out 'chord' @('640','360') $exe
   function Chars([string]$keys){
     $before=@(Get-Content -LiteralPath $t.Log | Where-Object { $_ -match 'WM_CHAR' }).Count
     $r=Vi $t.Pid @('key',$keys)
@@ -30,5 +31,7 @@ try {
   Require (-not ($gk.virtual_down | Where-Object { $_ -in 16,17,18,160,161,162,163 })) 'no virtual modifier is left held'
   Write-Output "RESULT pass=$($script:pass) fail=$($script:fail)"
   if($script:fail){ throw "chord test: $($script:fail) failed" }
-  'PASS chords: Ctrl/Shift modifiers reach TranslateMessage-derived WM_CHAR. NOT MEASURED here: Unity/ColossalFramework text fields (needs a live check).'
+  "PASS chords ($exe): Ctrl/Shift modifiers reach TranslateMessage-derived WM_CHAR. NOT MEASURED here: Unity/ColossalFramework text fields (needs a live check)."
 } finally { Stop-UiTarget $t }
+}
+foreach ($exe in @('vi_testinput.exe','vi_testinput32.exe')) { Write-Output "=== $exe"; $script:pass=0; $script:fail=0; Run-Case $exe }

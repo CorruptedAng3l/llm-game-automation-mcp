@@ -11,7 +11,9 @@ are the MCP tools in [`mcp/README.md`](../mcp/README.md).
   fail instead, and some engines then retry every frame and never present a frame (GTA Trilogy DE deadlocked this way).
   `launch` and `capture` say so (`fullscreen_refusals`, a warning naming the fix); `log` with `contains:"fullscreen"`
   shows the requests; `status` `fullscreen` shows the policy. A saved fullscreen setting usually overrides
-  command-line switches, so fix the INI, not just `args`.
+  command-line switches, so fix the INI, not just `args`. `launch` compares the window it got with a size given in `args`
+  (`-screen-width/-screen-height`, `-width/-height`, `-ResX/-ResY`, `-w N -h N`, `-rWxH`) and warns with
+  `requested_size_ignored` when they differ: set the size in the game's own options, then re-read `status` `client`.
 - **A window that drifts in size** (a game that re-fits itself) moves every coordinate. Pin the size in the game's
   config and re-read `status` `client` after launch.
 - **Background launch plus autoactivate.** `launch` keeps the real foreground where it was. A game started in the
@@ -57,8 +59,9 @@ are the MCP tools in [`mcp/README.md`](../mcp/README.md).
 - **Drag-and-drop** (inventory, furniture, map items): `drag` presses, holds `hold_start_ms` (150), moves in `steps`
   over `ms`, dwells `hold_end_ms` (250) at the destination and then releases. A plain press-move-release is dropped by
   many games; raise `hold_end_ms` to 500-900 for placement. `drag placement:true` runs the whole drag inside the game
-  and waits for the game to read each step (games that read `GetCursorPos` and DirectInput buttons); with an older DLL
-  it falls back to the normal sequence and says so (`placement_fallback`). Never use `key_down`/`key_up` for mouse drags unless you
+  and waits for the game to read each step (games that read `GetCursorPos` and DirectInput buttons); with an older DLL,
+  or a game that reads buttons through window messages (Unity: `button_down_not_observed`), it falls back to the normal
+  sequence and says so (`placement_fallback`). In Unity games plain `drag` is the right tool. Never use `key_down`/`key_up` for mouse drags unless you
   need to look mid-drag (`key_down lbutton`, `move`, `capture`, `key_up lbutton` also works).
 - **Edge scrolling.** Many games pan the view while the cursor rests at the window edge (The Sims, strategy games), so
   items land in the wrong place. `click`, `move`, `drag` and `scroll` warn when a position is within `edge_margin` px
@@ -81,6 +84,55 @@ are the MCP tools in [`mcp/README.md`](../mcp/README.md).
   proportional stick input on games that read XInput. Without those, use taps of 100-150 ms and look in between.
 - Each decision costs a round trip (a capture-view-decide loop took 5 s median on a real run, about 75 m of travel in a
   car). Prefer slow, safe moves in real-time games, and use `capture_after` to cut the loop.
+
+## When the user is at the keyboard
+
+vinput keeps the user's real mouse and keyboard out of a background game. When the user activates the game window
+themselves, their real input passes through and the cursor the game reads is the real one until your next input
+command; `status` shows `owner_active` (with a warning) and `cursor_effective`. Treat `owner_active:true` as "the user
+is playing right now": look before you act, and do not fight them for the mouse.
+
+## Text fields and chords
+
+`key ctrl+a`, `ctrl+z`, `shift+a` and other chords reach the game with their modifier (the character message is built
+from vinput's own key state, not the thread's real one). To replace a text field's content: click it, `key ctrl+a`,
+then `type_text`. Check the field with a zoomed `capture` before you confirm.
+
+## City-builder opening checklist
+
+A human player reached about 90 residents within a few in-game days, even with a negative budget, because they used the
+information the game provides. An agent that guessed from the 3D view played badly. Do it in this order:
+
+1. Connect the town to the highway with an interchange or on-ramp: one road in and one road out.
+2. Run power lines around the zoned area. A power plant only serves the buildings it is connected to.
+3. Power the water pump and the sewage drain as well.
+4. Lay water pipes under every zoned street.
+5. Zone along the roads.
+
+Then read the game, and read it again after every build step:
+
+- Open the Info views panel and read the numbers: electricity consumption against production, water and sewage
+  capacity against use.
+- Open the Economy > Budget panel too.
+- Fix whatever is red before you build more.
+
+The general lesson for any game: read the game's own info and overlay panels before acting, and again after each step,
+instead of guessing from the picture. `capture` plus `wait_text` on those panels is cheaper than a wrong build.
+
+## Cities: Skylines (Unity) notes
+
+- Run it windowed (Options > Graphics > Display Mode > Windowed, then Apply): it rewrites its saved display mode on
+  start and ignores `-screen-fullscreen 0 -screen-width/-screen-height`. `launch` warns when the window size differs.
+- Roads are click-click, not a drag: click the start, click each further point, then click the last point again (or press
+  Escape) to finish. Plain `drag` works for zoning brushes and middle-button camera tilt; `drag placement:true` falls back
+  to it by itself.
+- Connect the road network to the highway first, then power, water and sewage (see the checklist above). Snap a pipe or
+  power-line end onto the building or the existing network and check the Info view afterwards: an unconnected end looks
+  fine in the 3D view and does nothing.
+- Read the Info views and the Economy > Budget panel after every build step (red numbers first).
+- Dropdown lists: click the dropdown, then click the item. In the field test the item click once closed the list without
+  selecting (Display Mode, fullscreen session, not reproduced since in windowed mode). If an item will not take a click,
+  use the fallback: `scroll` one notch over the CLOSED dropdown to step its value, then press the dialog's Apply.
 
 ## When something does not work
 
