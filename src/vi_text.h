@@ -31,6 +31,7 @@ struct Hit {
     Box box;
     double score = 1.0;                  // 1.0 = literal match, <1 = fuzzy (1 - edits / query length)
     std::wstring line_text;
+    std::wstring query;                  // populated by multi-query CLI search; not OCR confidence
 };
 struct Options { bool exact = false; int fuzzy = 0; };
 

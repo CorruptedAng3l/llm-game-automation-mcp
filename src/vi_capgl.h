@@ -54,6 +54,7 @@ void CaptureGL(HDC dc, HWND w) {
     RECT rc{}; GetClientRect(w, &rc);
     int cw = rc.right, ch = rc.bottom;
     if (cw <= 0 || ch <= 0) { g_capErr = "gl: empty client rect"; return; }
+    if(!CaptureDimensionsAllowed(cw,ch))return;
     const GLenum READ_FB_BINDING = 0x8CAA, READ_FB = 0x8CA8, PACK_BUF_BINDING = 0x88ED, PACK_BUF = 0x88EB;
     const GLenum PACK_ROW_LENGTH = 0x0D02, PACK_SKIP_ROWS = 0x0D03, PACK_SKIP_PIXELS = 0x0D04, PACK_SWAP = 0x0D00, PACK_LSB = 0x0D01, PACK_ALIGN = 0x0D05;
     const GLenum BGRA = 0x80E1;

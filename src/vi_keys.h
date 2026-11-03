@@ -222,6 +222,8 @@ inline const std::vector<KeyName>& Names() {
             {"pagedown", 0x22}, {"pgdn", 0x22}, {"capslock", 0x14},
             {"scrolllock", 0x91}, {"printscreen", 0x2C}, {"prtsc", 0x2C},
             {"win", 0x5B}, {"contextmenu", 0x5D},
+            {"num0", 0x60}, {"num1", 0x61}, {"num2", 0x62}, {"num3", 0x63}, {"num4", 0x64},
+            {"num5", 0x65}, {"num6", 0x66}, {"num7", 0x67}, {"num8", 0x68}, {"num9", 0x69},
             {"num+", 0x6B}, {"numplus", 0x6B}, {"numpad+", 0x6B}, {"numpadadd", 0x6B},
             {"num-", 0x6D}, {"numminus", 0x6D}, {"numpad-", 0x6D}, {"numpadsubtract", 0x6D},
             {"num*", 0x6A}, {"nummultiply", 0x6A}, {"numpad*", 0x6A}, {"numpadmultiply", 0x6A},

@@ -2,9 +2,9 @@
 //
 // vulkan-1.dll is never loaded by vinput and never linked; hooks go in only once the game has it loaded.
 // Hooked loader exports (inline): vkCreateDevice, vkDestroyDevice, vkGetDeviceQueue, vkGetDeviceQueue2,
-// vkCreateSwapchainKHR, vkDestroySwapchainKHR, vkQueuePresentKHR, vkGetDeviceProcAddr. The vkGetDeviceProcAddr
-// hook hands out our wrappers for the device-level ones, so games that resolve through it (volk-style) are
-// covered too. Every wrapper calls the loader trampoline, which dispatches through the handle.
+// vkCreateSwapchainKHR, vkDestroySwapchainKHR, vkQueuePresentKHR, vkGetDeviceProcAddr, vkGetInstanceProcAddr.
+// Both proc-address routes return existing wrappers only for commands the real loader exposes in that scope.
+// Every wrapper calls a captured loader trampoline, never an already-detoured export entry.
 //
 // LIMIT (by design, see README): the device, its queues and the swapchain must be CREATED AFTER injection
 // (we need the physical device, the queue family and the swapchain format/extent/images, and we add
@@ -25,7 +25,22 @@ PFN_vkCreateSwapchainKHR o_vkCreateSwapchainKHR = nullptr;
 PFN_vkDestroySwapchainKHR o_vkDestroySwapchainKHR = nullptr;
 PFN_vkQueuePresentKHR o_vkQueuePresentKHR = nullptr;
 PFN_vkGetDeviceProcAddr o_vkGetDeviceProcAddr = nullptr;
+PFN_vkGetInstanceProcAddr o_vkGetInstanceProcAddr = nullptr;
 std::atomic<bool> g_vkHooked{false};
+std::atomic<HMODULE> g_vkModule{nullptr}, g_vkLoaderReference{nullptr};
+// DXVK can destroy its probe device and unload/reload the loader at the same address.
+// Installed detours and captured trampolines require that exact module to remain mapped.
+// Acquire one counted reference on a normal Vulkan call, never in the DLL notification
+// callback. There is no hook-removal/detach API: this reference lives with those hooks,
+// and process teardown reclaims it. Do not FreeLibrary it from DllMain; do not PIN it.
+void VkRetainLoader() {
+    if (g_vkLoaderReference.load(std::memory_order_acquire)) return;
+    HMODULE module = g_vkModule.load(std::memory_order_acquire), held = nullptr;
+    if (!module || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)module, &held)) return;
+    HMODULE empty = nullptr;
+    if (!g_vkLoaderReference.compare_exchange_strong(empty, held, std::memory_order_release, std::memory_order_relaxed)) FreeLibrary(held);
+    else Log("vk: retained loader module %p while hooks are installed", held);
+}
 std::atomic<bool> g_vkEnabled{true};   // config vk=off: hooks stay pass-through, no capture / no usage change
 
 struct VkLoaderFns {
@@ -51,6 +66,7 @@ std::map<VkQueue, std::pair<VkDevice, uint32_t>> g_vkQueues;
 std::map<uint64_t, VkScInfo> g_vkScs;
 std::map<uint64_t, HWND> g_vkSurfaces;   // VkSurfaceKHR -> window (vkCreateWin32SurfaceKHR)
 std::atomic<long> g_vkUsageAdded{0}, g_vkPresents{0}, g_vkPresentsOther{0};
+std::atomic<long> g_vkUsageRetries{0},g_vkCreateErrorsPropagated{0};std::atomic<VkResult> g_vkCreateFirstResult{VK_SUCCESS},g_vkCreateFinalResult{VK_SUCCESS};
 PFN_vkCreateWin32SurfaceKHR o_vkCreateWin32SurfaceKHR = nullptr;
 struct VkCap {
     VkDevice dev = nullptr; uint32_t family = 0;
@@ -122,6 +138,7 @@ bool BeginVk(VkQueue q, const VkPresentInfoKHR* pi, VkPresentInfoKHR* out, VkSem
     auto si = g_vkScs.find(VkKey(pi->pSwapchains[0]));
     if (si == g_vkScs.end()) { err = "vk: swapchain was created before vinput was injected (resize the window to make the game recreate it)"; return false; }
     VkScInfo& sc = si->second;
+    if(!CaptureDimensionsAllowed(sc.ext.width,sc.ext.height)){err=g_capErr;return false;}
     uint32_t idx = pi->pImageIndices[0];
     if (idx >= sc.imgs.size()) { err = "vk: image index out of range"; return false; }
     if (!sc.transferSrc) { err = "vk: swapchain images lack TRANSFER_SRC usage (driver refused to add it)"; return false; }
@@ -241,6 +258,7 @@ bool FinishVk(DWORD timeoutMs, std::string& err) {
 // ---- hooks ----
 thread_local int t_vkIn = 0;
 VkResult VKAPI_CALL h_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo* ci, const VkAllocationCallbacks* a, VkDevice* out) {
+    VkRetainLoader();
     VkResult r = o_vkCreateDevice(pd, ci, a, out);
     if (r == VK_SUCCESS && out && *out) { std::lock_guard<std::mutex> lk(g_vkMx); g_vkDevs[*out] = pd; Log("vk: device %p created (physical %p)", *out, pd); }
     return r;
@@ -271,8 +289,15 @@ VkResult VKAPI_CALL h_vkCreateSwapchainKHR(VkDevice d, const VkSwapchainCreateIn
     bool added = !(c.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     c.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     VkResult r = o_vkCreateSwapchainKHR(d, &c, a, sc);
+    g_vkCreateFirstResult=r;
     bool transferSrc = r == VK_SUCCESS;
-    if (r != VK_SUCCESS && added) { r = o_vkCreateSwapchainKHR(d, ci, a, sc); transferSrc = false; Log("vk: swapchain refused TRANSFER_SRC usage; created as the game asked"); }
+    // A non-null oldSwapchain is retired by the FIRST creation call, including
+    // failure. Retrying it violates Vulkan's non-retired-handle requirement.
+    // Resize/device/surface errors also are not evidence of unsupported usage.
+    const bool usageFailure=r==VK_ERROR_FORMAT_NOT_SUPPORTED||r==VK_ERROR_FEATURE_NOT_PRESENT||r==VK_ERROR_INITIALIZATION_FAILED;
+    if(added&&usageFailure&&ci->oldSwapchain==VK_NULL_HANDLE){++g_vkUsageRetries;r=o_vkCreateSwapchainKHR(d,ci,a,sc);transferSrc=false;Log("vk: initial usage retry result=%d (original game usage)",(int)r);}
+    else if(added&&r!=VK_SUCCESS){++g_vkCreateErrorsPropagated;Log("vk: create error=%d propagated without usage retry; old_swapchain=%llx",(int)r,(unsigned long long)VkKey(ci->oldSwapchain));}
+    g_vkCreateFinalResult=r;
     if (r == VK_SUCCESS && sc && VkResolve()) {
         if (added && transferSrc) g_vkUsageAdded++;
         VkScInfo s; s.dev = d; s.fmt = ci->imageFormat; s.ext = ci->imageExtent; s.layers = ci->imageArrayLayers; s.transferSrc = transferSrc;
@@ -325,9 +350,28 @@ VkResult VKAPI_CALL h_vkCreateWin32SurfaceKHR(VkInstance inst, const VkWin32Surf
     return r;
 }
 PFN_vkVoidFunction VKAPI_CALL h_vkGetDeviceProcAddr(VkDevice d, const char* n) {
+    VkRetainLoader();
     PFN_vkVoidFunction f = o_vkGetDeviceProcAddr(d, n);
     if (!f || !n) return f;
     // only hand out a wrapper whose loader trampoline we actually hold
+    if (!strcmp(n, "vkQueuePresentKHR") && o_vkQueuePresentKHR) return (PFN_vkVoidFunction)&h_vkQueuePresentKHR;
+    if (!strcmp(n, "vkCreateSwapchainKHR") && o_vkCreateSwapchainKHR) return (PFN_vkVoidFunction)&h_vkCreateSwapchainKHR;
+    if (!strcmp(n, "vkDestroySwapchainKHR") && o_vkDestroySwapchainKHR) return (PFN_vkVoidFunction)&h_vkDestroySwapchainKHR;
+    if (!strcmp(n, "vkGetDeviceQueue") && o_vkGetDeviceQueue) return (PFN_vkVoidFunction)&h_vkGetDeviceQueue;
+    if (!strcmp(n, "vkGetDeviceQueue2") && o_vkGetDeviceQueue2) return (PFN_vkVoidFunction)&h_vkGetDeviceQueue2;
+    if (!strcmp(n, "vkDestroyDevice") && o_vkDestroyDevice) return (PFN_vkVoidFunction)&h_vkDestroyDevice;
+    return f;
+}
+PFN_vkVoidFunction VKAPI_CALL h_vkGetInstanceProcAddr(VkInstance instance, const char* n) {
+    VkRetainLoader();
+    // Instance/global/extension availability belongs to the loader. In particular,
+    // never manufacture an instance command when queried with a null instance.
+    PFN_vkVoidFunction f = o_vkGetInstanceProcAddr(instance, n);
+    if (!f || !n) return f;
+    if (!strcmp(n, "vkGetInstanceProcAddr") && o_vkGetInstanceProcAddr) return (PFN_vkVoidFunction)&h_vkGetInstanceProcAddr;
+    if (!strcmp(n, "vkGetDeviceProcAddr") && o_vkGetDeviceProcAddr) return (PFN_vkVoidFunction)&h_vkGetDeviceProcAddr;
+    if (!strcmp(n, "vkCreateDevice") && o_vkCreateDevice) return (PFN_vkVoidFunction)&h_vkCreateDevice;
+    if (!strcmp(n, "vkCreateWin32SurfaceKHR") && o_vkCreateWin32SurfaceKHR) return (PFN_vkVoidFunction)&h_vkCreateWin32SurfaceKHR;
     if (!strcmp(n, "vkQueuePresentKHR") && o_vkQueuePresentKHR) return (PFN_vkVoidFunction)&h_vkQueuePresentKHR;
     if (!strcmp(n, "vkCreateSwapchainKHR") && o_vkCreateSwapchainKHR) return (PFN_vkVoidFunction)&h_vkCreateSwapchainKHR;
     if (!strcmp(n, "vkDestroySwapchainKHR") && o_vkDestroySwapchainKHR) return (PFN_vkVoidFunction)&h_vkDestroySwapchainKHR;
@@ -342,6 +386,7 @@ void TryHookVk(HMODULE h = nullptr) {
     if (g_vkHooked) return;
     if (!h) h = GetModuleHandleW(L"vulkan-1.dll"); if (!h) return;
     if (g_vkHooked.exchange(true)) return;
+    g_vkModule.store(h, std::memory_order_release);
     HookAddr("vkCreateDevice", (void*)GetProcAddress(h, "vkCreateDevice"), (void*)&h_vkCreateDevice, (void**)&o_vkCreateDevice);
     HookAddr("vkDestroyDevice", (void*)GetProcAddress(h, "vkDestroyDevice"), (void*)&h_vkDestroyDevice, (void**)&o_vkDestroyDevice);
     HookAddr("vkGetDeviceQueue", (void*)GetProcAddress(h, "vkGetDeviceQueue"), (void*)&h_vkGetDeviceQueue, (void**)&o_vkGetDeviceQueue);
@@ -351,5 +396,6 @@ void TryHookVk(HMODULE h = nullptr) {
     HookAddr("vkQueuePresentKHR", (void*)GetProcAddress(h, "vkQueuePresentKHR"), (void*)&h_vkQueuePresentKHR, (void**)&o_vkQueuePresentKHR);
     HookAddr("vkGetDeviceProcAddr", (void*)GetProcAddress(h, "vkGetDeviceProcAddr"), (void*)&h_vkGetDeviceProcAddr, (void**)&o_vkGetDeviceProcAddr);
     HookAddr("vkCreateWin32SurfaceKHR", (void*)GetProcAddress(h, "vkCreateWin32SurfaceKHR"), (void*)&h_vkCreateWin32SurfaceKHR, (void**)&o_vkCreateWin32SurfaceKHR);
+    HookAddr("vkGetInstanceProcAddr", (void*)GetProcAddress(h, "vkGetInstanceProcAddr"), (void*)&h_vkGetInstanceProcAddr, (void**)&o_vkGetInstanceProcAddr);
     Log("vulkan hooks installed");
 }

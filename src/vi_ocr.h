@@ -14,6 +14,55 @@
 #pragma comment(lib, "windowsapp.lib")
 
 namespace vi_ocr {
+// All preprocessing preserves the source pixel grid; recognition divides any upscale back out.
+// Contrast uses 1/99 percentiles so a stray bright HUD pixel does not dominate a dim label.
+inline bool Preprocess(const vi_vision::Image& src, const std::string& mode, vi_vision::Image& dst, std::string& error) {
+    if (!vi_vision::Validate(src, error)) return false;
+    if (mode == "none") { dst = src; return true; }
+    if (mode != "gray" && mode != "contrast" && mode != "threshold" && mode != "invert") {
+        error = "--preprocess must be none, gray, contrast, threshold, invert or auto"; return false;
+    }
+    dst = src;
+    size_t histogram[256] = {}, total = static_cast<size_t>(src.w) * src.h;
+    for (size_t i = 0; i < total; ++i) {
+        const size_t p = i * 4;
+        const unsigned y = (29u * src.pixels[p] + 150u * src.pixels[p + 1] + 77u * src.pixels[p + 2] + 128u) >> 8;
+        dst.pixels[p] = dst.pixels[p + 1] = dst.pixels[p + 2] = static_cast<uint8_t>(y); dst.pixels[p + 3] = 255;
+        ++histogram[y];
+    }
+    if (mode == "gray") return true;
+    int low = 0, high = 255; size_t count = 0;
+    for (int i = 0; i < 256; ++i) { count += histogram[i]; if (count > total / 100) { low = i; break; } }
+    count = 0;
+    for (int i = 255; i >= 0; --i) { count += histogram[i]; if (count > total / 100) { high = i; break; } }
+    if (high <= low) {
+        for (int i = 0; i < 256; ++i) if (histogram[i]) { low = i; break; }
+        for (int i = 255; i >= 0; --i) if (histogram[i]) { high = i; break; }
+    }
+    // Otsu's split chooses a threshold without assuming a light or dark theme.
+    int threshold = low; double sum = 0, sumLow = 0, best = -1; size_t nLow = 0;
+    if (mode == "threshold") {
+        for (int i = 0; i < 256; ++i) sum += static_cast<double>(i) * histogram[i];
+        for (int i = 0; i < 255; ++i) {
+            nLow += histogram[i]; sumLow += static_cast<double>(i) * histogram[i];
+            if (!nLow || nLow == total) continue;
+            const double delta = sumLow / nLow - (sum - sumLow) / (total - nLow);
+            const double variance = static_cast<double>(nLow) * (total - nLow) * delta * delta;
+            if (variance > best) { best = variance; threshold = i; }
+        }
+    }
+    size_t dark = 0; for (int i = 0; i <= threshold; ++i) dark += histogram[i];
+    for (size_t i = 0; i < total; ++i) {
+        const size_t p = i * 4; int v = dst.pixels[p];
+        if (mode == "threshold") { v = v > threshold ? 255 : 0; if (dark > total / 2) v = 255 - v; }
+        else {
+            if (high > low) v = (std::clamp)((v - low) * 255 / (high - low), 0, 255);
+            if (mode == "invert") v = 255 - v;
+        }
+        dst.pixels[p] = dst.pixels[p + 1] = dst.pixels[p + 2] = static_cast<uint8_t>(v);
+    }
+    return true;
+}
 inline std::string Narrow(const winrt::hstring& h) {
     std::wstring w(h.c_str(), h.size());
     if (w.empty()) return {};
@@ -63,9 +112,12 @@ inline bool Recognize(const vi_vision::Image& image, double scale, const std::st
         }
         if (!engine) { error = "no OCR engine for the requested language (install an OCR language pack)"; return false; }
         usedLanguage = Narrow(engine.RecognizerLanguage().LanguageTag());
-        const vi_vision::Image scaled = Upscale(image, scale);
         const auto maxDimension = static_cast<int>(wmo::OcrEngine::MaxImageDimension());
-        if (scaled.w > maxDimension || scaled.h > maxDimension) { error = "image exceeds OcrEngine.MaxImageDimension (" + std::to_string(maxDimension) + ")"; return false; }
+        // Check BEFORE allocating a scaled bitmap (a 4K frame at 5x would otherwise allocate ~800 MB).
+        if (!(scale >= 1 && scale <= 5) || image.w <= 0 || image.h <= 0 || image.w * scale > maxDimension || image.h * scale > maxDimension) {
+            error = "image exceeds OcrEngine.MaxImageDimension (" + std::to_string(maxDimension) + "); use --region or tiled text search"; return false;
+        }
+        const vi_vision::Image scaled = Upscale(image, scale);
         wss::DataWriter writer;
         writer.WriteBytes(winrt::array_view<const uint8_t>(scaled.pixels.data(), scaled.pixels.data() + scaled.pixels.size()));
         wgi::SoftwareBitmap bitmap(wgi::BitmapPixelFormat::Bgra8, scaled.w, scaled.h, wgi::BitmapAlphaMode::Ignore);

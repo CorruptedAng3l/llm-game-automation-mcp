@@ -49,9 +49,38 @@ rem --- tests: positive-control target (both arches) and a compiled-in host DLL 
 if "%ARCH%"=="x64" (set TT=vi_testinput.exe& set CI=compilein_test64.dll) else (set TT=vi_testinput32.exe& set CI=compilein_test32.dll)
 cl %CF% /std:c++17 "%ROOT%test\vi_testinput.cpp" /Fe:%TT% /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib dinput8.lib dxguid.lib || goto :afail
 copy /y %TT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%TT% in use - not replaced
+if "%ARCH%"=="x64" (set DL=vi_dinput1test.exe& set DF=vi_dinputlegacy_focus.exe) else (set DL=vi_dinput1test32.exe& set DF=vi_dinputlegacy_focus32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_dinput1test.cpp" /Fe:%DL% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %DL% "%ROOT%dist\" >nul || goto :afail
+cl %CF% /std:c++17 "%ROOT%test\vi_dinputlegacy_focus.cpp" /Fe:%DF% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %DF% "%ROOT%dist\" >nul || goto :afail
+if "%ARCH%"=="x64" (set FS=vi_fullscreen_retry.exe) else (set FS=vi_fullscreen_retry32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_fullscreen_retry.cpp" /Fe:%FS% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %FS% "%ROOT%dist\" >nul || goto :afail
+if "%ARCH%"=="x64" (set RW=vi_rawonly.exe) else (set RW=vi_rawonly32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_rawonly.cpp" /Fe:%RW% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %RW% "%ROOT%dist\" >nul || goto :afail
 if "%ARCH%"=="x64" (set CP=vi_channelprobe.exe) else (set CP=vi_channelprobe32.exe)
 cl %CF% /std:c++17 "%ROOT%test\vi_channelprobe.cpp" /Fe:%CP% /link /SUBSYSTEM:WINDOWS || goto :afail
 copy /y %CP% "%ROOT%dist\" >nul || goto :afail
+if "%ARCH%"=="x64" (set FP=vi_focusprobe.exe) else (set FP=vi_focusprobe32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_focusprobe.cpp" /Fe:%FP% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %FP% "%ROOT%dist\" >nul || goto :afail
+if "%ARCH%"=="x64" (set WF=vi_windowfocus.exe) else (set WF=vi_windowfocus32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_windowfocus.cpp" /Fe:%WF% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %WF% "%ROOT%dist\" >nul || goto :afail
+if "%ARCH%"=="x64" (set DT=vi_dragtarget.exe) else (set DT=vi_dragtarget32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_dragtarget.cpp" /Fe:%DT% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %DT% "%ROOT%dist\" >nul || goto :afail
+if "%ARCH%"=="x64" (set UI=vi_userintenttest.exe) else (set UI=vi_userintenttest32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_userintenttest.cpp" /Fe:%UI% /link /SUBSYSTEM:CONSOLE || goto :afail
+copy /y %UI% "%ROOT%dist\" >nul || goto :afail
+if "%ARCH%"=="x64" (set KR=vi_keyready.exe) else (set KR=vi_keyready32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_keyready.cpp" /Fe:%KR% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %KR% "%ROOT%dist\" >nul || goto :afail
+if "%ARCH%"=="x64" (set KT=vi_keytransport.exe) else (set KT=vi_keytransport32.exe)
+cl %CF% /std:c++17 "%ROOT%test\vi_keytransport.cpp" /Fe:%KT% /link /SUBSYSTEM:WINDOWS || goto :afail
+copy /y %KT% "%ROOT%dist\" >nul || goto :afail
 rem --- native-capture synthetic targets (known frame-counter + colour-bar pattern, test\vi_pattern.h) ---
 if "%ARCH%"=="x64" (set D12=vi_d3d12test.exe) else (set D12=vi_d3d12test32.exe)
 cl %CF% /std:c++17 "%ROOT%test\vi_d3d12test.cpp" /Fe:%D12% /link /SUBSYSTEM:WINDOWS || goto :afail
@@ -67,9 +96,6 @@ copy /y %VKT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%VKT% in use - n
 if "%ARCH%"=="x64" (set XIT=vi_xinputtest.exe) else (set XIT=vi_xinputtest32.exe)
 cl %CF% /std:c++17 "%ROOT%test\vi_xinputtest.cpp" /Fe:%XIT% /link /SUBSYSTEM:WINDOWS || goto :afail
 copy /y %XIT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%XIT% in use - not replaced
-if "%ARCH%"=="x64" (set DI1=vi_dinput1test.exe) else (set DI1=vi_dinput1test32.exe)
-cl %CF% /std:c++17 "%ROOT%test\vi_dinput1test.cpp" /Fe:%DI1% /link /SUBSYSTEM:WINDOWS || goto :afail
-copy /y %DI1% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%DI1% in use - not replaced
 if "%ARCH%"=="x64" (set UT=vi_uitarget.exe& set UU=vi_uitest.exe& set UN=vi_ncctest.exe) else (set UT=vi_uitarget32.exe& set UU=vi_uitest32.exe& set UN=vi_ncctest32.exe)
 cl %CF% /std:c++17 "%ROOT%test\vi_uitarget.cpp" /Fe:%UT% /link /SUBSYSTEM:WINDOWS || goto :afail
 copy /y %UT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%UT% in use - not replaced
@@ -77,9 +103,7 @@ cl %CF% /std:c++17 "%ROOT%test\vi_uitest.cpp" /Fe:%UU% /link /SUBSYSTEM:CONSOLE 
 copy /y %UU% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%UU% in use - not replaced
 cl %CF% /std:c++17 "%ROOT%test\vi_ncctest.cpp" /Fe:%UN% /link /SUBSYSTEM:CONSOLE || goto :afail
 copy /y %UN% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%UN% in use - not replaced
-if "%ARCH%"=="x64" (set OVT=vi_overlaytarget.exe) else (set OVT=vi_overlaytarget32.exe)
-cl %CF% /std:c++17 "%ROOT%test\vi_overlaytarget.cpp" /Fe:%OVT% /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib || goto :afail
-copy /y %OVT% "%ROOT%dist\" >nul || echo [%ARCH%] WARNING: dist\%OVT% in use - not replaced
+rem vi_overlaytarget.cpp links MinHook: verify\run_overlaycapturetest.ps1 builds it against build\%ARCH%\vimh_*.obj
 rem --- anti-cheat refusal test: a plain target + an EMPTY dummy DLL that only has an anti-cheat-like NAME ---
 if "%ARCH%"=="x64" (set ACT=vi_actarget.exe& set ACD=EasyAntiCheat_x64.dll) else (set ACT=vi_actarget32.exe& set ACD=BEClient.dll)
 cl %CF% /std:c++17 "%ROOT%test\vi_actarget.cpp" /Fe:%ACT% /link /SUBSYSTEM:WINDOWS || goto :afail

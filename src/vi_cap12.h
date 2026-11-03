@@ -151,6 +151,7 @@ bool Begin12(IDXGISwapChain* sc, std::string& err) {
             Log("d3d12 capture: created allocator/list/fence on device %p (queue source %d)", dev, (int)g_c12QueueSource);
         }
         D3D12_RESOURCE_DESC rd = bb->GetDesc();
+        if(!CaptureDimensionsAllowed(rd.Width,rd.Height)){err=g_capErr;break;}
         if (rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || rd.SampleDesc.Count != 1) { err = "back buffer is not a single-sample 2D texture"; break; }
         BYTE probe[16] = {0}, out[8];
         if (!ConvertRow(rd.Format, probe, out, 1)) { char b[64]; sprintf_s(b, "unsupported backbuffer format %d", (int)rd.Format); err = b; break; }

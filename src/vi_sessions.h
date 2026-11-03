@@ -157,10 +157,21 @@ struct LockStatus {
     DWORD pid = 0;
     std::uint64_t pid_created_100ns = 0, created_unix_ms = 0, expires_unix_ms = 0;
     FileIdentity identity;
+    // Read-only hints from a non-lease file. NEVER use these for ownership,
+    // staleness, process identity, release, or reclaim decisions.
+    DWORD raw_pid_unverified = 0;
+    std::string owner_unverified;
+    bool owner_truncated = false, file_age_known = false;
+    std::uint64_t file_age_ms = 0;
 };
 
 inline LockStatus InspectLockHandle(HANDLE h) {
     LockStatus status; status.exists = true; status.identity = IdentityOf(h);
+    FILETIME modified{}, now{};
+    if (GetFileTime(h, nullptr, nullptr, &modified)) {
+        GetSystemTimeAsFileTime(&now); const auto n = FileTimeValue(now), m = FileTimeValue(modified);
+        status.file_age_known = true; status.file_age_ms = n > m ? (n - m) / 10000ULL : 0;
+    }
     LARGE_INTEGER size{};
     if (!GetFileSizeEx(h, &size) || size.QuadPart <= 0 || size.QuadPart > 8192) { status.error = "lock is empty, too large, or unreadable"; return status; }
     std::string body(static_cast<size_t>(size.QuadPart), '\0'); DWORD n = 0;
@@ -175,7 +186,20 @@ inline LockStatus InspectLockHandle(HANDLE h) {
         detail::Number(f, "pid_created_100ns", status.pid_created_100ns, true) && status.pid_created_100ns > 0 &&
         detail::Number(f, "created_unix_ms", status.created_unix_ms) &&
         detail::Number(f, "expires_unix_ms", status.expires_unix_ms) && status.expires_unix_ms > status.created_unix_ms;
-    if (!valid) { status.error = "legacy or malformed lock (never reclaimed)"; return status; }
+    if (!valid) {
+        // Extract only well-formed recognized JSON fields; never scan arbitrary
+        // contents/partial JSON for PID-like strings or trust them as a lease.
+        std::uint64_t rawPid = 0;
+        if (detail::Number(f, "pid", rawPid) && rawPid > 0 && rawPid <= MAXDWORD) status.raw_pid_unverified = static_cast<DWORD>(rawPid);
+        std::string owner;
+        if (detail::Text(f, "owner", owner) && !owner.empty() &&
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, owner.data(), static_cast<int>(owner.size()), nullptr, 0)) {
+            size_t keep = owner.size() > 256 ? 256 : owner.size();
+            while (keep < owner.size() && keep && (static_cast<unsigned char>(owner[keep]) & 0xc0) == 0x80) --keep;
+            status.owner_truncated = keep < owner.size(); status.owner_unverified = owner.substr(0, keep);
+        }
+        status.error = "legacy or malformed lock (never reclaimed)"; return status;
+    }
     status.format_ok = true; status.pid = static_cast<DWORD>(pid);
     status.expired = NowUnixMs() >= status.expires_unix_ms;
     status.owner_dead = ProcessIdentityDead(status.pid, status.pid_created_100ns);
@@ -192,6 +216,18 @@ inline LockStatus InspectLock(const std::wstring& path) {
         return status;
     }
     status = InspectLockHandle(h); CloseHandle(h); return status;
+}
+
+inline std::string LockBusyDescription(const LockStatus& status) {
+    if (status.format_ok) return "lock held by " + status.owner + (status.stale ? " (stale; not reclaimed)" : "");
+    std::string result = "existing legacy/unreadable lock; left untouched; holder UNVERIFIED";
+    if (status.raw_pid_unverified) result += " raw_pid=" + std::to_string(status.raw_pid_unverified);
+    if (!status.owner_unverified.empty()) result += " owner=\"" + JsonEscape(status.owner_unverified) + "\"";
+    if (status.owner_truncated) result += " owner_truncated=true";
+    if (status.file_age_known) result += " age_source=file_mtime file_age_ms=" + std::to_string(status.file_age_ms);
+    else result += " age_source=unavailable";
+    if (!status.error.empty()) result += " detail=\"" + JsonEscape(status.error) + "\"";
+    return result;
 }
 
 // Only a vinput-created JSON lock with the exact owner may be released. Optional token and file
@@ -246,7 +282,7 @@ public:
             DWORD e = GetLastError();
             if (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS) {
                 LockStatus old = InspectLock(path);
-                error = old.format_ok ? "lock held by " + old.owner + (old.stale ? " (stale; not reclaimed)" : "") : "existing legacy/unreadable lock; left untouched";
+                error = LockBusyDescription(old);
             } else error = "cannot atomically create lock (win32=" + std::to_string(e) + ")";
             return false;
         }

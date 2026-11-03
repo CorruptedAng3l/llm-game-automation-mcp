@@ -17,6 +17,7 @@ struct Frame {
     double ox = 0, oy = 0, sx = 1, sy = 1;   // client = origin + image * scale
     int clientW = 0, clientH = 0;
     std::string method, hash;
+    double nativeFrame=0,presentBefore=0;
 };
 static vi_text::Box ToClient(const Frame& f, const vi_text::Box& b) {
     const int x0 = (int)std::lround(f.ox + b.x * f.sx), y0 = (int)std::lround(f.oy + b.y * f.sy);
@@ -37,19 +38,24 @@ static std::wstring AcLogsDir() {
     }
     return logs;
 }
-static bool Grab(DWORD pid, const Args& a, Frame& f, std::string& err) {
+static bool Grab(DWORD pid, const Args& a, Frame& f, std::string& err, bool preserveMap=false, const Args* outputOptions=nullptr, unsigned timeoutMs=0) {
     std::wstring dir = QueryTargetToken(pid).appContainer ? AcLogsDir() : ExeDir() + L"\\logs"; CreateDirectoryW(dir.c_str(), nullptr);
     if (dir.empty()) { err="cannot grant AppContainer capture staging directory"; return false; }
     std::wstring path = dir + L"\\ui_" + std::to_wstring(pid) + L"_" + std::to_wstring(GetCurrentProcessId()) + L".png";
+    struct Cleanup { std::wstring path,dir;bool ac;~Cleanup(){DeleteFileW(path.c_str());if(ac)RemoveDirectoryW(dir.c_str());} } cleanup{path,dir,QueryTargetToken(pid).appContainer};
     std::string cmd = "{"; PutS(cmd, "cmd", "capture"); PutS(cmd, "path", W2U(path));
     if (HasOpt(a, "region")) PutS(cmd, "region", GetOpt(a, "region"));
     if (HasOpt(a, "method")) PutS(cmd, "method", GetOpt(a, "method"));
     if (HasOpt(a, "after-frames")) Put(cmd, "after_frames", GetOpt(a, "after-frames"));
+    if(preserveMap)Put(cmd,"preserve_capture_space","true");
+    if(timeoutMs)Put(cmd,"timeout_ms",std::to_string(timeoutMs));
+    if(outputOptions){if(HasOpt(*outputOptions,"scale"))Put(cmd,"scale",GetOpt(*outputOptions,"scale"));if(HasOpt(*outputOptions,"max-width"))Put(cmd,"max_width",GetOpt(*outputOptions,"max-width"));}
     cmd += "}";
     std::string resp;
     if (!Request(pid, cmd, resp) || resp.find("\"ok\":true") == std::string::npos) {
         err = JsonText(resp, "error"); if (err.empty()) err = resp; return false;
     }
+    if(preserveMap&&resp.find("\"capture_space_updated\":false")==std::string::npos){err="target did not confirm preserved capture map";return false;}
     std::string e;
     if (!vi_vision::LoadPng(path, f.img, e)) { err = "cannot read capture PNG: " + e; DeleteFileW(path.c_str()); return false; }
     DeleteFileW(path.c_str());
@@ -59,6 +65,7 @@ static bool Grab(DWORD pid, const Args& a, Frame& f, std::string& err) {
     f.sx = w > 0 ? JsonNum(resp, "region_client_w", w) / w : 1; f.sy = h > 0 ? JsonNum(resp, "region_client_h", h) / h : 1;
     f.clientW = (int)JsonNum(resp, "client_w"); f.clientH = (int)JsonNum(resp, "client_h");
     f.method = JsonText(resp, "method"); f.hash = JsonText(resp, "hash");
+    f.nativeFrame=JsonNum(resp,"captured_present");f.presentBefore=JsonNum(resp,"present_before");
     return true;
 }
 
@@ -71,12 +78,18 @@ static std::vector<double> ParseScales(const std::string& s, bool& autoScale, st
         size_t c = s.find(',', i); if (c == std::string::npos) c = s.size();
         std::string t = s.substr(i, c - i); char* end = nullptr; double d = strtod(t.c_str(), &end);
         if (t.empty() || *end || !(d >= 0.2 && d <= 5)) { err = "scale list must be numbers 0.2..5 (or auto)"; return {}; }
-        v.push_back(d); i = c + 1;
+        if (v.size() == 8) { err = "at most 8 OCR scales are supported"; return {}; }
+        if (std::find(v.begin(), v.end(), d) == v.end()) v.push_back(d); i = c + 1;
     }
     return v;
 }
-static bool OcrOnce(const Frame& f, double scale, const Args& a, std::vector<vi_text::Line>& lines, std::string& lang, std::string& err) {
-    return vi_ocr::Recognize(f.img, (std::max)(1.0, scale), GetOpt(a, "lang"), lines, lang, err);
+static bool OcrOnce(const Frame& f, double scale, const Args& a, std::vector<vi_text::Line>& lines, std::string& lang, std::string& err, const std::string& preprocessing = "") {
+    std::string mode = preprocessing.empty() ? GetOpt(a, "preprocess", "none") : preprocessing;
+    if (mode == "auto") mode = "contrast";
+    if (mode == "none") return vi_ocr::Recognize(f.img, (std::max)(1.0, scale), GetOpt(a, "lang"), lines, lang, err);
+    vi_vision::Image prepared;
+    if (!vi_ocr::Preprocess(f.img, mode, prepared, err)) return false;
+    return vi_ocr::Recognize(prepared, (std::max)(1.0, scale), GetOpt(a, "lang"), lines, lang, err);
 }
 // Windows OCR layout analysis is not stable: the same words can vanish from a full frame and appear in a crop
 // (seen on the synthetic target: OPTIONS and QUIT missing at 800x450, found in a 400x450 half). Tiled pass: 2x3
@@ -87,19 +100,26 @@ static double LineOverlap(const vi_text::Box& a, const vi_text::Box& b) {
     const double inter = (double)(r - l) * (bo - t);
     return inter / (std::min)((double)a.w * a.h, (double)b.w * b.h);
 }
-static bool OcrTiles(const Frame& f, double scale, const Args& a, std::vector<vi_text::Line>& lines, std::string& lang, std::string& err) {
+static bool OcrTiles(const Frame& f, double scale, const Args& a, std::vector<vi_text::Line>& lines, std::string& lang, std::string& err, const std::string& preprocessing = "") {
     const int W = f.img.w, H = f.img.h;
-    if (W < 64 || H < 64) return true;
-    const int tw = (std::min)(W, (int)std::ceil(W * 0.6)), th = (std::min)(H, (int)std::ceil(H * 0.45));
-    const int xs[2] = {0, W - tw}, ys[3] = {0, (H - th) / 2, H - th};
-    for (int yi = 0; yi < 3; ++yi) for (int xi = 0; xi < 2; ++xi) {
+    if (W < 64 && H < 64) return true;
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    const int limit = (int)(winrt::Windows::Media::Ocr::OcrEngine::MaxImageDimension() / (std::max)(1.0, scale));
+    const int tw = (std::min)({W, W < 64 ? W : (int)std::ceil(W * 0.6), limit});
+    const int th = (std::min)({H, H < 64 ? H : (int)std::ceil(H * 0.45), limit});
+    const int nx = W <= tw ? 1 : (int)std::ceil((W - tw) / (tw * 0.8)) + 1;
+    const int ny = H <= th ? 1 : (int)std::ceil((H - th) / (th * 0.8)) + 1;
+    if (nx * ny > 64) { err = "OCR would require more than 64 tiles; use --region"; return false; }
+    for (int yi = 0; yi < ny; ++yi) for (int xi = 0; xi < nx; ++xi) {
+        const int tx = nx == 1 ? 0 : (W - tw) * xi / (nx - 1), ty = ny == 1 ? 0 : (H - th) * yi / (ny - 1);
         vi_vision::Image tile; std::string e;
-        if (!vi_vision::Crop(f.img, {xs[xi], ys[yi], tw, th}, tile, e)) { err = e; return false; }
+        if (!vi_vision::Crop(f.img, {tx, ty, tw, th}, tile, e)) { err = e; return false; }
         std::vector<vi_text::Line> tl;
-        if (!vi_ocr::Recognize(tile, (std::max)(1.0, scale), GetOpt(a, "lang"), tl, lang, err)) return false;
+        Frame crop; crop.img = std::move(tile);
+        if (!OcrOnce(crop, scale, a, tl, lang, err, preprocessing)) return false;
         for (auto& line : tl) {
-            line.box.x += xs[xi]; line.box.y += ys[yi];
-            for (auto& w : line.words) { w.box.x += xs[xi]; w.box.y += ys[yi]; }
+            line.box.x += tx; line.box.y += ty;
+            for (auto& w : line.words) { w.box.x += tx; w.box.y += ty; }
             int match = -1;
             for (size_t i = 0; i < lines.size(); ++i) if (LineOverlap(lines[i].box, line.box) > 0.5) { match = (int)i; break; }
             if (match < 0) lines.push_back(std::move(line));
@@ -125,12 +145,15 @@ static Reply CmdOcr(DWORD pid, const Args& a) {
     Frame f; if (!Grab(pid, a, f, err)) return Fail(err);
     std::vector<vi_text::Line> lines; std::string lang;
     DWORD t0 = GetTickCount();
-    if (!OcrOnce(f, scales[0], a, lines, lang, err)) return Fail(err);
+    if (!OcrOnce(f, scales[0], a, lines, lang, err)) {
+        if (!HasOpt(a, "tiles") || err.find("exceeds OcrEngine.MaxImageDimension") == std::string::npos) return Fail(err);
+        err.clear();
+    }
     if (HasOpt(a, "tiles") && !OcrTiles(f, scales[0], a, lines, lang, err)) return Fail(err);
     const bool words = !HasOpt(a, "lines-only");
     std::string j = "{\"ok\":true,\"w\":" + std::to_string(f.img.w) + ",\"h\":" + std::to_string(f.img.h) + ",\"origin_x\":" + Num(f.ox) + ",\"origin_y\":" + Num(f.oy) +
         ",\"client_w\":" + std::to_string(f.clientW) + ",\"client_h\":" + std::to_string(f.clientH) + ",\"method\":\"" + f.method + "\",\"lang\":\"" + JEsc(lang) +
-        "\",\"scale\":" + Num(scales[0]) + ",\"ocr_ms\":" + std::to_string(GetTickCount() - t0) + "," + kNoConfidence + ",\"line_count\":" + std::to_string(lines.size());
+        "\",\"scale\":" + Num(scales[0]) + ",\"preprocess\":\"" + JEsc(GetOpt(a, "preprocess", "none")) + "\",\"ocr_ms\":" + std::to_string(GetTickCount() - t0) + "," + kNoConfidence + ",\"line_count\":" + std::to_string(lines.size());
     std::wstring text; for (auto& l : lines) { if (!text.empty()) text += L"\n"; text += l.text; }
     j += ",\"text\":\"" + JU(text) + "\",\"lines\":[";
     for (size_t i = 0; i < lines.size(); ++i) j += (i ? "," : "") + LineJson(f, lines[i], words);
@@ -147,13 +170,19 @@ static Reply CmdOcr(DWORD pid, const Args& a) {
 #include "vi_cli_text.inl"   //@text
 #include "vi_cli_image.inl"  //@image
 #include "vi_cli_small.inl"  //@small
+#include "vi_cli_expect.inl"
+#include "vi_cli_jobs.inl"
+#include "vi_cli_burst.inl"
 
 // ---- dispatch + script -------------------------------------------------------------------------------------------
 static Reply RunScript(DWORD pid, const Args& a);   //@script
 static Reply Dispatch(DWORD pid, const std::vector<std::string>& tk) {
     const std::string& cmd = tk[0];
     Args a = SplitArgs(std::vector<std::string>(tk.begin() + 1, tk.end()));
+    if (HasExpectationOptions(a)) return ConfirmInput(pid, tk);
+    if(cmd=="hold-while"||cmd=="pad-hold-while")return CmdHoldWhile(pid,a,cmd=="pad-hold-while");
     if (cmd == "ocr") return CmdOcr(pid, a);
+    if (cmd == "capture-burst") return CmdCaptureBurst(pid,a);
     if (cmd == "click-text") return CmdText(pid, a, 0); //@text
     if (cmd == "wait-text") return CmdText(pid, a, 1); //@text
     if (cmd == "assert-text") return CmdText(pid, a, 2); //@text
@@ -163,15 +192,25 @@ static Reply Dispatch(DWORD pid, const std::vector<std::string>& tk) {
     if (cmd == "pixel") return CmdPixel(pid, a); //@small
     if (cmd == "scroll") return CmdScroll(pid, a); //@small
     if (cmd == "drag") return CmdDrag(pid, a); //@small
+    if (cmd == "placement-drag") return CmdPlacement(pid,a);
     if (cmd == "wait-change") return WaitChange(pid, a);
     if (cmd == "script") return RunScript(pid, a); //@script
+    const char* precision=nullptr;
+    if(cmd=="click"&&HasOpt(a,"di-release-timeout-ms"))precision="release_poll";
+    if(cmd=="config")for(auto& setting:a.pos)if(setting.rfind("edge_margin=",0)==0)precision="edge_guard";
+    if(precision){std::string status;if(!Request(pid,"{\"cmd\":\"status\"}",status)||status.find("\""+std::string(precision)+"\":true")==std::string::npos)return Fail("target lacks requested input precision support; restart the owned target with the matching updated DLL; no input was sent");}
+    if(cmd=="capture"&&(HasOpt(a,"scale")||HasOpt(a,"max-width")||HasOpt(a,"format")||HasOpt(a,"quality"))){
+        std::string status;if(!Request(pid,"{\"cmd\":\"status\"}",status)||status.find("\"ok\":false")!=std::string::npos){std::string detail=JsonText(status,"error");return Fail(detail.empty()?"capture capability status unavailable (target/transport failure)":detail);}if(JsonNum(status,"capture_output_version")<1)return Fail("target lacks capture output/map support; restart the owned target with the matching updated DLL");
+    }
     std::string j, err, resp;
     if (!BuildJson(tk, j, err)) return Fail(err);
+    if(NeedsInputJobs(j)){Reply support=RequireInputJobs(pid);if(!support.ok)return support;}
     // An AppContainer target cannot write to the caller's folder: it writes the PNG into the granted
     // <dist>\run\logs folder and we move it to the requested path.
     std::wstring staged, wanted;
     if (cmd == "capture" && !a.pos.empty() && QueryTargetToken(pid).appContainer) {
         wchar_t full[MAX_PATH]; GetFullPathNameW(U2W(a.pos[0]).c_str(), MAX_PATH, full, nullptr); wanted = full;
+        if (!vi_paths::CaptureParent(wanted, err)) return Fail(err);
         std::wstring stagingDir=AcLogsDir();
         if(stagingDir.empty()) return Fail("cannot grant AppContainer capture staging directory");
         staged = stagingDir + L"\\capture_" + std::to_wstring(pid) + L"_" + std::to_wstring(GetTickCount()) + L".png";
@@ -183,7 +222,7 @@ static Reply Dispatch(DWORD pid, const std::vector<std::string>& tk) {
         std::string from = "\"path\":\"" + JEsc(W2U(staged)) + "\"", to = "\"path\":\"" + JEsc(W2U(wanted)) + "\"";
         if (!MoveFileExW(staged.c_str(), wanted.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
             DWORD e = GetLastError(); DeleteFileW(staged.c_str());
-            return Fail("AppContainer capture: cannot move staged PNG to the requested path (" + std::to_string(e) + ")");
+            return Fail("AppContainer capture: cannot move staged image to the requested path (" + std::to_string(e) + ")");
         }
         size_t at = resp.find(from); if (at != std::string::npos) resp.replace(at, from.size(), to);
     }
