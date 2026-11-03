@@ -300,6 +300,28 @@ async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeo
   return { r, out, saved, summary };
 }
 
+const captureAfterSchema = z.union([z.boolean(), z.number().int().min(0).max(3600)]).optional().describe(
+  "Look right after acting, in the same call: true = capture after 3 presented frames, a number = wait for that many frames " +
+  "first (0 = capture immediately). The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
+  "saving a capture round trip. Skipped when the action itself failed.");
+const DEFAULT_LOOK_FRAMES = 3;
+/** Act-then-look: append the post-action frame to an action's reply. */
+async function look(pid: number, out: ToolReply, ca: boolean | number | undefined): Promise<ToolReply> {
+  if (ca === undefined || ca === false || out.isError) return out;
+  const g = await grabFrame(pid, { after_frames: ca === true ? DEFAULT_LOOK_FRAMES : ca });
+  let j: Record<string, unknown> = {};
+  try { j = JSON.parse((out.content[0] as { text: string }).text); } catch { /* keep empty */ }
+  if (g.summary && !g.out.isError) {
+    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after: g.summary }) };
+    for (const c of g.out.content) if (c.type === "image") out.content.push(c);
+  } else {
+    let e: unknown = "capture failed";
+    try { e = (JSON.parse((g.out.content[0] as { text: string }).text) as { error?: string }).error ?? e; } catch { /* default */ }
+    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after_error: e }) };
+  }
+  return out;
+}
+
 tool("ocr", "Read text on screen",
   "OCR the current frame with the built-in Windows OCR engine. Returns text and lines[] with boxes [x,y,w,h] in client " +
   "pixels (words[] too when words:true). Small or stylised text: use region and scale 2.",
@@ -333,9 +355,10 @@ tool("click_text", "Click text on screen",
   "Find text with OCR and click the centre of its box (keeps looking for timeout_ms). Refuses and clicks nothing when " +
   "the text matches more than once and nth is not given. Verify the result with wait_text / capture.",
   { pid, ...textMatch, timeout_ms: timeoutMs(5000), button: button.optional(),
-    optional: z.boolean().optional().describe("Succeed with skipped:true if the text never appears (for dialogs that may not show).") },
-  async (a) => reply(await runVinput([...at(a.pid), "click-text", ...textArgs(a), ...opt("--timeout", a.timeout_ms), ...opt("--button", a.button),
-    ...opt("--optional", a.optional)], (a.timeout_ms ?? 5000) + 60000)));
+    optional: z.boolean().optional().describe("Succeed with skipped:true if the text never appears (for dialogs that may not show)."),
+    capture_after: captureAfterSchema },
+  async (a) => look(a.pid, reply(await runVinput([...at(a.pid), "click-text", ...textArgs(a), ...opt("--timeout", a.timeout_ms), ...opt("--button", a.button),
+    ...opt("--optional", a.optional)], (a.timeout_ms ?? 5000) + 60000)), a.capture_after));
 
 tool("wait_text", "Wait for text",
   "Block until text appears on screen (or, with gone:true, disappears). Times out with timed_out:true and ocr_saw.",
@@ -392,19 +415,20 @@ tool("click", "Click",
   "first so hover-dependent UI reacts. ok:true = the click was delivered; verify with capture / wait_text.",
   { pid, x: xy.x.optional(), y: xy.y.optional(), norm: xy.norm, capture_space: xy.capture_space, button: button.optional(),
     count: z.number().int().min(1).max(10).optional().describe("2 = double click."),
-    hold_ms: z.number().int().min(1).max(10000).optional().describe("How long the button stays down (default 60).") },
+    hold_ms: z.number().int().min(1).max(10000).optional().describe("How long the button stays down (default 60)."),
+    capture_after: captureAfterSchema },
   async (a) => {
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     const pos = a.x === undefined ? [] : [String(a.x), String(a.y)];
-    return reply(await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
-      ...opt("--count", a.count), ...opt("--ms", a.hold_ms)], 60000));
+    return look(a.pid, reply(await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
+      ...opt("--count", a.count), ...opt("--ms", a.hold_ms)], 60000)), a.capture_after);
   });
 
 tool("move", "Move the cursor",
   "Move the game's virtual cursor to an absolute position (hover). The real cursor is not touched.",
-  { pid, ...xy, steps: z.number().int().min(1).max(200).optional().describe("Intermediate moves (default 1).") },
-  async (a) => reply(await runVinput([...at(a.pid), "mouse", String(a.x), String(a.y), ...opt("--norm", a.norm),
-    ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000)));
+  { pid, ...xy, steps: z.number().int().min(1).max(200).optional().describe("Intermediate moves (default 1)."), capture_after: captureAfterSchema },
+  async (a) => look(a.pid, reply(await runVinput([...at(a.pid), "mouse", String(a.x), String(a.y), ...opt("--norm", a.norm),
+    ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000)), a.capture_after));
 
 tool("move_relative", "Relative mouse motion",
   "Relative mouse motion (raw input / DirectInput deltas) for mouse-look / camera control in 3D games.",
@@ -415,9 +439,10 @@ tool("move_relative", "Relative mouse motion",
 tool("drag", "Drag",
   "Press a mouse button at (x1,y1), move with it held, release at (x2,y2). Always releases, even if a step fails.",
   { pid, x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number(),
-    ms: z.number().int().min(1).max(30000).optional().describe("Duration of the drag (default 300)."), button: button.optional() },
-  async (a) => reply(await runVinput([...at(a.pid), "drag", String(a.x1), String(a.y1), String(a.x2), String(a.y2),
-    ...opt("--ms", a.ms), ...opt("--button", a.button)], 90000)));
+    ms: z.number().int().min(1).max(30000).optional().describe("Duration of the drag (default 300)."), button: button.optional(),
+    capture_after: captureAfterSchema },
+  async (a) => look(a.pid, reply(await runVinput([...at(a.pid), "drag", String(a.x1), String(a.y1), String(a.x2), String(a.y2),
+    ...opt("--ms", a.ms), ...opt("--button", a.button)], 90000)), a.capture_after));
 
 tool("scroll", "Scroll the mouse wheel",
   "Scroll N wheel notches (positive = up / away, negative = down) at the virtual cursor, after moving it to x,y if given.",
@@ -435,9 +460,10 @@ tool("key", "Press a key",
   "Press and release a key or chord in the game (delivered on every channel the game may read: messages, raw input, " +
   "DirectInput, GetAsyncKeyState). hold_ms keeps it down longer (e.g. walking).",
   { pid, key: keyCombo, hold_ms: z.number().int().min(1).max(60000).optional().describe("How long the key stays down (default ~80)."),
-    count: z.number().int().min(1).max(100).optional(), gap_ms: z.number().int().min(0).max(10000).optional().describe("Pause between repeats.") },
-  async (a) => reply(await runVinput([...at(a.pid), "key", a.key, ...(a.hold_ms ? [String(a.hold_ms)] : []), ...opt("--count", a.count), ...opt("--gap", a.gap_ms)],
-    (a.hold_ms ?? 0) * (a.count ?? 1) + (a.gap_ms ?? 0) * (a.count ?? 1) + 60000)));
+    count: z.number().int().min(1).max(100).optional(), gap_ms: z.number().int().min(0).max(10000).optional().describe("Pause between repeats."),
+    capture_after: captureAfterSchema },
+  async (a) => look(a.pid, reply(await runVinput([...at(a.pid), "key", a.key, ...(a.hold_ms ? [String(a.hold_ms)] : []), ...opt("--count", a.count), ...opt("--gap", a.gap_ms)],
+    (a.hold_ms ?? 0) * (a.count ?? 1) + (a.gap_ms ?? 0) * (a.count ?? 1) + 60000)), a.capture_after));
 
 tool("key_down", "Hold a key down", "Press a key (or mouse button name like 'rbutton') and keep it down until key_up or release.",
   { pid, key: keyCombo }, async (a) => reply(await runVinput([...at(a.pid), "down", a.key], 30000)));
@@ -465,12 +491,12 @@ tool("pad", "Gamepad (XInput)",
     lx: z.number().int().min(-32768).max(32767).optional(), ly: z.number().int().min(-32768).max(32767).optional(),
     rx: z.number().int().min(-32768).max(32767).optional(), ry: z.number().int().min(-32768).max(32767).optional(),
     lt: z.number().int().min(0).max(255).optional(), rt: z.number().int().min(0).max(255).optional(),
-    hold: z.boolean().optional(), off: z.boolean().optional() },
+    hold: z.boolean().optional(), off: z.boolean().optional(), capture_after: captureAfterSchema },
   async (a) => {
-    if (a.off) return reply(await runVinput([...at(a.pid), "pad", "off"], 30000));
-    return reply(await runVinput([...at(a.pid), "pad", a.buttons ?? "none", ...(a.ms ? [String(a.ms)] : []),
+    if (a.off) return look(a.pid, reply(await runVinput([...at(a.pid), "pad", "off"], 30000)), a.capture_after);
+    return look(a.pid, reply(await runVinput([...at(a.pid), "pad", a.buttons ?? "none", ...(a.ms ? [String(a.ms)] : []),
       ...opt("--lx", a.lx), ...opt("--ly", a.ly), ...opt("--rx", a.rx), ...opt("--ry", a.ry), ...opt("--lt", a.lt), ...opt("--rt", a.rt),
-      ...opt("--hold", a.hold)], (a.ms ?? 0) + 60000));
+      ...opt("--hold", a.hold)], (a.ms ?? 0) + 60000)), a.capture_after);
   });
 
 tool("trace", "Trace one key's delivery",
