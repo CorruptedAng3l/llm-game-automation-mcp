@@ -95,7 +95,9 @@ try {
   $late = StartTarget "$D\vi_actarget.exe" 'late64' @('--late', "`"$dummy64`"")
   $r = Invoke-V @('inject', '--pid', "$($late.p.Id)"); Check ($r.code -eq 0 -and $r.j.ok) 'late: clean target injected' $r.raw
   $r = Invoke-V @('--pid', "$($late.p.Id)", 'key', 'a'); Check ($r.j.ok) 'late: key a accepted before the anti-cheat module loads' $r.raw
-  $r = Invoke-V @('--pid', "$($late.p.Id)", 'key', 'l'); Check ($r.j.ok) 'late: key l accepted (the target loads the dummy module on L)' $r.raw
+  # The target loads the module while handling L's key-down; the timed key runs as an input job, so the detection can
+  # cancel it (and release everything) before the key's own completion. Either outcome shows L was delivered.
+  $r = Invoke-V @('--pid', "$($late.p.Id)", 'key', 'l'); Check ($r.j.ok -or ($r.j.input_injected -eq $true -and $r.j.job_reason -eq 'anticheat_detected')) 'late: key l delivered (the target loads the dummy module on L)' $r.raw
   for ($i = 0; $i -lt 30 -and -not (Select-String -LiteralPath $late.log -Pattern 'LATE_LOAD ok' -Quiet); $i++) { Start-Sleep -Milliseconds 100 }
   Check (Select-String -LiteralPath $late.log -Pattern 'LATE_LOAD ok' -Quiet) 'fixture: the target loaded EasyAntiCheat_x64.dll after injection'
   $r = Invoke-V @('--pid', "$($late.p.Id)", 'key', 'b')

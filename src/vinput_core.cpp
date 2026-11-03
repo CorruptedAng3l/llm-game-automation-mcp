@@ -1727,7 +1727,7 @@ std::string AntiCheatRefusal() {
 }
 // First time a detection is seen by a command or the monitor thread: cancel jobs, release held input, log once.
 void EnforceAntiCheat() {
-    if (g_acProduct.load() && !g_acLogged.exchange(true)) { ReleaseAll(); Log("anti-cheat module detected (%s): input and capture disabled", g_acProduct.load()); }
+    if (g_acProduct.load() && !g_acLogged.exchange(true)) { JobsCancelAll("anticheat_detected"); ReleaseAll(); Log("anti-cheat module detected (%s): input and capture disabled", g_acProduct.load()); }
 }
 
 std::string KeyTraceJson(int vk) {
