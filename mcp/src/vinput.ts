@@ -38,12 +38,17 @@ export function defaultCapturePath(pid: number): string {
 }
 
 /** Last stdout line that parses as JSON (vinput prints exactly one JSON reply line; progress goes to stderr). */
-function lastJson(stdout: string): unknown {
+export function lastJson(stdout: string): unknown {
   const lines = stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("{") || l.startsWith("["));
   for (let i = lines.length - 1; i >= 0; i--) {
     try { return JSON.parse(lines[i]); } catch { /* try the previous line */ }
   }
   return undefined;
+}
+
+/** VINPUT_EXE may be a .js / .mjs script (the tests use a fake vinput); it is run with this Node. */
+export function spawnSpec(exe: string, argv: string[]): [string, string[]] {
+  return /\.(m|c)?js$/i.test(exe) ? [process.execPath, [exe, ...argv]] : [exe, argv];
 }
 
 export async function runVinput(args: string[], timeoutMs: number): Promise<CliResult> {
@@ -53,7 +58,8 @@ export async function runVinput(args: string[], timeoutMs: number): Promise<CliR
     return { ok: false, json: { ok: false, error: `vinput.exe not found at ${exe}. Build it (build.bat) or set VINPUT_EXE.` }, exitCode: null, stderr: "", timedOut: false, argv };
   }
   return await new Promise<CliResult>((resolvePromise) => {
-    const child = spawn(exe, argv, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const [cmd, cmdArgs] = spawnSpec(exe, argv);
+    const child = spawn(cmd, cmdArgs, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "", timedOut = false, settled = false;
     child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
     child.stdout.on("data", (d: string) => { stdout += d; });

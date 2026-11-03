@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node build/index.js",
-    "test": "node test/handshake.mjs",
+    "test": "node test/run.mjs",
     "smoke": "node test/smoke.mjs"
   },
   "dependencies": {
