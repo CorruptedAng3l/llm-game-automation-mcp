@@ -471,6 +471,54 @@ function mapPoints(pid: number, a: CoordIn, pts: [number, number][]): { pts: [nu
   return { pts: pts.map(([x, y]) => toClient(m, x, y)), mapped: true };
 }
 
+// ---- edge-scroll guard: a cursor resting at the window edge pans the view in many games (The Sims, strategy games)
+const DEFAULT_EDGE_MARGIN = 8;
+const edgeArgs = {
+  edge_margin: z.number().int().min(0).max(200).optional().describe(
+    `Warn when the position (or a drag's start / end) is within this many client pixels of the window edge, where games with edge scrolling pan the view (default ${DEFAULT_EDGE_MARGIN}; 0 = off). The action is still performed: the target may be in the margin on purpose. A straight path between two points outside the margin never enters it.`),
+};
+const parkArg = {
+  park_cursor: z.boolean().optional().describe("After the action, move the cursor to the centre of the window so it does not rest at an edge (default off)."),
+};
+const sizeCache = new Map<number, { w: number; h: number; t: number }>();
+/** Client size of a game from status, cached for 5 s (a window can be resized, but not often). Undefined when unreadable. */
+async function clientSize(pid: number): Promise<{ w: number; h: number } | undefined> {
+  const c = sizeCache.get(pid);
+  if (c && Date.now() - c.t < 5000) return c;
+  const st = await runVinput([...at(pid), "status"], 15000);
+  const j = st.json as { client_w?: number; client_h?: number };
+  if (!st.ok || !j.client_w || !j.client_h) return undefined;
+  const v = { w: j.client_w, h: j.client_h, t: Date.now() };
+  sizeCache.set(pid, v);
+  return v;
+}
+/** Warnings for points (client px, or 0..1 with norm) that sit inside the edge margin. */
+async function edgeWarnings(pid: number, pts: { label: string; x: number; y: number }[], margin: number | undefined, norm?: boolean): Promise<string[]> {
+  const m = margin ?? DEFAULT_EDGE_MARGIN;
+  if (m <= 0 || pts.length === 0) return [];
+  const sz = await clientSize(pid);
+  if (!sz) return [];
+  const out: string[] = [];
+  for (const p of pts) {
+    const x = norm ? p.x * sz.w : p.x, y = norm ? p.y * sz.h : p.y;
+    const near: string[] = []; let d = Infinity;
+    if (x < m) { near.push("left"); d = Math.min(d, x); }
+    if (x >= sz.w - m) { near.push("right"); d = Math.min(d, sz.w - 1 - x); }
+    if (y < m) { near.push("top"); d = Math.min(d, y); }
+    if (y >= sz.h - m) { near.push("bottom"); d = Math.min(d, sz.h - 1 - y); }
+    if (near.length) out.push(`${p.label} (${Math.round(x)},${Math.round(y)}) is ${Math.max(0, Math.round(d))} px from the ${near.map((n) => n + " edge").join(" and ")} of the ${sz.w}x${sz.h} window (edge_margin ${m}). Games with edge scrolling pan the view while the cursor rests there; aim further inside, or pass park_cursor:true to move the cursor to the centre afterwards.`);
+  }
+  return out;
+}
+/** Move the cursor to the window centre. */
+async function parkCursor(pid: number): Promise<{ x: number; y: number } | undefined> {
+  const sz = await clientSize(pid);
+  if (!sz) return undefined;
+  const x = Math.round(sz.w / 2), y = Math.round(sz.h / 2);
+  const r = await runVinput([...at(pid), "mouse", String(x), String(y)], 60000);
+  return r.ok ? { x, y } : undefined;
+}
+
 const DEFAULT_CLICK_HOVER_MS = 80, DEFAULT_CLICK_HOLD_MS = 140;
 tool("click", "Click",
   "Click a mouse button at a position (or at the current virtual cursor when x/y are omitted). The cursor hovers there " +
@@ -485,7 +533,7 @@ tool("click", "Click",
     hover_ms: z.number().int().min(0).max(5000).optional().describe(
       `Extra pause with the cursor already over the target, before the button goes down (default ${DEFAULT_CLICK_HOVER_MS} ms; 0 = none). ` +
       "vinput already waits for the hover to be dispatched and rendered; this adds time for hover-gated UI. Ignored when x / y are omitted."),
-    ...coordArgs, capture_after: captureAfterSchema },
+    ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema },
   async (a) => {
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     let pos: string[] = a.x === undefined ? [] : [String(a.x), String(a.y)];
@@ -496,19 +544,23 @@ tool("click", "Click",
       pos = [String(m.pts[0][0]), String(m.pts[0][1])];
       if (m.mapped) mappedInfo = { mapped: { x: m.pts[0][0], y: m.pts[0][1] } };
     }
-    return look(a.pid, reply(await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
+    const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "click target", x: Number(pos[0]), y: Number(pos[1]) }], a.edge_margin, a.norm);
+    const cr = await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
       ...(a.x === undefined ? [] : ["--settle-ms", String(a.hover_ms ?? DEFAULT_CLICK_HOVER_MS)]),
-      ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS)], 60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0)), mappedInfo), a.capture_after);
+      ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS)], 60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0));
+    const parked = a.park_cursor && cr.ok ? await parkCursor(a.pid) : undefined;
+    return look(a.pid, reply(cr, { ...mappedInfo, ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after);
   });
 
 tool("move", "Move the cursor",
   "Move the game's virtual cursor to an absolute position (hover). The real cursor is not touched.",
-  { pid, ...xy, steps: z.number().int().min(1).max(200).optional().describe("Intermediate moves (default 1)."), ...coordArgs, capture_after: captureAfterSchema },
+  { pid, ...xy, steps: z.number().int().min(1).max(200).optional().describe("Intermediate moves (default 1)."), ...coordArgs, ...edgeArgs, capture_after: captureAfterSchema },
   async (a) => {
     const m = mapPoints(a.pid, a, [[a.x, a.y]]);
     if ("error" in m) return fail(m.error);
+    const warnings = await edgeWarnings(a.pid, [{ label: "move target", x: m.pts[0][0], y: m.pts[0][1] }], a.edge_margin, a.norm);
     return look(a.pid, reply(await runVinput([...at(a.pid), "mouse", String(m.pts[0][0]), String(m.pts[0][1]), ...opt("--norm", a.norm),
-      ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000), m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : undefined), a.capture_after);
+      ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000), { ...(m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : {}), ...(warnings.length ? { warnings } : {}) }), a.capture_after);
   });
 
 tool("move_relative", "Relative mouse motion",
@@ -528,11 +580,12 @@ tool("drag", "Drag",
     steps: z.number().int().min(1).max(200).optional().describe("Number of intermediate mouse moves (default: one per 20 ms of ms, 3 to 60)."),
     hold_start_ms: z.number().int().min(0).max(10000).optional().describe(`Hold the button at the start point before moving (default ${DEFAULT_DRAG_HOLD_START_MS} ms).`),
     hold_end_ms: z.number().int().min(0).max(10000).optional().describe(`Dwell at the destination, button still down, before releasing (default ${DEFAULT_DRAG_HOLD_END_MS} ms).`),
-    ...coordArgs, capture_after: captureAfterSchema },
+    ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema },
   async (a) => {
     const m = mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
     if ("error" in m) return fail(m.error);
     const [[x1, y1], [x2, y2]] = m.pts;
+    const warnings = await edgeWarnings(a.pid, [{ label: "drag start", x: x1, y: y1 }, { label: "drag destination", x: x2, y: y2 }], a.edge_margin);
     const btn = a.button ?? "left", ms = a.ms ?? 300;
     const steps = a.steps ?? Math.min(60, Math.max(3, Math.round(ms / 20)));
     const holdStart = a.hold_start_ms ?? DEFAULT_DRAG_HOLD_START_MS, holdEnd = a.hold_end_ms ?? DEFAULT_DRAG_HOLD_END_MS;
@@ -547,20 +600,22 @@ tool("drag", "Drag",
       up = await runVinput([...at(a.pid), "mouseup", btn, String(x2), String(y2)], 60000);   // always release
     }
     const ok = mv.ok && up.ok;
+    const parked = a.park_cursor && ok ? await parkCursor(a.pid) : undefined;
     return look(a.pid, reply({ ok, exitCode: ok ? 0 : 1, stderr: [mv.stderr, up.stderr].filter(Boolean).join("\n"), timedOut: false, argv: [],
       json: { ok, steps, ms, hold_start_ms: holdStart, hold_end_ms: holdEnd, down: down.json, move: mv.json, up: up.json,
         ...(ok ? {} : { error: !mv.ok ? `drag: move failed (the button was released): ${JSON.stringify((mv.json as { error?: string }).error ?? mv.json)}` : "drag: mouse up failed" }) } },
-      m.mapped ? { mapped: { x1, y1, x2, y2 } } : undefined), a.capture_after);
+      { ...(m.mapped ? { mapped: { x1, y1, x2, y2 } } : {}), ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after);
   });
 
 tool("scroll", "Scroll the mouse wheel",
   "Scroll N wheel notches (positive = up / away, negative = down) at the virtual cursor, after moving it to x,y if given.",
   { pid, notches: z.number().int().min(-100).max(100), x: z.number().optional(), y: z.number().optional(),
-    horizontal: z.boolean().optional() },
+    horizontal: z.boolean().optional(), ...edgeArgs },
   async (a) => {
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     const pos = a.x === undefined ? [] : [String(a.x), String(a.y)];
-    return reply(await runVinput([...at(a.pid), "scroll", String(a.notches), ...pos, ...opt("--horizontal", a.horizontal)], 60000));
+    const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "scroll position", x: a.x, y: a.y as number }], a.edge_margin);
+    return reply(await runVinput([...at(a.pid), "scroll", String(a.notches), ...pos, ...opt("--horizontal", a.horizontal)], 60000), warnings.length ? { warnings } : undefined);
   });
 
 // ---------------------------------------------------------------- keyboard / pad
