@@ -98,7 +98,8 @@ shows, among other things, which input APIs the game really reads.
 
 Every command prints one JSON line; exit code 0 means `"ok":true`. `ok:true` on an input command means the input was
 delivered, **not** that the game reacted: follow it with `wait-text`, `wait-change` or a capture. Full reference:
-[docs/CLI.md](docs/CLI.md).
+[docs/CLI.md](docs/CLI.md). Practical advice for agents that drive games (windowed sizes, click timing, drag-and-drop,
+per-game notes): [docs/AGENT_TIPS.md](docs/AGENT_TIPS.md).
 
 ## MCP quick start
 
@@ -188,6 +189,8 @@ macros/         example .vin scripts for the synthetic UI target
 mcp/            the MCP server (TypeScript)
 third_party/    MinHook, Khronos Vulkan headers (with their licences)
 docs/CLI.md     full CLI reference
+docs/AGENT_TIPS.md   tips for LLM agents (windowed setup, click timing, drag, game notes)
+docs/MCP_TODO.md     MCP follow-ups that wait for core features
 ```
 
 ## Compiling vinput into your own DLL

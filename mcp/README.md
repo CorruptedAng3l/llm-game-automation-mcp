@@ -76,11 +76,14 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 
 | tool | what it does |
 |---|---|
-| `launch` | start a game (`exe` / `aumid` / `steam_appid`+`wait_exe`, `args`, `early`, `settle_s`, `timeout_s`, `lock`, `claim`) and inject; returns `pid` |
+| `launch` | start a game (`exe` / `aumid` / `steam_appid`+`wait_exe`, `args`, `cwd`, `early`, `settle_s`, `timeout_s`, `lock`, `claim`) and inject; returns `pid`, plus `warnings` / `nothing_presented` / `fullscreen_refusals` when no frame is being presented |
 | `attach` | inject into a running game by `pid` and wait until its window is adopted |
 | `list_targets` | games that have vinput loaded (pid, exe, owner, uptime, really_foreground) |
-| `status` | window, client size, capture path, claim, input-API counters |
-| `capture` | the game's own frame as an image + `{path, w, h, method, capture_path, frame}`; `region`, `after_frames`, `method`, `include_image` |
+| `status` | compact by default: pid, hwnd, client size, `really_foreground`, `app_active`, `present`, cursor / raw / msgs modes, non-zero counters, `warnings[]`; `verbose:true` = the full vinput status |
+| `config` | change / read how vinput treats a game: `fakefocus`, `autoactivate`, `isolate`, `blockfocus`, `nofullscreen`, `keepvisible`, `cursor`, `raw`, `msgs`; returns the effective config |
+| `log` | tail of vinput's log for a game (`lines`, `contains`, `source` ring/file); repeated lines collapse |
+| `trace` | per-key delivery trace (`trace key <key>`): which input channels the game read |
+| `capture` | the game's own frame as an image + `{path, w, h, method, capture_path, frame}`; `region`, `after_frames`, `method`, `include_image`, `grid` (labelled client-coordinate grid on the returned image), `max_width` / `scale` / `zoom` (resize the returned image; reply has `image {scale, offset_x, offset_y}`) |
 | `ocr` | text and lines with boxes (`region`, `scale`, `lang`, `words`, `tiles`) |
 | `find_text` | locate text without clicking (box, centre, match_count) |
 | `click_text` | find text and click its centre (`nth`, `exact`, `fuzzy`, `timeout_ms`, `button`, `region`, `optional`) |
@@ -88,10 +91,10 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 | `find_image` / `click_image` / `wait_image` | template matching with a PNG (`threshold`, `scales`, `region`, `nth`) |
 | `pixel` | colour of one pixel |
 | `wait_change` | wait until the picture (or a region) changes |
-| `click` | click at `x`,`y` (client pixels, or `norm` 0..1, or `capture_space`), `button`, `count`, `hold_ms` |
+| `click` | click at `x`,`y` (client pixels, or `norm` 0..1, `capture_space`, or `coord_space:"capture"` for the image you were shown), `button`, `count`, `hover_ms` (default 80), `hold_ms` (default 140), `edge_margin`, `park_cursor` |
 | `move` | move the virtual cursor (hover) |
 | `move_relative` | relative mouse motion for mouse-look (`dx`, `dy`, `raw`) |
-| `drag` | press, move, release |
+| `drag` | press, hold (`hold_start_ms`), stepped move (`ms`, `steps`), dwell at the destination (`hold_end_ms`), release; always releases |
 | `scroll` | wheel notches at the cursor or at `x`,`y` |
 | `key` | press a key or chord (`hold_ms`, `count`, `gap_ms`) |
 | `key_down` / `key_up` | hold / release a key (or mouse button name) |
@@ -116,4 +119,8 @@ override them from the MCP server.
   `click_image`.
 - **3D games** often read raw input: walk with `key` + `hold_ms`, look with `move_relative`; check `status` counters
   if nothing happens. UWP games often ignore keyboard messages but read XInput: use `pad`.
-- **Big captures** cost tokens: capture a `region` when you only need part of the screen.
+- **Big captures** cost tokens: capture a `region`, or `max_width` (for example 960), when you do not need the full frame.
+- **Do not guess pixels:** `capture grid:100` labels exact client coordinates on the image; `zoom` + `region` reads small things.
+- **Act and look in one call:** `capture_after:true` on `click`, `key`, `click_text`, `move`, `drag`, `pad` returns the next frame.
+- **Every tool answers `target exited (pid N, exit code X)`** once the game has ended, not a pipe error.
+- More: [../docs/AGENT_TIPS.md](../docs/AGENT_TIPS.md) (setup, click timing, drag, per-game notes) and [../docs/MCP_TODO.md](../docs/MCP_TODO.md) (waits on core features).

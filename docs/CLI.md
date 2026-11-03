@@ -10,13 +10,14 @@ JSON). Refusals by the anti-cheat check exit with code 4 and carry `"anticheat_r
 ```
 vinput inject --pid N [--dll PATH]
 vinput launch (--exe PATH | --steam APPID --wait-exe NAME.exe | --aumid PFN!AppId) [--args "..."] [--wait-exe NAME.exe]
-              [--lock FILE] [--lock-retry 60] [--lock-max-wait S] [--timeout 240] [--settle 5] [--fg-guard 5] [--early]
+              [--lock FILE] [--lock-retry 60] [--lock-max-wait S] [--timeout 240] [--settle 5] [--fg-guard 5] [--early] [--cwd DIR]
               [--dll PATH] [--no-inject] [--owner NAME] [--claim-ttl 300]
 vinput list                                     pids with a live vinput pipe: exe, owner, uptime, really_foreground
 vinput keys                                     every accepted key name and its VK code
 vinput [--owner NAME] [--force-claim] --pid N <command>     (owner also from env VINPUT_OWNER)
 vinput --owner NAME --pid N claim [--ttl 300] | unclaim
 vinput --pid N status | ping | log | activate | release | restore
+vinput --pid N waitexit [--timeout MS]          block until the process exits; reply has exit_code (any pid, injected or not)
 vinput --pid N key <combo> [ms] [--count N] [--gap ms]     combo: a, enter, esc, space, up, f1, ctrl+s, 0x2D, vk45 ...
 vinput --pid N down <combo> | up <combo> | hold <combo> <ms>
 vinput --pid N type "text" [--delay ms] [--keys]           WM_CHAR text; --keys = real key presses per character
@@ -48,7 +49,9 @@ vinput sysinput <vk>                            test only: one OS-level SendInpu
 Coordinates are client pixels; `--norm` = 0..1 fractions of the client size; `--capture-space` = pixels of the last
 capture (after a `--region` capture, its origin is applied). `status.counters` shows which input APIs the game
 actually calls (`gaks`, `di_kbd`, `rid`, `rib`, `xinput`, `wm_key`, ...): read it first when a game ignores input.
-The DLL logs to `dist\run\logs\vinput_<pid>.log` (or `logs\` next to the DLL that was loaded).
+The DLL logs to `dist\run\logs\vinput_<pid>.log` (or `logs\` next to the DLL that was loaded); `status.log_path` names the
+file and `log` returns the last 200 lines held in the game. `counters.fs_refused` counts refused exclusive-fullscreen requests
+(a game stuck retrying one never presents a frame, `counters.present` stays 0).
 
 ## Launching
 
@@ -66,6 +69,8 @@ first, starts the game with a non-activating hint, and hands the foreground back
   in `foreground_regrabs[]`. If the game is running and injected but the hand-back failed, the reply is
   `ok:true, foreground_restored:false` plus a `warning` (not `ok:false`, which would invite a duplicate launch).
   `--fg-guard 0` turns it off.
+- **`--cwd DIR`**: working directory for the game (default: the exe's own folder, which is what most old games need).
+  Needs `--exe`; a folder that does not exist is refused before anything starts.
 - **`--early`**: the process is created suspended, vinput is injected and its pipe is up before the game's first
   instruction, then the main thread is resumed (`early_injected:true`). vinput also watches DLL loads, so
   `vulkan-1.dll` / `opengl32.dll` are hooked the moment they are mapped. Vulkan capture needs this. Requires `--exe`.

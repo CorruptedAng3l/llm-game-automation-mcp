@@ -9,7 +9,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const server = resolve(here, "..", "build", "index.js");
 const expected = ["launch", "attach", "list_targets", "status", "capture", "ocr", "find_text", "click_text", "wait_text",
   "find_image", "click_image", "wait_image", "pixel", "wait_change", "click", "move", "move_relative", "drag", "scroll",
-  "key", "key_down", "key_up", "type_text", "pad", "list_keys", "run_script", "release", "detach"];
+  "key", "key_down", "key_up", "type_text", "pad", "list_keys", "run_script", "release", "detach",
+  "config", "log", "trace"];
 
 const transport = new StdioClientTransport({ command: process.execPath, args: [server], stderr: "pipe" });
 let stderr = "";

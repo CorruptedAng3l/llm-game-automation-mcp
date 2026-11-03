@@ -78,7 +78,10 @@ const server = new McpServer(
       "background, so the game never needs focus and the user keeps the mouse and keyboard. Workflow: launch (or attach) -> " +
       "capture to look -> act (click_text / click / key / pad) -> verify with wait_text, capture or wait_change. " +
       "Coordinates are the game's client pixels, which equal the pixels of a full capture. ok:true on an input tool only " +
-      "means the input was delivered, not that the game reacted: always verify. Never use it on online / multiplayer games " +
+      "means the input was delivered, not that the game reacted: always verify (capture_after on an action returns the next " +
+      "frame in the same call). Do not guess pixels from a big screenshot: capture with grid to read exact coordinates, or " +
+      "max_width / zoom and then click with coord_space:\"capture\". Run games windowed or borderless; if launch / capture " +
+      "warns about fullscreen, fix the game's own settings. status shows warnings; log, trace and config diagnose input problems. Never use it on online / multiplayer games " +
       "or games with anti-cheat; vinput refuses targets with a known anti-cheat and that refusal cannot be overridden.",
   },
 );
