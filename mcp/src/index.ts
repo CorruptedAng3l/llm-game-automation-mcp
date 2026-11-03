@@ -517,17 +517,40 @@ tool("move_relative", "Relative mouse motion",
     raw: z.boolean().optional().describe("Do not clamp the virtual cursor to the window (games that re-centre the cursor).") },
   async (a) => reply(await runVinput([...at(a.pid), "move", String(a.dx), String(a.dy), ...opt("--steps", a.steps), ...opt("--raw", a.raw)], 60000)));
 
+const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const DEFAULT_DRAG_HOLD_START_MS = 150, DEFAULT_DRAG_HOLD_END_MS = 250;
 tool("drag", "Drag",
-  "Press a mouse button at (x1,y1), move with it held, release at (x2,y2). Always releases, even if a step fails.",
+  "Press a mouse button at (x1,y1), hold briefly, move to (x2,y2) in small steps with the button held, dwell there, then " +
+  "release. The hold and the dwell matter for games that poll the mouse (item drops and furniture placement are dropped " +
+  "otherwise): raise hold_end_ms to 500-900 for placement. Always releases the button, even if a step fails.",
   { pid, x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number(),
-    ms: z.number().int().min(1).max(30000).optional().describe("Duration of the drag (default 300)."), button: button.optional(),
+    ms: z.number().int().min(1).max(30000).optional().describe("Duration of the stepped move (default 300)."), button: button.optional(),
+    steps: z.number().int().min(1).max(200).optional().describe("Number of intermediate mouse moves (default: one per 20 ms of ms, 3 to 60)."),
+    hold_start_ms: z.number().int().min(0).max(10000).optional().describe(`Hold the button at the start point before moving (default ${DEFAULT_DRAG_HOLD_START_MS} ms).`),
+    hold_end_ms: z.number().int().min(0).max(10000).optional().describe(`Dwell at the destination, button still down, before releasing (default ${DEFAULT_DRAG_HOLD_END_MS} ms).`),
     ...coordArgs, capture_after: captureAfterSchema },
   async (a) => {
     const m = mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
     if ("error" in m) return fail(m.error);
     const [[x1, y1], [x2, y2]] = m.pts;
-    return look(a.pid, reply(await runVinput([...at(a.pid), "drag", String(x1), String(y1), String(x2), String(y2),
-      ...opt("--ms", a.ms), ...opt("--button", a.button)], 90000), m.mapped ? { mapped: { x1, y1, x2, y2 } } : undefined), a.capture_after);
+    const btn = a.button ?? "left", ms = a.ms ?? 300;
+    const steps = a.steps ?? Math.min(60, Math.max(3, Math.round(ms / 20)));
+    const holdStart = a.hold_start_ms ?? DEFAULT_DRAG_HOLD_START_MS, holdEnd = a.hold_end_ms ?? DEFAULT_DRAG_HOLD_END_MS;
+    const down = await runVinput([...at(a.pid), "mousedown", btn, String(x1), String(y1)], 60000);
+    if (!down.ok) return reply({ ...down, ok: false, json: { ok: false, error: "drag: mouse down failed", down: down.json } });
+    let mv: CliResult | undefined, up: CliResult | undefined;
+    try {
+      await sleepMs(holdStart);
+      mv = await runVinput([...at(a.pid), "mouse", String(x2), String(y2), "--steps", String(steps), "--step-ms", String(Math.max(1, Math.round(ms / steps)))], ms + 60000);
+      await sleepMs(holdEnd);
+    } finally {
+      up = await runVinput([...at(a.pid), "mouseup", btn, String(x2), String(y2)], 60000);   // always release
+    }
+    const ok = mv.ok && up.ok;
+    return look(a.pid, reply({ ok, exitCode: ok ? 0 : 1, stderr: [mv.stderr, up.stderr].filter(Boolean).join("\n"), timedOut: false, argv: [],
+      json: { ok, steps, ms, hold_start_ms: holdStart, hold_end_ms: holdEnd, down: down.json, move: mv.json, up: up.json,
+        ...(ok ? {} : { error: !mv.ok ? `drag: move failed (the button was released): ${JSON.stringify((mv.json as { error?: string }).error ?? mv.json)}` : "drag: mouse up failed" }) } },
+      m.mapped ? { mapped: { x1, y1, x2, y2 } } : undefined), a.capture_after);
   });
 
 tool("scroll", "Scroll the mouse wheel",

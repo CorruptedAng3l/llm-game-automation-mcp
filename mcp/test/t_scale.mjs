@@ -48,7 +48,7 @@ try {
   await t.call("move", { pid, x: 20, y: 10, coord_space: "capture" });
   check(JSON.stringify(positional(t.callsOf("mouse").at(-1), "mouse")) === JSON.stringify(["110", "55"]), "move maps too", JSON.stringify(t.callsOf("mouse").at(-1)));
   await t.call("drag", { pid, x1: 0, y1: 0, x2: 400, y2: 200, coord_space: "capture" });
-  check(JSON.stringify(positional(t.callsOf("drag").at(-1), "drag")) === JSON.stringify(["100", "50", "300", "150"]), "drag maps both ends", JSON.stringify(t.callsOf("drag").at(-1)));
+  check(JSON.stringify(positional(t.callsOf("mousedown").at(-1), "mousedown")) === JSON.stringify(["100", "50"]) && JSON.stringify(positional(t.callsOf("mouseup").at(-1), "mouseup")) === JSON.stringify(["300", "150"]), "drag maps both ends (press at the mapped start, release at the mapped end)", JSON.stringify([t.callsOf("mousedown").at(-1), t.callsOf("mouseup").at(-1)]));
 
   t.clearCalls();
   await t.call("click", { pid, x: 60, y: 40 });

@@ -35,8 +35,10 @@ export async function startFake(scenario = {}, extraEnv = {}) {
   const api = {
     dir, client,
     setScenario: (s) => writeFileSync(scenFile, JSON.stringify(s)),
-    calls: () => readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).argv),
-    /** recorded calls whose vinput command is `name` (ignores waitexit / status helpers) */
+    /** like calls() but with the time (ms) each call started; the exit-watcher helper (waitexit) is not a tool call */
+    timedCalls() { return readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((x) => JSON.parse(x)).filter((c) => !c.argv.includes("waitexit")); },
+    calls() { return this.timedCalls().map((c) => c.argv); },
+    /** recorded calls whose vinput command is `name` */
     callsOf(name) { return this.calls().filter((a) => cmdOf(a)[0] === name); },
     clearCalls: () => writeFileSync(logFile, ""),
     /** call a tool; returns {r, json, text, image, texts} */

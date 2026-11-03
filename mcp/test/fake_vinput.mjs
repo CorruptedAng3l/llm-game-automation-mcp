@@ -8,7 +8,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 
 const argv = process.argv.slice(2);
 const log = process.env.VINPUT_FAKE_LOG;
-if (log) appendFileSync(log, JSON.stringify({ argv }) + "\n");
+if (log) appendFileSync(log, JSON.stringify({ argv, t: Date.now() }) + "\n");
 const scen = process.env.VINPUT_FAKE_SCENARIO && existsSync(process.env.VINPUT_FAKE_SCENARIO)
   ? JSON.parse(readFileSync(process.env.VINPUT_FAKE_SCENARIO, "utf8")) : {};
 
