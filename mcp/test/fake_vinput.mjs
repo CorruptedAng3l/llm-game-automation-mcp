@@ -26,6 +26,7 @@ const alive = (p) => { try { process.kill(p, 0); return true; } catch (e) { retu
 const say = (obj, code = 0) => { process.stdout.write(JSON.stringify(obj) + "\n"); process.exit(code); };
 
 if (cmd === "waitexit") {
+  if (!alive(pid)) say({ ok: false, pid, exited: true, error: "no such process" }, 1);
   while (alive(pid)) await sleep(40);
   say({ ok: true, pid, exited: true, exit_code: scen.exit_code ?? 0 });
 }

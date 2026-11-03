@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { configView, tailLog } from "./status.js";
+import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 
 const VERSION = "0.1.0";
@@ -33,6 +34,11 @@ function readTail(path: string, bytes: number): string[] {
     const lines = buf.toString("utf8").split(String.fromCharCode(10)).map((l) => l.split(String.fromCharCode(13)).join("")).filter((l) => l.length);
     return start > 0 ? lines.slice(1) : lines;
   } finally { closeSync(fd); }
+}
+/** The game process has ended: say so plainly instead of the raw pipe error. */
+function exitedReply(pid: number, code: number | null): ToolReply {
+  const error = exitMessage(pid, code);
+  return { content: [{ type: "text", text: JSON.stringify({ ok: false, error, target_exited: true, pid, exit_code: code }) }], isError: true };
 }
 function fail(message: string): ToolReply {
   return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }], isError: true };
@@ -68,7 +74,20 @@ function tool<S extends z.ZodRawShape>(name: string, title: string, description:
   server.registerTool(name, { title, description, inputSchema: shape, annotations: { title, readOnlyHint: readOnly, openWorldHint: false } },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (async (a: any) => {
-      try { return await run(a); } catch (e) { return fail(`${name}: ${(e as Error).message}`); }
+      const p: number | undefined = typeof a?.pid === "number" ? a.pid : undefined;
+      try {
+        if (p !== undefined) {
+          watchTarget(p);
+          const k = name === "attach" ? undefined : knownExit(p);   // attach may be a reused pid number
+          if (k) return exitedReply(p, k.code);
+        }
+        const out = await run(a);
+        if (p !== undefined && out.isError) {
+          const ex = await confirmExit(p);
+          if (ex) return exitedReply(p, ex.code);
+        }
+        return out;
+      } catch (e) { return fail(`${name}: ${(e as Error).message}`); }
     }) as never);
 }
 
@@ -107,6 +126,7 @@ tool("launch", "Launch a game",
       ...opt("--args", a.args), ...opt("--cwd", cwd), ...opt("--early", a.early), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
       ...opt("--lock", a.lock)];
     const r = await runVinput(argv, ((a.timeout_s ?? 240) + (a.settle_s ?? 5) + 120) * 1000);
+    { const np = (r.json as { pid?: unknown }).pid; if (typeof np === "number" && np > 0) { forgetExit(np); watchTarget(np); } }
     if (r.ok && a.claim) {
       const p = (r.json as { pid?: number }).pid;
       if (p) { const c = await runVinput([...at(p), "claim", "--ttl", "3600"], 15000); return reply(r, { claim: c.json }); }
@@ -119,6 +139,7 @@ tool("attach", "Attach to a running game",
   "anticheat_refused:true if the game or the machine has a known anti-cheat. Use list_targets to see games that already have vinput.",
   { pid, claim: z.boolean().optional().describe("Claim the game for this MCP server (default false).") },
   async (a) => {
+    forgetExit(a.pid);
     const r = await runVinput(["inject", "--pid", String(a.pid)], 60000);
     if (!r.ok) return reply(r);
     if (a.claim) await runVinput([...at(a.pid), "claim", "--ttl", "3600"], 15000);
