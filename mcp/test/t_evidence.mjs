@@ -37,10 +37,21 @@ try {
   const w2 = t.calls().map((a) => cmdOf(a)[0]).filter((w) => ["placement-drag", "mousedown", "mouse", "mouseup"].includes(w));
   check(!r.isError && w2.join() === "placement-drag,mousedown,mouse,mouseup" && /lacks/.test(String(r.json?.placement_fallback)),
     "old DLL: falls back to press / move / release and says why (placement_fallback)", `${w2.join()} ${r.text.slice(0, 200)}`);
-  t.setScenario({ replies: { "placement-drag": { ok: false, error: "placement press not observed before poll timeout" } } });
+  t.setScenario({ replies: { "placement-drag": { ok: false, job_state: "failed", job_reason: "button_release_not_observed", error: "placement release not observed before poll timeout" } } });
   t.clearCalls();
   r = await t.call("drag", { pid, x1: 1, y1: 2, x2: 3, y2: 4, placement: true });
-  check(r.isError && t.callsOf("mousedown").length === 0 && /not observed/.test(r.text), "a placement failure (not 'lacks') is reported, not retried", r.text.slice(0, 200));
+  check(r.isError && t.callsOf("mousedown").length === 0 && /not observed/.test(r.text), "a placement failure after the drag started is reported, not retried", r.text.slice(0, 200));
+  // Unity-style games read buttons through window messages: the press is never observed, nothing was dragged.
+  t.setScenario({ replies: { "placement-drag": { ok: false, job_state: "failed", job_reason: "button_down_not_observed" } } });
+  t.clearCalls();
+  r = await t.call("drag", { pid, x1: 1, y1: 2, x2: 3, y2: 4, placement: true, hold_start_ms: 0, hold_end_ms: 0 });
+  const w3 = t.calls().map((a) => cmdOf(a)[0]).filter((w) => ["placement-drag", "mousedown", "mouse", "mouseup"].includes(w));
+  check(!r.isError && w3.join() === "placement-drag,mousedown,mouse,mouseup" && /button_down_not_observed/.test(String(r.json?.placement_fallback)),
+    "button_down_not_observed: falls back to the plain drag and says so (placement_fallback)", `${w3.join()} ${r.text.slice(0, 240)}`);
+  t.setScenario({ replies: { "placement-drag": { ok: false, job_state: "failed", job_reason: "start_position_not_observed" } } });
+  t.clearCalls();
+  r = await t.call("drag", { pid, x1: 1, y1: 2, x2: 3, y2: 4, placement: true, hold_start_ms: 0, hold_end_ms: 0 });
+  check(!r.isError && /start_position_not_observed/.test(String(r.json?.placement_fallback)), "start_position_not_observed also falls back", r.text.slice(0, 200));
   t.clearCalls();
   await t.call("drag", { pid, x1: 1, y1: 2, x2: 3, y2: 4, hold_start_ms: 0, hold_end_ms: 0 });
   check(t.callsOf("placement-drag").length === 0 && t.callsOf("mousedown").length === 1, "default drag (no placement) is unchanged");

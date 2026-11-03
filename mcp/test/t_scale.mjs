@@ -34,6 +34,20 @@ try {
   const both = await t.call("capture", { pid, scale: 0.5, zoom: 2 });
   check(both.isError === true && /one of/.test(both.text), "scale + zoom together is an explicit error", both.text.slice(0, 200));
 
+  // zoom + max_width: the zoom is reduced so the returned image is never wider than max_width
+  const zm = await t.call("capture", { pid, region: { x: 100, y: 50, w: 200, h: 100 }, zoom: 4, max_width: 600 });
+  const zmi = returned(zm);
+  check(!zm.isError && zmi.width === 600 && zmi.height === 300 && zm.json?.image?.scale === 3 && zm.json?.image?.offset_x === 100,
+    "zoom 4 + max_width 600 on a 200 px region = 600 px wide (effective scale 3)", `${zm.text.slice(0, 160)} ${zmi?.width}x${zmi?.height}`);
+  const zk = await t.call("capture", { pid, region: { x: 100, y: 50, w: 200, h: 100 }, zoom: 2, max_width: 1000 });
+  check(!zk.isError && returned(zk).width === 400 && zk.json?.image?.scale === 2, "zoom 2 + max_width 1000: the cap does not bind, zoom stays 2");
+  const sm = await t.call("capture", { pid, scale: 0.5, max_width: 300 });
+  check(sm.isError === true && /one of/.test(sm.text), "scale + max_width together stays an explicit error", sm.text.slice(0, 200));
+  const jz = await t.call("capture", { pid, format: "jpeg", zoom: 2 });
+  check(jz.isError === true && /max_width/.test(jz.text) && /png/i.test(jz.text), "jpeg + zoom: the error names the fix (png + max_width)", jz.text.slice(0, 260));
+  const jg = await t.call("capture", { pid, format: "jpeg", grid: 100 });
+  check(jg.isError === true && /max_width|scale/.test(jg.text) && /png/i.test(jg.text), "jpeg + grid: the error names the fix (png + max_width / scale)", jg.text.slice(0, 260));
+
   const zg = await t.call("capture", { pid, region: { x: 100, y: 50, w: 200, h: 100 }, zoom: 2, grid: 50 });
   const zgi = returned(zg);
   check(zgi.width === 400 && !near(px(zgi, 100, 20), [150, 70, 77], 0) && near(px(zgi, 60, 20), [130, 60, 77], 0), "grid + zoom: line for client x=150 at image x=(150-100)*2=100", JSON.stringify([px(zgi, 100, 20), px(zgi, 60, 20)]));

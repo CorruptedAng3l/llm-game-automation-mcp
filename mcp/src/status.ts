@@ -99,6 +99,12 @@ export function compactStatus(s: Obj): Obj {
     counters: nonzero,
   };
   if (claim?.active) out.claimed_by = claim.owner;
+  // the owner (human) is using the game window: real input passes through and the virtual cursor stands down until the next agent command
+  if (typeof s.cursor_effective === "string") out.cursor_effective = s.cursor_effective;
+  if (s.owner_active === true) {
+    out.owner_active = true;
+    warnings.push("The user is using the game window right now (owner_active): their real mouse and keyboard reach the game and the cursor the game reads is the real one, until your next input command. Expect the picture to change under you; look before you act.");
+  }
   // what this game's vinput DLL can do (older DLLs report none of these)
   const caps: Obj = {};
   if (typeof s.capture_output_version === "number") caps.capture_output_version = s.capture_output_version;

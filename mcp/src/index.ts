@@ -2,6 +2,7 @@
 // llm-game-automation-mcp: an MCP (stdio) server that lets an LLM agent play single-player / offline Windows games
 // through vinput. Every tool runs the vinput CLI and returns its JSON reply verbatim, with "ok" surfaced as isError.
 // Offline games only: vinput injects a DLL and refuses targets with a known anti-cheat (see DISCLAIMER.md).
+import { sizeMismatchWarning } from "./launchsize.js";
 import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -43,14 +44,18 @@ function exitedReply(pid: number, code: number | null): ToolReply {
   return { content: [{ type: "text", text: JSON.stringify({ ok: false, error, target_exited: true, pid, exit_code: code }) }], isError: true };
 }
 /** Extra reply fields describing frame health, from one status call ({} when status cannot be read). */
-async function frameHealth(pid: number): Promise<Record<string, unknown>> {
+async function frameHealth(pid: number, launchArgs?: string): Promise<Record<string, unknown>> {
   const st = await runVinput([...at(pid), "status"], 15000);
   if (!st.ok || typeof st.json !== "object" || !st.json) return {};
   const d = diagnoseFrames(st.json as Record<string, unknown>);
   const out: Record<string, unknown> = {};
   if (d.nothingPresented) out.nothing_presented = true;
   if (d.refusals) out.fullscreen_refusals = d.refusals;
-  if (d.warning) out.warnings = [d.warning];
+  const warnings: string[] = d.warning ? [d.warning] : [];
+  const sj = st.json as { client_w?: unknown; client_h?: unknown };
+  const sizeWarn = sizeMismatchWarning(launchArgs, { w: sj.client_w, h: sj.client_h });
+  if (sizeWarn) { warnings.push(sizeWarn); out.requested_size_ignored = true; }
+  if (warnings.length) out.warnings = warnings;
   if (d.note) out.notes = [d.note];
   return out;
 }
@@ -59,6 +64,10 @@ function fail(message: string): ToolReply {
 }
 /** The CLI refused an option because the injected DLL is older than the CLI (it says so before sending any input). */
 const lacksSupport = (r: CliResult) => !r.ok && /\blacks\b/i.test(String((r.json as { error?: unknown })?.error ?? ""));
+/** A placement drag that failed BEFORE the pointer moved because the game never READ the button (Unity and other games that read
+ *  buttons through window messages, not DirectInput). Nothing was dragged, so the plain drag is the safe retry. */
+const placementPressNotSeen = (r: CliResult): string | undefined =>
+  r.ok ? undefined : /button_down_not_observed|press_position_not_observed|start_position_not_observed/.exec(JSON.stringify(r.json ?? {}))?.[0];
 /** Polled-click / release / edge evidence from one vinput reply, as a small summary (undefined when the build reports none). */
 function inputEvidence(j: unknown): Record<string, unknown> | undefined {
   if (!j || typeof j !== "object") return undefined;
@@ -129,7 +138,7 @@ tool("launch", "Launch a game",
   "anticheat_refused:true if the game or the machine has a known anti-cheat.",
   {
     exe: z.string().optional().describe("Full path of the game executable."),
-    args: z.string().optional().describe("Command line arguments for the game, e.g. \"-windowed -width 1280 -height 720\"."),
+    args: z.string().optional().describe("Command line arguments for the game, e.g. \"-windowed -width 1280 -height 720\". Many games ignore size switches because a saved setting wins: launch then warns (warnings, requested_size_ignored) when the window's client size differs from the size you asked for, so set the size in the game's own options."),
     cwd: z.string().optional().describe("Working directory for the game (exe launches only). Default: the exe's own folder, which is what most old games need, so leave it out unless the game wants something else."),
     aumid: z.string().optional().describe("UWP / Xbox app user model id, e.g. 'Publisher.Game_abc123!App'."),
     steam_appid: z.string().optional().describe("Steam app id; starts the game through Steam (needs wait_exe)."),
@@ -159,7 +168,7 @@ tool("launch", "Launch a game",
     const lp = r.ok ? (r.json as { pid?: number }).pid : undefined;
     const extra: Record<string, unknown> = {};
     if (lp && a.claim) { const c = await runVinput([...at(lp), "claim", "--ttl", "3600"], 15000); extra.claim = c.json; }
-    if (lp) Object.assign(extra, await frameHealth(lp));
+    if (lp) Object.assign(extra, await frameHealth(lp, a.args));
     return reply(r, extra);
   });
 
@@ -288,13 +297,13 @@ tool("capture", "Capture a frame",
       "Downscale the RETURNED image to at most this many pixels wide (never upscales) to save tokens, e.g. 960. The reply's image " +
       "{scale, offset_x, offset_y} maps it back: client = offset + image / scale. click / move / drag take coord_space:\"capture\" to " +
       "do that for you."),
-    scale: z.number().min(0.05).max(8).optional().describe("Explicit resize factor for the returned image (0.5 = half size). Give only one of max_width, scale, zoom."),
-    zoom: z.number().min(1).max(8).optional().describe("Enlarge the returned image (crisp pixels) to read small text / icons: use with region, e.g. region 200x100 + zoom 4. Give only one of max_width, scale, zoom."),
-    format: z.enum(["png", "jpeg"]).optional().describe("png (default, exact pixels) or jpeg (much smaller, lossy: do not use it to compare colours). jpeg needs a vinput build with capture output support and cannot be combined with grid or zoom."),
+    scale: z.number().min(0.05).max(8).optional().describe("Explicit resize factor for the returned image (0.5 = half size). Give only one of scale, max_width / zoom (max_width may be combined with zoom as a cap)."),
+    zoom: z.number().min(1).max(8).optional().describe("Enlarge the returned image (crisp pixels) to read small text / icons: use with region, e.g. region 200x100 + zoom 4. Combine with max_width to cap the zoomed width (the zoom is reduced to fit, e.g. region 400 wide + zoom 4 + max_width 960 returns 960 px). Not with scale. Needs format png."),
+    format: z.enum(["png", "jpeg"]).optional().describe("png (default, exact pixels) or jpeg (much smaller, lossy: do not use it to compare colours). jpeg needs a vinput build with capture output support and cannot be combined with grid or zoom (both are drawn on the decoded PNG; for a small labelled image use format png with max_width or scale instead)."),
     quality: z.number().int().min(1).max(100).optional().describe("JPEG quality 1..100 (default 85)."),
   },
   async (a) => {
-    if ([a.max_width, a.scale, a.zoom].filter((v) => v !== undefined).length > 1) return fail("give only one of max_width, scale, zoom");
+    if (a.scale !== undefined && (a.max_width !== undefined || a.zoom !== undefined)) return fail("give only one of scale, max_width / zoom (max_width may be combined with zoom as a cap on the zoomed width)");
     const v = validateFormat(a);
     if (v) return fail(v);
     const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image, grid: a.grid, max_width: a.max_width, scale: a.scale, zoom: a.zoom, format: a.format, quality: a.quality });
@@ -303,8 +312,8 @@ tool("capture", "Capture a frame",
 
 function validateFormat(a: { format?: "png" | "jpeg"; quality?: number; grid?: number; zoom?: number }): string | undefined {
   if (a.quality !== undefined && a.format !== "jpeg") return "quality applies only to format jpeg";
-  if (a.format === "jpeg" && a.grid !== undefined) return "grid needs format png (the grid is drawn on the decoded image)";
-  if (a.format === "jpeg" && a.zoom !== undefined) return "zoom needs format png";
+  if (a.format === "jpeg" && a.grid !== undefined) return "grid needs format png: the grid is drawn on the decoded image and only PNG can be decoded here. Drop format (png) and shrink with max_width or scale instead, or keep jpeg and drop grid (read coordinates from a png capture first)";
+  if (a.format === "jpeg" && a.zoom !== undefined) return "zoom needs format png: the enlargement is done on the decoded image and only PNG can be decoded here. Drop format (png) and cap the size with max_width, or keep jpeg and drop zoom (use max_width / scale with jpeg)";
   return undefined;
 }
 
@@ -379,7 +388,7 @@ async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeo
         try {
           let im = decodePng(png);
           let factor = wantScale ?? 1;
-          if (wantW !== undefined && im.width > wantW) factor = wantW / im.width;
+          if (wantW !== undefined && im.width * factor > wantW) factor = wantW / im.width;   // max_width caps the final (zoomed) width
           if (factor !== 1) {
             const nw = Math.max(1, Math.round(im.width * factor)), nh = Math.max(1, Math.round(im.height * factor));
             mapping.scale = nw / im.width;
@@ -702,7 +711,9 @@ tool("drag", "Drag",
       "Use vinput's owned placement drag (one job inside the game): it waits until the game has READ the press, each step's cursor " +
       "position, the final position and the release, so a slow game cannot miss the pickup or the drop. Needs a game that reads " +
       "the cursor (GetCursorPos) and the mouse buttons through DirectInput, and a vinput build that supports it; otherwise the " +
-      "normal press / move / release sequence is used and the reply says why (placement_fallback). The reply's evidence shows " +
+      "normal press / move / release sequence is used and the reply says why (placement_fallback). The same fallback happens " +
+      "automatically when the game never reads the press (button_down_not_observed: Unity-style games that read buttons through window " +
+      "messages); plain drag works there. The reply's evidence shows "+
       "what was observed; it is still not proof the game placed the item."),
     poll_timeout_ms: z.number().int().min(1).max(5000).optional().describe("placement: how long to wait for each read (default 1000)."),
     ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema },
@@ -720,14 +731,17 @@ tool("drag", "Drag",
       const pr = await runVinput([...at(a.pid), "placement-drag", String(x1), String(y1), String(x2), String(y2), "--steps", String(Math.min(128, steps)),
         "--ms", String(ms), "--hold-ms", String(holdStart), "--dwell-ms", String(holdEnd), "--button", btn, ...opt("--poll-timeout-ms", a.poll_timeout_ms)],
         ms + holdStart + holdEnd + (Math.min(128, steps) + 4) * (a.poll_timeout_ms ?? 1000) + 60000);
-      if (!lacksSupport(pr)) {
+      const notSeen = placementPressNotSeen(pr);
+      if (!lacksSupport(pr) && !notSeen) {
         const ok = pr.ok;
         const parked = a.park_cursor && ok ? await parkCursor(a.pid) : undefined;
         const evidence = inputEvidence(pr.json);
         return look(a.pid, reply(pr, { placement: true, steps: Math.min(128, steps), ms, hold_start_ms: holdStart, hold_end_ms: holdEnd,
           ...(evidence ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after);
       }
-      placementFallback = `${(pr.json as { error?: string }).error ?? "placement drag unsupported"}: used press / move / release instead`;
+      placementFallback = notSeen
+        ? `${notSeen}: this game does not read mouse buttons through DirectInput (Unity-style window messages), so the placement drag could not confirm the press; used the plain press / move / release drag instead`
+        : `${(pr.json as { error?: string }).error ?? "placement drag unsupported"}: used press / move / release instead`;
     }
     const down = await runVinput([...at(a.pid), "mousedown", btn, String(x1), String(y1)], 60000);
     if (!down.ok) return reply({ ...down, ok: false, json: { ok: false, error: "drag: mouse down failed", down: down.json } });

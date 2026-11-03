@@ -37,6 +37,14 @@ try {
   check(/minimi[sz]ed/i.test(ms), "warning: minimised", ms);
   check(/hook/i.test(ms) && /Present/.test(ms), "warning: failed hooks listed", ms);
 
+  t.setScenario({ replies: { status: fullStatus({ owner_active: true, cursor_effective: "real" }) } });
+  const oa = await t.call("status", { pid });
+  check(oa.json?.owner_active === true && oa.json?.cursor_effective === "real" && /owner_active/.test((oa.json?.warnings ?? []).join(" ")),
+    "owner_active / cursor_effective surfaced with a warning", JSON.stringify(oa.json).slice(0, 200));
+  t.setScenario({ replies: { status: fullStatus({ owner_active: false, cursor_effective: "virtual" }) } });
+  const oi = await t.call("status", { pid });
+  check(!oi.json?.owner_active && oi.json?.cursor_effective === "virtual" && !/owner_active/.test((oi.json?.warnings ?? []).join(" ")), "inactive owner: cursor_effective shown, no warning");
+
   t.setScenario({ replies: { status: { ok: false, error: "boom" } } });
   const e = await t.call("status", { pid });
   check(e.isError && e.json?.ok === false, "an error reply is passed through");
