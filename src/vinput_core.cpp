@@ -755,6 +755,26 @@ BOOL WINAPI h_GetKeyboardState(PBYTE ks) {
     }
     return r;
 }
+using PFN_TM = BOOL(WINAPI*)(const MSG*);
+PFN_TM o_TranslateMessage = nullptr;
+// TranslateMessage derives WM_CHAR from the thread's REAL keyboard state, which a posted key message never changes. With a
+// virtual Ctrl or Shift held, a posted WM_KEYDOWN for 'a' therefore became a plain 'a' character, not the Ctrl+A code
+// (measured: key ctrl+a typed an "a" into a text field). Translate those messages from vinput's own key state instead.
+BOOL WINAPI h_TranslateMessage(const MSG* msg) {
+    if (!msg || !g_hwnd || msg->hwnd != g_hwnd || (msg->message != WM_KEYDOWN && msg->message != WM_SYSKEYDOWN) ||
+        !(g_vk[VK_CONTROL] || g_vk[VK_SHIFT]) || msg->wParam == 0 || msg->wParam > 255)
+        return o_TranslateMessage(msg);
+    BYTE state[256] = {};
+    for (int i = 1; i < 256; i++) if (g_vk[i]) state[i] = 0x80;
+    state[VK_CAPITAL] = (BYTE)((o_GetKeyState ? o_GetKeyState(VK_CAPITAL) : GetKeyState(VK_CAPITAL)) & 1);
+    wchar_t buf[8] = {};
+    HKL layout = GetKeyboardLayout(GetWindowThreadProcessId(msg->hwnd, nullptr));
+    int n = ToUnicodeEx((UINT)msg->wParam, (UINT)((msg->lParam >> 16) & 0xFF), state, buf, 8, 4, layout);
+    const bool sys = msg->message == WM_SYSKEYDOWN;
+    if (n < 0) { PostMessageW(msg->hwnd, sys ? WM_SYSDEADCHAR : WM_DEADCHAR, (WPARAM)buf[0], msg->lParam); return TRUE; }
+    for (int i = 0; i < n; i++) PostMessageW(msg->hwnd, sys ? WM_SYSCHAR : WM_CHAR, (WPARAM)buf[i], msg->lParam);
+    return n > 0 ? TRUE : FALSE;
+}
 BOOL WINAPI h_GetCursorPos(LPPOINT p) {
     C.gcur++;
     std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
@@ -1442,6 +1462,7 @@ void InstallUser32Hooks() {
     HookApi(u, "GetAsyncKeyState", &h_GetAsyncKeyState, &o_GetAsyncKeyState);
     HookApi(u, "GetKeyState", &h_GetKeyState, &o_GetKeyState);
     HookApi(u, "GetKeyboardState", &h_GetKeyboardState, &o_GetKeyboardState);
+    HookApi(u, "TranslateMessage", &h_TranslateMessage, &o_TranslateMessage);
     HookApi(u, "GetCursorPos", &h_GetCursorPos, &o_GetCursorPos);
     HookApi(u, "GetPhysicalCursorPos", &h_GetPhysicalCursorPos, &o_GetPhysicalCursorPos);
     HookApi(u, "SetCursorPos", &h_SetCursorPos, &o_SetCursorPos);
