@@ -74,6 +74,18 @@ Windows 10 22H2 (19045) x64, MSVC 19.51 (Visual Studio 18), PowerShell 7.6, Node
 | `mcp`: `npm run build && npm test` | build OK; 18 test files, 403 PASS, 0 FAIL (handshake 112 PASS, 38 tools) |
 | `mcp`: `npm run smoke` | smoke 30 PASS + glue 12 PASS, 0 FAIL |
 
+Fix pass after the Cities: Skylines field test (owner input, chords, placement fallback, launch size warning, capture options):
+
+| check | result |
+|---|---|
+| `build.bat` x64 + x86 | BUILD OK, 0 warnings |
+| `run_ownerinputtest.ps1` (x64 + x86) | 22 PASS, 0 FAIL each; against the previous behaviour 17 PASS, 5 FAIL (x64) |
+| `run_chordtest.ps1` (x64 + x86) | 8 PASS, 0 FAIL each; against the previous behaviour 4 PASS, 4 FAIL (x64): `ctrl+a` arrived as `a`, `shift+a` as lowercase `a` |
+| `verifyun_selftest.ps1` (background plan, 68 suites) | run 1: 68 passed, 0 failed; runs 2 and 3: 67 passed, 0 failed, 1 NOT MEASURED (`legacy_focus`: its quiet-machine control saw physical input; the case passes alone, 272 PASS / 0 FAIL, and on the previous build); run 4: 68 passed, 0 failed |
+| `mcp`: `npm run build && npm test && npm run smoke` | 19 test files PASS; smoke PASS, glue 12 PASS |
+| Cities: Skylines, live (windowed 1600x900, background input) | `key ctrl+a` selects all text in a Paradox login field; `drag placement:true` falls back with `placement_fallback`; dropdown list items take clicks in windowed mode |
+| NOT MEASURED | the true OS foreground check for owner input (the test fakes the predicate; needs a real click by the user); Unity text-field chords beyond the one field above |
+
 The foreground suites (`run_foreground_suite.ps1`) were not run for this snapshot.
 
 ## Real games
