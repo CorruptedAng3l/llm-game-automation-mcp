@@ -93,7 +93,8 @@ try {
   const TR = await call("trace", { pid, key: "a" });
   check(!TR.r.isError && TR.json?.ok === true && TR.json?.name, "trace key a", TR.text.slice(0, 200));
   const CG = await call("capture", { pid, grid: 100, max_width: 400 });
-  check(!CG.r.isError && !!CG.image && CG.json?.image?.scale === 0.5 && CG.json?.w === 800, "capture grid + max_width: image content, mapping scale 0.5", CG.text.slice(0, 300));
+  check(!CG.r.isError && !!CG.image && CG.json?.image?.scale === 0.5 && (CG.json?.image?.scaled_by === "vinput" ? CG.json?.source_w === 800 && CG.json?.w === 400 : CG.json?.w === 800),
+    "capture grid + max_width: image content, mapping scale 0.5 (vinput scaled: w = saved 400, source_w 800; else w = frame 800)", CG.text.slice(0, 300));
   const CM = await call("click", { pid, x: 200, y: 100, coord_space: "capture" });
   check(!CM.r.isError && CM.json?.mapped?.x === 400 && CM.json?.mapped?.y === 200, "click coord_space capture: image (200,100) -> client (400,200)", CM.text.slice(0, 300));
   const CA = await call("click", { pid, x: 4, y: 4, hold_ms: 150, capture_after: 2, park_cursor: true });

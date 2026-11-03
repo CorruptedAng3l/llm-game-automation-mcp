@@ -68,13 +68,12 @@ Windows 10 22H2 (19045) x64, MSVC 19.51 (Visual Studio 18), PowerShell 7.6, Node
 | check | result |
 |---|---|
 | `build.bat` x64 + x86 | BUILD OK, 0 warnings, 0 errors |
-| `verify\run_selftest.ps1` | 441 PASS, 0 FAIL in 4.7 min (includes `run_actest.ps1`) |
-| `verify\run_actest.ps1` | 26 PASS, 0 FAIL; against the previous build (no refusal): 10 PASS (fixtures and positive controls), 16 FAIL (red) |
-| `verify\run_locktest.ps1` | 48 checks x64 + 48 x86, 0 failures |
-| `verify\run_parsertests.ps1` | 2497 checks, 0 failures (x64 and x86, `/W4 /WX`) |
-| `verify\run_launchtest.ps1` | 58 checks, 0 failures |
-| `mcp`: `npm ci && npm run build && npm test` | build OK; handshake 89 PASS, 0 FAIL (28 tools) |
-| `mcp`: `npm run smoke` | 19 PASS, 0 FAIL |
+| `verify\run_selftest.ps1` (background plan, run twice) | both runs: 66 suites passed, 0 failed, 9 foreground suites skipped; 3168 PASS lines, 0 FAIL; about 22 min each (includes `run_actest.ps1`, `run_launchtest.ps1`, `run_dinput1test.ps1`, `run_overlaycapturetest.ps1`, `run_autoactivatetest.ps1`) |
+| `verify\run_actest.ps1` | 26 PASS, 0 FAIL |
+| `mcp`: `npm run build && npm test` | build OK; 18 test files, 403 PASS, 0 FAIL (handshake 112 PASS, 38 tools) |
+| `mcp`: `npm run smoke` | smoke 30 PASS + glue 12 PASS, 0 FAIL |
+
+The foreground suites (`run_foreground_suite.ps1`) were not run for this snapshot.
 
 ## Real games
 
