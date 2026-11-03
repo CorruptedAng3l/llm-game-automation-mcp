@@ -57,6 +57,18 @@ async function frameHealth(pid: number): Promise<Record<string, unknown>> {
 function fail(message: string): ToolReply {
   return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }], isError: true };
 }
+/** The CLI refused an option because the injected DLL is older than the CLI (it says so before sending any input). */
+const lacksSupport = (r: CliResult) => !r.ok && /\blacks\b/i.test(String((r.json as { error?: unknown })?.error ?? ""));
+/** Polled-click / release / edge evidence from one vinput reply, as a small summary (undefined when the build reports none). */
+function inputEvidence(j: unknown): Record<string, unknown> | undefined {
+  if (!j || typeof j !== "object") return undefined;
+  const s = j as Record<string, unknown>;
+  const keys = ["di_poll_mode", "di_poll_confirmed", "di_poll_timed_out", "di_poll_warning", "di_release_confirmed", "di_release_timed_out",
+    "di_release_warning", "di_press_release_confirmed", "edge_contact", "edge_sides", "edge_guard_applied", "edge_guard_bypassed"];
+  const out: Record<string, unknown> = {};
+  for (const k of keys) if (s[k] !== undefined) out[k] = s[k];
+  return Object.keys(out).length ? out : undefined;
+}
 
 /** argv prefix for a command aimed at one game process */
 const at = (pid: number) => ["--owner", OWNER, "--pid", String(pid)];
@@ -186,9 +198,15 @@ tool("config", "Configure vinput for a game",
     cursor: z.enum(["auto", "virtual", "real"]).optional().describe("Which cursor the game sees: virtual (vinput's own), real, or auto (decided per game)."),
     raw: z.enum(["auto", "post", "buffer", "off"]).optional().describe("How raw-input mouse deltas reach the game: post (WM_INPUT messages), buffer (GetRawInputBuffer), off, or auto."),
     msgs: z.enum(["auto", "on", "off"]).optional().describe("Whether window messages are sent for input: on, off, or auto."),
+    edge_margin: z.number().int().min(0).max(4096).optional().describe(
+      "Edge guard: keep injected cursor paths this many client pixels inside the window edge (vinput default 8, 0 = off), so " +
+      "games with edge scrolling do not pan. Replies then carry edge_contact / edge_guard_applied. Needs a vinput build with the edge guard."),
+    fullscreen: z.enum(["borderless", "refuse"]).optional().describe(
+      "What vinput does when the game asks for DXGI exclusive fullscreen (with nofullscreen on): borderless (default, the game " +
+      "gets a virtual fullscreen window and keeps rendering) or refuse (the request fails, the game stays windowed)."),
   },
   async (a) => {
-    const keys = ["fakefocus", "autoactivate", "isolate", "blockfocus", "nofullscreen", "keepvisible", "cursor", "raw", "msgs"] as const;
+    const keys = ["fakefocus", "autoactivate", "isolate", "blockfocus", "nofullscreen", "keepvisible", "cursor", "raw", "msgs", "edge_margin", "fullscreen"] as const;
     const want: Record<string, unknown> = {};
     for (const k of keys) if (a[k] !== undefined) want[k] = a[k];
     const r = await runVinput([...at(a.pid), "config", ...Object.entries(want).map(([k, v]) => `${k}=${v}`)], 30000);
@@ -250,9 +268,11 @@ tool("log", "Read vinput's log for a game",
 // ---------------------------------------------------------------- eyes
 tool("capture", "Capture a frame",
   "Screenshot of the game's own frame (D3D11/D3D12/OpenGL/Vulkan swapchain, PrintWindow fallback) taken in the background. " +
-  "Returns the PNG as an image plus JSON {path, w, h, method, capture_path, frame}. Image pixels = client pixels, so " +
-  "coordinates you read off the image can be passed straight to click / move. With region, the image is that crop; " +
-  "pass capture_space:true to click / move to use coordinates inside the crop.",
+  "Returns the PNG (or JPEG) as an image plus JSON {path, w, h, method, capture_path, frame}. Unscaled image pixels = client " +
+  "pixels, so coordinates you read off the image can be passed straight to click / move. With region, the image is that crop; " +
+  "pass capture_space:true to click / move to use coordinates inside the crop (after max_width / scale: inside the scaled image). " +
+  "max_width / scale <= 1 / format jpeg are done by vinput itself when the game's vinput supports it (image.scaled_by " +
+  "\"vinput\"), else by this server (\"mcp\").",
   {
     pid,
     path: z.string().optional().describe("Where to save the PNG (default: a new file in the captures folder)."),
@@ -270,21 +290,54 @@ tool("capture", "Capture a frame",
       "do that for you."),
     scale: z.number().min(0.05).max(8).optional().describe("Explicit resize factor for the returned image (0.5 = half size). Give only one of max_width, scale, zoom."),
     zoom: z.number().min(1).max(8).optional().describe("Enlarge the returned image (crisp pixels) to read small text / icons: use with region, e.g. region 200x100 + zoom 4. Give only one of max_width, scale, zoom."),
+    format: z.enum(["png", "jpeg"]).optional().describe("png (default, exact pixels) or jpeg (much smaller, lossy: do not use it to compare colours). jpeg needs a vinput build with capture output support and cannot be combined with grid or zoom."),
+    quality: z.number().int().min(1).max(100).optional().describe("JPEG quality 1..100 (default 85)."),
   },
   async (a) => {
     if ([a.max_width, a.scale, a.zoom].filter((v) => v !== undefined).length > 1) return fail("give only one of max_width, scale, zoom");
-    const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image, grid: a.grid, max_width: a.max_width, scale: a.scale, zoom: a.zoom });
+    const v = validateFormat(a);
+    if (v) return fail(v);
+    const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image, grid: a.grid, max_width: a.max_width, scale: a.scale, zoom: a.zoom, format: a.format, quality: a.quality });
     return g.out;
   });
+
+function validateFormat(a: { format?: "png" | "jpeg"; quality?: number; grid?: number; zoom?: number }): string | undefined {
+  if (a.quality !== undefined && a.format !== "jpeg") return "quality applies only to format jpeg";
+  if (a.format === "jpeg" && a.grid !== undefined) return "grid needs format png (the grid is drawn on the decoded image)";
+  if (a.format === "jpeg" && a.zoom !== undefined) return "zoom needs format png";
+  return undefined;
+}
 
 /** Mapping of the last image returned per game (image_px = (client_px - offset) * scale), for coord_space:"capture". */
 const lastMapping = new Map<number, Mapping>();
 
 /** One frame grab: runs vinput capture, attaches the PNG, and diagnoses "nothing presented / fullscreen refused" when the
  *  native path was not used. Shared by capture and the capture_after option of the action tools. */
-async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeof regionSchema>; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean; grid?: number; max_width?: number; scale?: number; zoom?: number }) {
-  const path = resolve(o.path ?? defaultCapturePath(pid));
-  const r = await runVinput([...at(pid), "capture", path, ...region(o.region), ...opt("--after-frames", o.after_frames), ...opt("--method", o.method === "native" ? "swapchain" : o.method)], 60000);
+async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeof regionSchema>; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean; grid?: number; max_width?: number; scale?: number; zoom?: number; format?: "png" | "jpeg"; quality?: number }) {
+  const jpeg = o.format === "jpeg";
+  const path = resolve(o.path ?? defaultCapturePath(pid, jpeg ? "jpg" : "png"));
+  const base = [...at(pid), "capture", path, ...region(o.region), ...opt("--after-frames", o.after_frames), ...opt("--method", o.method === "native" ? "swapchain" : o.method)];
+  // vinput's own output transform (capture_output_version 1): it can only shrink, and it also re-bases vinput's capture-space
+  // map on the saved image. zoom (enlarging) stays here.
+  const coreArgs = o.zoom !== undefined ? [] : [
+    ...(o.max_width !== undefined ? ["--max-width", String(o.max_width)] : []),
+    ...(o.scale !== undefined && o.scale <= 1 ? ["--scale", String(o.scale)] : []),
+    ...(jpeg ? ["--format", "jpeg", ...opt("--quality", o.quality)] : [])];
+  let r = await runVinput([...base, ...coreArgs], 60000);
+  let scaledBy: "vinput" | "mcp" | undefined, fallbackNote: string | undefined;
+  if (coreArgs.length && lacksSupport(r)) {
+    if (jpeg) return { r, out: reply(r, { error: "format jpeg needs a vinput DLL with capture output support in the game (restart the game with the current build); capture without format for PNG" }), saved: undefined as string | undefined, summary: undefined as Record<string, unknown> | undefined };
+    fallbackNote = "this game's vinput DLL has no capture output support: the image was scaled by the MCP server instead";
+    r = await runVinput(base, 60000);
+  } else if (coreArgs.length && r.ok) {
+    // Trust the core transform only when the reply proves it ran (it reports the client rectangle the image covers and the
+    // saved format); otherwise the image is the unscaled frame and the TS path below scales it.
+    const cj = r.json as { region_client_w?: unknown; format?: unknown };
+    const coreRan = typeof cj.region_client_w === "number" && cj.region_client_w > 0;
+    if (jpeg && cj.format !== "jpeg")
+      return { r, out: reply({ ...r, ok: false }, { error: "format jpeg was requested but vinput did not report a JPEG; capture without format for PNG" }), saved: undefined as string | undefined, summary: undefined as Record<string, unknown> | undefined };
+    if (coreRan && (o.max_width !== undefined || o.scale !== undefined)) scaledBy = "vinput";
+  }
   const j0 = (r.json && typeof r.json === "object" ? r.json : {}) as { method?: string; path?: string; error?: string };
   let extra: Record<string, unknown> = {};
   let stuck = false;
@@ -308,12 +361,20 @@ async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeo
   let png: Buffer | undefined, imgErr: string | undefined;
   const mapping: Mapping = { scale: 1, offset_x: o.region?.x ?? 0, offset_y: o.region?.y ?? 0 };
   let imageInfo: Record<string, unknown> | undefined;
+  if (scaledBy === "vinput") {
+    // vinput reports the client rectangle the saved image covers: image_px = (client_px - origin) * w / region_client_w
+    const j = r.json as { w?: number; region_client_w?: number; origin_x?: number; origin_y?: number };
+    if (j.w && j.region_client_w) mapping.scale = j.w / j.region_client_w;
+    if (typeof j.origin_x === "number") mapping.offset_x = j.origin_x;
+    if (typeof j.origin_y === "number") mapping.offset_y = j.origin_y;
+  }
   if (r.ok && o.include_image !== false) {
     saved = j0.path || path;
     try {
       png = readFileSync(saved);
       let w = (r.json as { w?: number }).w, h = (r.json as { h?: number }).h;
-      const wantScale = o.scale ?? o.zoom, wantW = o.max_width;
+      const wantScale = scaledBy ? undefined : o.scale ?? o.zoom, wantW = scaledBy ? undefined : o.max_width;
+      if (wantScale !== undefined || wantW !== undefined) scaledBy = "mcp";
       if (o.grid || wantScale !== undefined || wantW !== undefined) {
         try {
           let im = decodePng(png);
@@ -329,17 +390,19 @@ async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeo
           w = im.width; h = im.height;
         } catch (e) {
           imgErr = `could not process the image (${(e as Error).message}); the original image is returned unchanged`;
-          mapping.scale = 1;
+          if (scaledBy === "mcp") { mapping.scale = 1; scaledBy = undefined; }
         }
       }
-      imageInfo = { w, h, ...mapping, ...(o.grid && !imgErr ? { grid: o.grid } : {}), ...(imgErr ? { image_note: imgErr } : {}) };
+      imageInfo = { w, h, ...mapping, ...(scaledBy ? { scaled_by: scaledBy } : {}), ...(jpeg ? { format: "jpeg" } : {}),
+        ...(o.grid && !imgErr ? { grid: o.grid } : {}), ...(imgErr ? { image_note: imgErr } : {}) };
       lastMapping.set(pid, { ...mapping });
-    } catch (e) { imgErr = `capture reported ok but the PNG could not be read: ${(e as Error).message}`; }
+    } catch (e) { imgErr = `capture reported ok but the image could not be read: ${(e as Error).message}`; }
   }
+  if (fallbackNote) extra = { ...extra, notes: [...((extra.notes as string[] | undefined) ?? []), fallbackNote] };
   const out = reply(r, { ...extra, ...(imageInfo ? { image: imageInfo } : {}), ...(imageInfo?.image_note ? { image_note: imageInfo.image_note } : {}) });
   if (png) {
-    if (png.length > MAX_IMAGE_BYTES) out.content.push({ type: "text", text: `image not attached: ${png.length} bytes > ${MAX_IMAGE_BYTES}; use region to capture less` });
-    else out.content.push({ type: "image", data: png.toString("base64"), mimeType: "image/png" });
+    if (png.length > MAX_IMAGE_BYTES) out.content.push({ type: "text", text: `image not attached: ${png.length} bytes > ${MAX_IMAGE_BYTES}; use region, max_width or format jpeg to capture less` });
+    else out.content.push({ type: "image", data: png.toString("base64"), mimeType: jpeg ? "image/jpeg" : "image/png" });
   } else if (imgErr) { out.content.push({ type: "text", text: imgErr }); out.isError = true; }
   const j = r.json as Record<string, unknown>;
   const summary = r.ok ? { path: j.path, w: j.w, h: j.h, method: j.method, capture_path: j.capture_path, frame: j.frame, ...extra } : undefined;
@@ -449,6 +512,46 @@ tool("wait_change", "Wait for the screen to change",
   { pid, region: regionSchema.optional(), timeout_s: z.number().min(0.001).max(120).optional().describe("Seconds (default 10).") },
   async (a) => reply(await runVinput([...at(a.pid), "wait-change", ...region(a.region), ...opt("--timeout", a.timeout_s)], ((a.timeout_s ?? 10) + 60) * 1000)), true);
 
+tool("capture_burst", "Capture a contact sheet",
+  "Watch something happen: capture frames tiles (default 8) interval_ms apart (default 250) into ONE contact sheet image, in " +
+  "time order, left to right then top to bottom. Each tile is shrunk to max_width (default 320). Use it for animations, " +
+  "loading progress or whether a held key moves the character, instead of many capture calls. Late frames are skipped, " +
+  "not bunched; tiles[] in the reply has each tile's actual time and rectangle. A sheet is NOT a single game image: do not " +
+  "click coordinates read off it (capture once more first). Other tools keep working while it runs. Needs a vinput build " +
+  "with capture output support in the game.",
+  {
+    pid,
+    path: z.string().optional().describe("Where to save the sheet (default: a new file in the captures folder)."),
+    frames: z.number().int().min(1).max(16).optional().describe("Number of tiles, 1..16 (default 8)."),
+    interval_ms: z.number().int().min(10).max(5000).optional().describe("Time between tiles, 10..5000 ms (default 250). frames x interval is at most 30 s."),
+    columns: z.number().int().min(1).max(16).optional().describe("Tiles per row (default min(4, frames))."),
+    max_width: z.number().int().min(16).max(8192).optional().describe("Width of each tile in pixels (default 320)."),
+    scale: z.number().min(0.05).max(1).optional().describe("Tile scale instead of max_width (0.05..1)."),
+    format: z.enum(["png", "jpeg"]).optional().describe("png (default) or jpeg (smaller, lossy)."),
+    quality: z.number().int().min(1).max(100).optional().describe("JPEG quality (default 85)."),
+    region: regionSchema.optional(),
+    include_image: z.boolean().optional().describe("Return the sheet as an image (default true)."),
+  },
+  async (a) => {
+    if (a.max_width !== undefined && a.scale !== undefined) return fail("give only one of max_width, scale");
+    if (a.quality !== undefined && a.format !== "jpeg") return fail("quality applies only to format jpeg");
+    if (a.columns !== undefined && a.columns > (a.frames ?? 8)) return fail("columns cannot exceed frames");
+    const jpeg = a.format === "jpeg";
+    const path = resolve(a.path ?? defaultCapturePath(a.pid, jpeg ? "jpg" : "png", "_burst"));
+    const r = await runVinput([...at(a.pid), "capture-burst", path, ...opt("--frames", a.frames), ...opt("--interval-ms", a.interval_ms),
+      ...opt("--columns", a.columns), ...opt("--max-width", a.max_width), ...opt("--scale", a.scale), ...opt("--format", a.format),
+      ...opt("--quality", a.quality), ...region(a.region)], 120000);
+    const out = reply(r);
+    if (r.ok && a.include_image !== false) {
+      try {
+        const img = readFileSync((r.json as { path?: string }).path || path);
+        if (img.length > MAX_IMAGE_BYTES) out.content.push({ type: "text", text: `image not attached: ${img.length} bytes > ${MAX_IMAGE_BYTES}; use fewer frames, a smaller max_width or format jpeg` });
+        else out.content.push({ type: "image", data: img.toString("base64"), mimeType: jpeg ? "image/jpeg" : "image/png" });
+      } catch (e) { out.content.push({ type: "text", text: `burst reported ok but the sheet could not be read: ${(e as Error).message}` }); out.isError = true; }
+    }
+    return out;
+  }, true);
+
 // ---------------------------------------------------------------- mouse
 const xy = {
   x: z.number().describe("X in client pixels (or 0..1 with norm)."),
@@ -536,6 +639,12 @@ tool("click", "Click",
     hover_ms: z.number().int().min(0).max(5000).optional().describe(
       `Extra pause with the cursor already over the target, before the button goes down (default ${DEFAULT_CLICK_HOVER_MS} ms; 0 = none). ` +
       "vinput already waits for the hover to be dispatched and rendered; this adds time for hover-gated UI. Ignored when x / y are omitted."),
+    di_poll_timeout_ms: z.number().int().min(0).max(5000).optional().describe(
+      "For games that poll the mouse through DirectInput: vinput keeps the button down until the game has READ the press, and waits " +
+      "for a read of the release (default: automatic, at most 1000 ms extra per phase, only when the game read DirectInput recently). " +
+      "N = require both reads within N extra ms each (error if not seen); 0 = do not wait. The reply's evidence " +
+      "{di_poll_confirmed, di_release_confirmed} says what was observed; a read is not proof the game acted."),
+    di_release_timeout_ms: z.number().int().min(0).max(5000).optional().describe("Separate cap for the release read (0 = do not wait for it)."),
     ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema },
   async (a) => {
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
@@ -550,9 +659,13 @@ tool("click", "Click",
     const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "click target", x: Number(pos[0]), y: Number(pos[1]) }], a.edge_margin, a.norm);
     const cr = await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
       ...(a.x === undefined ? [] : ["--settle-ms", String(a.hover_ms ?? DEFAULT_CLICK_HOVER_MS)]),
-      ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS)], 60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0));
+      ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS),
+      ...(a.di_poll_timeout_ms !== undefined ? ["--di-poll-timeout-ms", String(a.di_poll_timeout_ms)] : []),
+      ...(a.di_release_timeout_ms !== undefined ? ["--di-release-timeout-ms", String(a.di_release_timeout_ms)] : [])],
+      60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0) + ((a.di_poll_timeout_ms ?? 1000) + (a.di_release_timeout_ms ?? 1000)) * (a.count ?? 1));
     const parked = a.park_cursor && cr.ok ? await parkCursor(a.pid) : undefined;
-    return look(a.pid, reply(cr, { ...mappedInfo, ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after);
+    const evidence = inputEvidence(cr.json);
+    return look(a.pid, reply(cr, { ...mappedInfo, ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after);
   });
 
 tool("move", "Move the cursor",
@@ -562,8 +675,10 @@ tool("move", "Move the cursor",
     const m = mapPoints(a.pid, a, [[a.x, a.y]]);
     if ("error" in m) return fail(m.error);
     const warnings = await edgeWarnings(a.pid, [{ label: "move target", x: m.pts[0][0], y: m.pts[0][1] }], a.edge_margin, a.norm);
-    return look(a.pid, reply(await runVinput([...at(a.pid), "mouse", String(m.pts[0][0]), String(m.pts[0][1]), ...opt("--norm", a.norm),
-      ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000), { ...(m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : {}), ...(warnings.length ? { warnings } : {}) }), a.capture_after);
+    const mr = await runVinput([...at(a.pid), "mouse", String(m.pts[0][0]), String(m.pts[0][1]), ...opt("--norm", a.norm),
+      ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000);
+    const evidence = inputEvidence(mr.json);
+    return look(a.pid, reply(mr, { ...(m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : {}), ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}) }), a.capture_after);
   });
 
 tool("move_relative", "Relative mouse motion",
@@ -583,6 +698,13 @@ tool("drag", "Drag",
     steps: z.number().int().min(1).max(200).optional().describe("Number of intermediate mouse moves (default: one per 20 ms of ms, 3 to 60)."),
     hold_start_ms: z.number().int().min(0).max(10000).optional().describe(`Hold the button at the start point before moving (default ${DEFAULT_DRAG_HOLD_START_MS} ms).`),
     hold_end_ms: z.number().int().min(0).max(10000).optional().describe(`Dwell at the destination, button still down, before releasing (default ${DEFAULT_DRAG_HOLD_END_MS} ms).`),
+    placement: z.boolean().optional().describe(
+      "Use vinput's owned placement drag (one job inside the game): it waits until the game has READ the press, each step's cursor " +
+      "position, the final position and the release, so a slow game cannot miss the pickup or the drop. Needs a game that reads " +
+      "the cursor (GetCursorPos) and the mouse buttons through DirectInput, and a vinput build that supports it; otherwise the " +
+      "normal press / move / release sequence is used and the reply says why (placement_fallback). The reply's evidence shows " +
+      "what was observed; it is still not proof the game placed the item."),
+    poll_timeout_ms: z.number().int().min(1).max(5000).optional().describe("placement: how long to wait for each read (default 1000)."),
     ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema },
   async (a) => {
     const m = mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
@@ -592,6 +714,21 @@ tool("drag", "Drag",
     const btn = a.button ?? "left", ms = a.ms ?? 300;
     const steps = a.steps ?? Math.min(60, Math.max(3, Math.round(ms / 20)));
     const holdStart = a.hold_start_ms ?? DEFAULT_DRAG_HOLD_START_MS, holdEnd = a.hold_end_ms ?? DEFAULT_DRAG_HOLD_END_MS;
+    const where = { ...(m.mapped ? { mapped: { x1, y1, x2, y2 } } : {}), ...(warnings.length ? { warnings } : {}) };
+    let placementFallback: string | undefined;
+    if (a.placement) {
+      const pr = await runVinput([...at(a.pid), "placement-drag", String(x1), String(y1), String(x2), String(y2), "--steps", String(Math.min(128, steps)),
+        "--ms", String(ms), "--hold-ms", String(holdStart), "--dwell-ms", String(holdEnd), "--button", btn, ...opt("--poll-timeout-ms", a.poll_timeout_ms)],
+        ms + holdStart + holdEnd + (Math.min(128, steps) + 4) * (a.poll_timeout_ms ?? 1000) + 60000);
+      if (!lacksSupport(pr)) {
+        const ok = pr.ok;
+        const parked = a.park_cursor && ok ? await parkCursor(a.pid) : undefined;
+        const evidence = inputEvidence(pr.json);
+        return look(a.pid, reply(pr, { placement: true, steps: Math.min(128, steps), ms, hold_start_ms: holdStart, hold_end_ms: holdEnd,
+          ...(evidence ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after);
+      }
+      placementFallback = `${(pr.json as { error?: string }).error ?? "placement drag unsupported"}: used press / move / release instead`;
+    }
     const down = await runVinput([...at(a.pid), "mousedown", btn, String(x1), String(y1)], 60000);
     if (!down.ok) return reply({ ...down, ok: false, json: { ok: false, error: "drag: mouse down failed", down: down.json } });
     let mv: CliResult | undefined, up: CliResult | undefined;
@@ -604,10 +741,11 @@ tool("drag", "Drag",
     }
     const ok = mv.ok && up.ok;
     const parked = a.park_cursor && ok ? await parkCursor(a.pid) : undefined;
+    const evidence = { ...(inputEvidence(mv.json) ?? {}), ...(inputEvidence(up.json) ?? {}) };
     return look(a.pid, reply({ ok, exitCode: ok ? 0 : 1, stderr: [mv.stderr, up.stderr].filter(Boolean).join("\n"), timedOut: false, argv: [],
       json: { ok, steps, ms, hold_start_ms: holdStart, hold_end_ms: holdEnd, down: down.json, move: mv.json, up: up.json,
         ...(ok ? {} : { error: !mv.ok ? `drag: move failed (the button was released): ${JSON.stringify((mv.json as { error?: string }).error ?? mv.json)}` : "drag: mouse up failed" }) } },
-      { ...(m.mapped ? { mapped: { x1, y1, x2, y2 } } : {}), ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after);
+      { ...(placementFallback ? { placement_fallback: placementFallback } : {}), ...(Object.keys(evidence).length ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after);
   });
 
 tool("scroll", "Scroll the mouse wheel",
@@ -623,14 +761,30 @@ tool("scroll", "Scroll the mouse wheel",
 
 // ---------------------------------------------------------------- keyboard / pad
 const keyCombo = z.string().min(1).describe("Key or chord: 'enter', 'esc', 'space', 'w', 'f5', 'up', 'ctrl+s', 'shift+tab', 'numpad2', 'vk45'. list_keys shows every name.");
+// ---- owned input jobs (vinput runs timed input on its own worker inside the game; capture and other tools keep working)
+const asyncArg = z.boolean().optional().describe(
+  "Return at once with a job_id instead of waiting for the input to finish; the hold keeps running inside the game (its own " +
+  "deadline still releases it if this server goes away). Check it with job_status, stop it early with job_cancel. Accepted " +
+  "means scheduled, not delivered. Needs a vinput build with input jobs in the game.");
+const replaceArg = z.boolean().optional().describe("async: replace an overlapping job / held key instead of being refused.");
+/** Hint added to an accepted async reply. */
+function jobExtra(r: CliResult): Record<string, unknown> | undefined {
+  const id = (r.json as { job_id?: unknown })?.job_id;
+  return r.ok && typeof id === "string" ? { note: `running in the background as job ${id}: job_status to follow it, job_cancel to stop it` } : undefined;
+}
 tool("key", "Press a key",
   "Press and release a key or chord in the game (delivered on every channel the game may read: messages, raw input, " +
   "DirectInput, GetAsyncKeyState). hold_ms keeps it down longer (e.g. walking).",
   { pid, key: keyCombo, hold_ms: z.number().int().min(1).max(60000).optional().describe("How long the key stays down (default ~80)."),
     count: z.number().int().min(1).max(100).optional(), gap_ms: z.number().int().min(0).max(10000).optional().describe("Pause between repeats."),
-    capture_after: captureAfterSchema },
-  async (a) => look(a.pid, reply(await runVinput([...at(a.pid), "key", a.key, ...(a.hold_ms ? [String(a.hold_ms)] : []), ...opt("--count", a.count), ...opt("--gap", a.gap_ms)],
-    (a.hold_ms ?? 0) * (a.count ?? 1) + (a.gap_ms ?? 0) * (a.count ?? 1) + 60000)), a.capture_after));
+    async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
+  async (a) => {
+    if (a.async && !a.hold_ms) return fail("async needs hold_ms (a bounded hold)");
+    if (a.async && (a.count ?? 1) > 1) return fail("async holds one press; count is not supported with async");
+    const r = await runVinput([...at(a.pid), "key", a.key, ...(a.hold_ms ? [String(a.hold_ms)] : []), ...opt("--count", a.count), ...opt("--gap", a.gap_ms),
+      ...opt("--async", a.async), ...opt("--replace", a.replace)], a.async ? 60000 : (a.hold_ms ?? 0) * (a.count ?? 1) + (a.gap_ms ?? 0) * (a.count ?? 1) + 60000);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+  });
 
 tool("key_down", "Hold a key down", "Press a key (or mouse button name like 'rbutton') and keep it down until key_up or release.",
   { pid, key: keyCombo }, async (a) => reply(await runVinput([...at(a.pid), "down", a.key], 30000)));
@@ -658,13 +812,122 @@ tool("pad", "Gamepad (XInput)",
     lx: z.number().int().min(-32768).max(32767).optional(), ly: z.number().int().min(-32768).max(32767).optional(),
     rx: z.number().int().min(-32768).max(32767).optional(), ry: z.number().int().min(-32768).max(32767).optional(),
     lt: z.number().int().min(0).max(255).optional(), rt: z.number().int().min(0).max(255).optional(),
-    hold: z.boolean().optional(), off: z.boolean().optional(), capture_after: captureAfterSchema },
+    hold: z.boolean().optional(), off: z.boolean().optional(), async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
   async (a) => {
     if (a.off) return look(a.pid, reply(await runVinput([...at(a.pid), "pad", "off"], 30000)), a.capture_after);
-    return look(a.pid, reply(await runVinput([...at(a.pid), "pad", a.buttons ?? "none", ...(a.ms ? [String(a.ms)] : []),
+    if (a.async && (a.hold || !a.ms)) return fail("async needs ms (a bounded duration) and cannot be combined with hold");
+    const r = await runVinput([...at(a.pid), "pad", a.buttons ?? "none", ...(a.ms ? [String(a.ms)] : []),
       ...opt("--lx", a.lx), ...opt("--ly", a.ly), ...opt("--rx", a.rx), ...opt("--ry", a.ry), ...opt("--lt", a.lt), ...opt("--rt", a.rt),
-      ...opt("--hold", a.hold)], (a.ms ?? 0) + 60000)), a.capture_after);
+      ...opt("--hold", a.hold), ...opt("--async", a.async), ...opt("--replace", a.replace)], a.async ? 60000 : (a.ms ?? 0) + 60000);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
   });
+
+const axis = z.enum(["lx", "ly", "rx", "ry", "lt", "rt"]);
+const stickV = z.number().int().min(-32768).max(32767), trigV = z.number().int().min(0).max(255);
+const padConst = {
+  lx: stickV.optional(), ly: stickV.optional(), rx: stickV.optional(), ry: stickV.optional(), lt: trigV.optional(), rt: trigV.optional(),
+};
+const pacingArg = z.enum(["frames", "time"]).optional().describe(
+  "frames (default): advance at the game's presented frames, so a slow or paused game is not overrun (needs a game that presents " +
+  "through D3D / GL / Vulkan); time: wall clock, for games vinput sees no frames from.");
+
+tool("pad_ramp", "Ramp a pad axis",
+  "Proportional steering: move ONE XInput axis smoothly from 'from' to 'to' over ms (e.g. ease the left stick from 0 to " +
+  "16000 to turn gently), with the other axes held at the constants given, then hold the end value for end_hold_ms and " +
+  "release. Runs as a job inside the game (async:true returns at once with a job_id). The reply reports updates, skipped " +
+  "frames and lateness; it proves what the game was handed, not what it did.",
+  { pid, axis, from: z.number().int().min(-32768).max(32767), to: z.number().int().min(-32768).max(32767),
+    ms: z.number().int().min(1).max(118000).describe("Ramp duration."),
+    ...padConst, buttons: z.string().optional().describe("Buttons held during the ramp, e.g. 'a' or 'a+rb'."),
+    end_hold_ms: z.number().int().min(0).max(10000).optional().describe("Hold the final value this long before releasing (default 0)."),
+    pacing: pacingArg, async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
+  async (a) => {
+    if ((a.axis === "lt" || a.axis === "rt") && (a.from < 0 || a.from > 255 || a.to < 0 || a.to > 255)) return fail("trigger ramps run 0..255");
+    if (a[a.axis] !== undefined) return fail(`${a.axis} is the ramped axis; give it only as from / to`);
+    const cmd: Record<string, unknown> = { cmd: "pad-ramp", axis: a.axis, from: a.from, to: a.to, ms: a.ms };
+    for (const k of ["lx", "ly", "rx", "ry", "lt", "rt"] as const) if (a[k] !== undefined) cmd[k] = a[k];
+    if (a.buttons) cmd.buttons = a.buttons;
+    if (a.end_hold_ms !== undefined) cmd.end_hold_ms = a.end_hold_ms;
+    if (a.pacing) cmd.pacing = a.pacing;
+    if (a.async) cmd.async = true;
+    if (a.replace) cmd.replace = true;
+    const r = await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], a.async ? 60000 : a.ms + (a.end_hold_ms ?? 0) + 60000);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+  });
+
+const timelineState = z.object({
+  at_ms: z.number().int().min(0).max(120000).describe("When this state starts, ms from the start (first state 0, strictly increasing)."),
+  ...padConst,
+}).strict();
+tool("pad_timeline", "Timed pad script",
+  "Play a list of XInput stick / trigger states at given times, e.g. [{at_ms:0,lx:0,ly:20000},{at_ms:400,lx:16000,ly:20000}," +
+  "{at_ms:900,lx:0,ly:0}] = drive forward, steer right, stop. Axes not given in a state are 0. Runs as one job inside the " +
+  "game; frame pacing never bunches overdue states (it reports skipped_states / max_lateness_ms), strict_frames fails instead " +
+  "of skipping. ms = total duration if it should run past the last state (default: the last at_ms). At most 256 states.",
+  { pid, states: z.array(timelineState).min(1).max(256),
+    ms: z.number().int().min(0).max(120000).optional(), end_hold_ms: z.number().int().min(0).max(10000).optional(),
+    pacing: pacingArg, strict_frames: z.boolean().optional(), async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
+  async (a) => {
+    if (a.states[0].at_ms !== 0) return fail("the first state must have at_ms 0");
+    for (let i = 1; i < a.states.length; i++) if (a.states[i].at_ms <= a.states[i - 1].at_ms) return fail("at_ms must increase strictly from state to state");
+    if (a.strict_frames && a.pacing === "time") return fail("strict_frames needs frame pacing");
+    const cmd: Record<string, unknown> = { cmd: "pad-timeline", states_json: JSON.stringify(a.states) };
+    if (a.ms !== undefined) cmd.ms = a.ms;
+    if (a.end_hold_ms !== undefined) cmd.end_hold_ms = a.end_hold_ms;
+    if (a.pacing) cmd.pacing = a.pacing;
+    if (a.strict_frames) cmd.strict_frames = true;
+    if (a.async) cmd.async = true;
+    if (a.replace) cmd.replace = true;
+    const total = Math.max(a.ms ?? 0, a.states[a.states.length - 1].at_ms) + (a.end_hold_ms ?? 0);
+    const r = await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], a.async ? 60000 : total + 60000);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+  });
+
+tool("pulse", "Pulse a key (proportional)",
+  "Key PWM for proportional control with digital keys: within each period_ms the key is down for duty percent (e.g. steer " +
+  "gently with 'a' at duty 30). Runs for ms in total as a job inside the game. Late edges are coalesced, never bunched; the " +
+  "game may still miss very short pulses, so use periods of 100 ms or more.",
+  { pid, key: keyCombo, ms: z.number().int().min(20).max(118000).describe("Total duration."),
+    duty: z.number().min(0).max(100).describe("Percent of each period the key is down."),
+    period_ms: z.number().int().min(20).max(10000).optional().describe("PWM period (default 100)."),
+    async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
+  async (a) => {
+    const r = await runVinput([...at(a.pid), "pulse", a.key, String(a.ms), "--duty", String(a.duty), ...opt("--period-ms", a.period_ms),
+      ...opt("--async", a.async), ...opt("--replace", a.replace)], a.async ? 60000 : a.ms + 60000);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+  });
+
+tool("hold_while", "Hold until text appears",
+  "Hold a key (or pad buttons / sticks) and watch the screen: stops as soon as until_text appears (OCR), or after timeout_ms. " +
+  "One call, no polling: e.g. hold 'w' until 'Village' shows. The hold always ends when the call returns (success, miss or " +
+  "error). The text appearing is what was observed, not proof the hold caused it.",
+  { pid, key: keyCombo.optional().describe("Key or chord to hold (give key, or pad buttons / sticks)."),
+    pad_buttons: z.string().optional().describe("Pad buttons to hold instead of a key, e.g. 'a' or 'none' with sticks."),
+    ...padConst, until_text: z.string().min(1).max(512),
+    timeout_ms: z.number().int().min(100).max(118000).optional().describe("Give up after this long (default 5000)."),
+    region: regionSchema.optional(), exact: z.boolean().optional(), fuzzy: z.number().int().min(0).max(3).optional() },
+  async (a) => {
+    const sticks = (["lx", "ly", "rx", "ry", "lt", "rt"] as const).filter((k) => a[k] !== undefined);
+    const isPad = a.pad_buttons !== undefined || sticks.length > 0;
+    if (isPad === (a.key !== undefined)) return fail("give either key, or pad_buttons / sticks");
+    const argv = [...at(a.pid), isPad ? "pad-hold-while" : "hold-while", isPad ? (a.pad_buttons ?? "none") : (a.key as string),
+      "--until-text", a.until_text, ...opt("--timeout-ms", a.timeout_ms), ...region(a.region), ...opt("--exact", a.exact), ...opt("--fuzzy", a.fuzzy),
+      ...sticks.flatMap((k) => [`--${k}`, String(a[k])])];
+    return reply(await runVinput(argv, (a.timeout_ms ?? 5000) + 60000));
+  });
+
+tool("job_status", "Input job status",
+  "State of a background input job (from async key / pad / pulse / pad_ramp / pad_timeline / drag placement): job_state, " +
+  "job_reason, job_complete, hold_ready, counts and timing. Without id: every job vinput still remembers for this game " +
+  "(finished jobs are kept for about 60 s).",
+  { pid, id: z.string().min(1).optional().describe("job_id from the async reply.") },
+  async (a) => reply(await runVinput([...at(a.pid), ...(a.id ? ["job-status", a.id] : ["jobs"])], 15000)), true);
+
+tool("job_cancel", "Cancel an input job",
+  "Stop one background input job now and release exactly what it was holding (other held input is untouched). Use release to " +
+  "drop everything instead.",
+  { pid, id: z.string().min(1).describe("job_id from the async reply.") },
+  async (a) => reply(await runVinput([...at(a.pid), "job-cancel", a.id], 15000)));
 
 tool("trace", "Trace one key's delivery",
   "Per-key diagnosis: how many times vinput injected this key and through which channels the game actually read it " +

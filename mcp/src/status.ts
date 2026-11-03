@@ -15,8 +15,12 @@ export function configView(s: Obj): Obj {
     cursor: name(CURSOR_NAMES, s.cursor_mode) ?? s.cursor_mode,
     raw: name(RAW_NAMES, s.rawmode) ?? s.rawmode,
     msgs: name(MSGS_NAMES, s.msgmode) ?? s.msgmode,
+    ...(s.edge_margin !== undefined ? { edge_margin: s.edge_margin } : {}),
+    ...(fsPolicy(s) !== undefined ? { fullscreen: fsPolicy(s) } : {}),
   };
 }
+/** DXGI fullscreen policy from status.fullscreen.policy (borderless / refuse / native), when the build reports it. */
+function fsPolicy(s: Obj): unknown { const f = s.fullscreen as { policy?: unknown } | undefined; return f && typeof f === "object" ? f.policy : undefined; }
 
 /** Strip vinput's "[ 12.345] " time prefix so repeated messages compare equal. */
 const stripStamp = (l: string) => l.replace(/^\[\s*[\d.]+\]\s*/, "");
@@ -95,6 +99,14 @@ export function compactStatus(s: Obj): Obj {
     counters: nonzero,
   };
   if (claim?.active) out.claimed_by = claim.owner;
+  // what this game's vinput DLL can do (older DLLs report none of these)
+  const caps: Obj = {};
+  if (typeof s.capture_output_version === "number") caps.capture_output_version = s.capture_output_version;
+  if (s.input_precision && typeof s.input_precision === "object") Object.assign(caps, s.input_precision);
+  if (Object.keys(caps).length) out.capabilities = caps;
+  if (s.edge_contact === true) { out.edge_contact = true; out.edge_sides = s.edge_sides;
+    warnings.push("The virtual cursor rests on the window edge (edge_contact): games with edge scrolling pan the view while it stays there. Move it inside, or use park_cursor."); }
+  if (fsPolicy(s) !== undefined) out.fullscreen = s.fullscreen;
   out.warnings = warnings;
   return out;
 }

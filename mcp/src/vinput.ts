@@ -32,9 +32,9 @@ export function captureDir(): string {
   return dir;
 }
 
-export function defaultCapturePath(pid: number): string {
+export function defaultCapturePath(pid: number, ext = "png", tag = ""): string {
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "").replace("T", "_");
-  return join(captureDir(), `pid${pid}_${stamp}_${Math.floor(Math.random() * 1e6)}.png`);
+  return join(captureDir(), `pid${pid}${tag}_${stamp}_${Math.floor(Math.random() * 1e6)}.${ext}`);
 }
 
 /** Last stdout line that parses as JSON (vinput prints exactly one JSON reply line; progress goes to stderr). */

@@ -2,7 +2,8 @@
 //   VINPUT_FAKE_LOG       append one JSON line per call: {argv:[...]}
 //   VINPUT_FAKE_SCENARIO  JSON file: { "replies": { "<command>": <json reply> | {"_exit":1,"_stderr":"..","_delay_ms":N,...} },
 //                                       "exit_code": N }        (exit code `waitexit` reports once the pid has died)
-// Anything not in the scenario gets {"ok":true}. `capture` also writes a 1x1 PNG to its path argument.
+// Anything not in the scenario gets {"ok":true}. `capture` and `capture-burst` also write a 1x1 PNG to their path argument
+// (`capture` writes a synthetic frame instead when the scenario has png:{w,h[,core_capture]}).
 // Like the real CLI, a call for a pid that is not running fails with "cannot connect ... process gone".
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -40,14 +41,26 @@ if (cmd === "capture" && rest[1]) {
     let [ox, oy, w, h] = [0, 0, scen.png.w, scen.png.h];
     const ri = rest.indexOf("--region");
     if (ri > 0) [ox, oy, w, h] = rest[ri + 1].split(",").map(Number);
-    const data = Buffer.alloc(w * h * 4);
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const o = (y * w + x) * 4; data[o] = (ox + x) & 255; data[o + 1] = (oy + y) & 255; data[o + 2] = 77; data[o + 3] = 255; }
-    writeFileSync(rest[1], scen.png.garbage ? Buffer.from("this is not a png") : encodePng({ width: w, height: h, data }));
-    scen.replies = { ...scen.replies, capture: { ok: true, method: "swapchain", capture_path: "d3d11", w, h, frame: 1, ...(scen.replies?.capture ?? {}) } };
+    // core output transform (scenario core_capture:true, like a DLL with capture_output_version 1): --scale / --max-width
+    // shrink (nearest sample), --format jpeg writes JPEG magic bytes; the reply carries the client rectangle the image covers
+    const flag = (f) => { const i = rest.indexOf(f); return i > 0 ? rest[i + 1] : undefined; };
+    const core = scen.png.core_capture && (flag("--scale") || flag("--max-width") || flag("--format"));
+    let f = 1;
+    if (core && flag("--scale")) f = Math.min(1, Number(flag("--scale")));
+    if (core && flag("--max-width") && w > Number(flag("--max-width"))) f = Number(flag("--max-width")) / w;
+    const ow = Math.max(1, Math.round(w * f)), oh = Math.max(1, Math.round(h * f));
+    const data = Buffer.alloc(ow * oh * 4);
+    for (let y = 0; y < oh; y++) for (let x = 0; x < ow; x++) { const o = (y * ow + x) * 4, cx = Math.floor(x * w / ow), cy = Math.floor(y * h / oh); data[o] = (ox + cx) & 255; data[o + 1] = (oy + cy) & 255; data[o + 2] = 77; data[o + 3] = 255; }
+    const fmt = core && flag("--format") === "jpeg" ? "jpeg" : "png";
+    writeFileSync(rest[1], scen.png.garbage ? Buffer.from("this is not a png") : fmt === "jpeg" ? Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]) : encodePng({ width: ow, height: oh, data }));
+    const coreFields = core ? { format: fmt, origin_x: ox, origin_y: oy, region_client_w: w, region_client_h: h, source_w: w, source_h: h } : {};
+    scen.replies = { ...scen.replies, capture: { ok: true, method: "swapchain", capture_path: "d3d11", w: ow, h: oh, frame: 1, ...coreFields, ...(scen.replies?.capture ?? {}) } };
   } else {
     writeFileSync(rest[1], Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
   }
 }
+if (cmd === "capture-burst" && rest[1] && (scen.replies?.["capture-burst"]?.ok ?? true) !== false)
+  writeFileSync(rest[1], Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
 let rep = scen.replies?.[cmd] ?? { ok: true };
 if (cmd === "capture" && rep.ok !== false && rest[1] && rep.path === undefined) rep = { ...rep, path: rest[1] };
 if (rep._delay_ms) await sleep(rep._delay_ms);
