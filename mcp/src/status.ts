@@ -17,3 +17,21 @@ export function configView(s: Obj): Obj {
     msgs: name(MSGS_NAMES, s.msgmode) ?? s.msgmode,
   };
 }
+
+/** Strip vinput's "[ 12.345] " time prefix so repeated messages compare equal. */
+const stripStamp = (l: string) => l.replace(/^\[\s*[\d.]+\]\s*/, "");
+
+/** Keep the lines containing `contains`, collapse runs of identical messages into "<line> (repeated N times)", tail `n`. */
+export function tailLog(all: string[], n: number, contains?: string): { lines: string[]; matched: number } {
+  const needle = contains?.toLowerCase();
+  const sel = needle ? all.filter((l) => l.toLowerCase().includes(needle)) : all;
+  const out: string[] = [];
+  for (let i = 0; i < sel.length;) {
+    let j = i + 1;
+    while (j < sel.length && stripStamp(sel[j]) === stripStamp(sel[i])) j++;
+    const run = j - i;
+    out.push(run > 1 ? `${sel[j - 1]} (repeated ${run} times, first at ${sel[i].match(/^\[\s*([\d.]+)\]/)?.[1] ?? "?"})` : sel[i]);
+    i = j;
+  }
+  return { lines: out.slice(-n), matched: sel.length };
+}

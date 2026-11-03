@@ -2,12 +2,12 @@
 // llm-game-automation-mcp: an MCP (stdio) server that lets an LLM agent play single-player / offline Windows games
 // through vinput. Every tool runs the vinput CLI and returns its JSON reply verbatim, with "ok" surfaced as isError.
 // Offline games only: vinput injects a DLL and refuses targets with a known anti-cheat (see DISCLAIMER.md).
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { configView } from "./status.js";
+import { configView, tailLog } from "./status.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 
 const VERSION = "0.1.0";
@@ -23,6 +23,16 @@ function reply(r: CliResult, extra?: Record<string, unknown>): ToolReply {
   const content: Content[] = [{ type: "text", text: JSON.stringify(json) }];
   if (!r.ok && r.stderr) content.push({ type: "text", text: `vinput stderr:\n${r.stderr.slice(-4000)}` });
   return { content, isError: !r.ok };
+}
+/** last `bytes` of a text file as lines (a cut first line is dropped) */
+function readTail(path: string, bytes: number): string[] {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size, start = Math.max(0, size - bytes), buf = Buffer.alloc(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    const lines = buf.toString("utf8").split(String.fromCharCode(10)).map((l) => l.split(String.fromCharCode(13)).join("")).filter((l) => l.length);
+    return start > 0 ? lines.slice(1) : lines;
+  } finally { closeSync(fd); }
 }
 function fail(message: string): ToolReply {
   return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }], isError: true };
@@ -153,6 +163,34 @@ tool("status", "Game status",
   "vinput status of one game: window, client size, capture path in use, really_foreground, claim, and counters showing " +
   "which input APIs the game actually reads (read these when the game ignores input).",
   { pid }, async (a) => reply(await runVinput([...at(a.pid), "status"], 15000)), true);
+
+tool("log", "Read vinput's log for a game",
+  "Tail of vinput's log for this game (hooks installed, refused fullscreen, injected-input problems, anything the DLL " +
+  "reported). Read it when a game hangs, shows nothing or ignores input and status does not explain why. Identical " +
+  "consecutive messages are collapsed ('repeated N times'). lines = how many to return (default 40), contains = " +
+  "case-insensitive substring filter. source 'ring' (default) is the last 200 lines held in the game; 'file' reads the " +
+  "tail of the log file on disk (status log_path) for older history.",
+  { pid, lines: z.number().int().min(1).max(1000).optional().describe("How many lines to return, newest last (default 40)."),
+    contains: z.string().min(1).optional().describe("Only lines containing this text (case-insensitive)."),
+    source: z.enum(["ring", "file"]).optional().describe("ring = in-game buffer of the last 200 lines (default); file = tail of the log file on disk.") },
+  async (a) => {
+    const source = a.source ?? "ring";
+    let all: string[];
+    if (source === "file") {
+      const s = await runVinput([...at(a.pid), "status"], 15000);
+      if (!s.ok) return reply(s);
+      const path = (s.json as { log_path?: string }).log_path;
+      if (!path) return fail("this vinput build reports no log_path in status; use source 'ring'");
+      all = readTail(path, 512 * 1024);
+    } else {
+      const r = await runVinput([...at(a.pid), "log"], 15000);
+      const l = (r.json as { log?: unknown }).log;
+      if (!r.ok || !Array.isArray(l)) return reply(r);
+      all = l.map(String);
+    }
+    const t = tailLog(all, a.lines ?? 40, a.contains);
+    return reply({ ok: true, json: { ok: true, pid: a.pid, source, total: all.length, matched: t.matched, returned: t.lines.length, lines: t.lines }, exitCode: 0, stderr: "", timedOut: false, argv: [] });
+  }, true);
 
 // ---------------------------------------------------------------- eyes
 tool("capture", "Capture a frame",
@@ -355,6 +393,13 @@ tool("pad", "Gamepad (XInput)",
       ...opt("--lx", a.lx), ...opt("--ly", a.ly), ...opt("--rx", a.rx), ...opt("--ry", a.ry), ...opt("--lt", a.lt), ...opt("--rt", a.rt),
       ...opt("--hold", a.hold)], (a.ms ?? 0) + 60000));
   });
+
+tool("trace", "Trace one key's delivery",
+  "Per-key diagnosis: how many times vinput injected this key and through which channels the game actually read it " +
+  "(window messages, GetAsyncKeyState, GetKeyState, DirectInput state / buffer, raw input). Press the key with the key tool, " +
+  "then trace it: messages or raw deliveries with no read increase mean the game's polling never looked at that key. " +
+  "Counters prove delivery, not that the game acted.",
+  { pid, key: keyCombo }, async (a) => reply(await runVinput([...at(a.pid), "trace", "key", a.key], 15000)), true);
 
 tool("list_keys", "List key names", "Every key name vinput accepts, with its virtual-key code.", {},
   async () => reply(await runVinput(["keys"], 15000)), true);
