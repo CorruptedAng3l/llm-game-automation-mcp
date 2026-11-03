@@ -79,11 +79,12 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 | `launch` | start a game (`exe` / `aumid` / `steam_appid`+`wait_exe`, `args`, `cwd`, `early`, `settle_s`, `timeout_s`, `lock`, `claim`) and inject; returns `pid`, plus `warnings` / `nothing_presented` / `fullscreen_refusals` when no frame is being presented |
 | `attach` | inject into a running game by `pid` and wait until its window is adopted |
 | `list_targets` | games that have vinput loaded (pid, exe, owner, uptime, really_foreground) |
-| `status` | compact by default: pid, hwnd, client size, `really_foreground`, `app_active`, `present`, cursor / raw / msgs modes, non-zero counters, `warnings[]`; `verbose:true` = the full vinput status |
-| `config` | change / read how vinput treats a game: `fakefocus`, `autoactivate`, `isolate`, `blockfocus`, `nofullscreen`, `keepvisible`, `cursor`, `raw`, `msgs`; returns the effective config |
+| `status` | compact by default: pid, hwnd, client size, `really_foreground`, `app_active`, `present`, cursor / raw / msgs modes, non-zero counters, `capabilities` (what the game's vinput DLL supports), `edge_contact`, `fullscreen` policy, `warnings[]`; `verbose:true` = the full vinput status |
+| `config` | change / read how vinput treats a game: `fakefocus`, `autoactivate`, `isolate`, `blockfocus`, `nofullscreen`, `keepvisible`, `cursor`, `raw`, `msgs`, `edge_margin` (vinput's edge guard), `fullscreen` (`borderless` / `refuse`); returns the effective config |
 | `log` | tail of vinput's log for a game (`lines`, `contains`, `source` ring/file); repeated lines collapse |
 | `trace` | per-key delivery trace (`trace key <key>`): which input channels the game read |
-| `capture` | the game's own frame as an image + `{path, w, h, method, capture_path, frame}`; `region`, `after_frames`, `method`, `include_image`, `grid` (labelled client-coordinate grid on the returned image), `max_width` / `scale` / `zoom` (resize the returned image; reply has `image {scale, offset_x, offset_y}`) |
+| `capture` | the game's own frame as an image + `{path, w, h, method, capture_path, frame}`; `region`, `after_frames`, `method`, `include_image`, `grid` (labelled client-coordinate grid on the returned image), `max_width` / `scale` / `zoom` (resize the returned image; reply has `image {scale, offset_x, offset_y, scaled_by}`), `format` `png` / `jpeg` + `quality`; vinput shrinks / encodes inside the game when its DLL supports it, the server does it otherwise |
+| `capture_burst` | one contact-sheet image of `frames` tiles taken `interval_ms` apart (`columns`, `max_width` / `scale`, `format`, `region`); `tiles[]` has each tile's time and rectangle |
 | `ocr` | text and lines with boxes (`region`, `scale`, `lang`, `words`, `tiles`) |
 | `find_text` | locate text without clicking (box, centre, match_count) |
 | `click_text` | find text and click its centre (`nth`, `exact`, `fuzzy`, `timeout_ms`, `button`, `region`, `optional`) |
@@ -91,15 +92,20 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 | `find_image` / `click_image` / `wait_image` | template matching with a PNG (`threshold`, `scales`, `region`, `nth`) |
 | `pixel` | colour of one pixel |
 | `wait_change` | wait until the picture (or a region) changes |
-| `click` | click at `x`,`y` (client pixels, or `norm` 0..1, `capture_space`, or `coord_space:"capture"` for the image you were shown), `button`, `count`, `hover_ms` (default 80), `hold_ms` (default 140), `edge_margin`, `park_cursor` |
+| `click` | click at `x`,`y` (client pixels, or `norm` 0..1, `capture_space`, or `coord_space:"capture"` for the image you were shown), `button`, `count`, `hover_ms` (default 80), `hold_ms` (default 140), `di_poll_timeout_ms` / `di_release_timeout_ms` (require the game's DirectInput read), `edge_margin`, `park_cursor`; reply `evidence` |
 | `move` | move the virtual cursor (hover) |
 | `move_relative` | relative mouse motion for mouse-look (`dx`, `dy`, `raw`) |
-| `drag` | press, hold (`hold_start_ms`), stepped move (`ms`, `steps`), dwell at the destination (`hold_end_ms`), release; always releases |
+| `drag` | press, hold (`hold_start_ms`), stepped move (`ms`, `steps`), dwell at the destination (`hold_end_ms`), release; always releases. `placement:true` = vinput's owned polled placement drag (`poll_timeout_ms`), falls back to the normal sequence on an older DLL (`placement_fallback`) |
 | `scroll` | wheel notches at the cursor or at `x`,`y` |
-| `key` | press a key or chord (`hold_ms`, `count`, `gap_ms`) |
+| `key` | press a key or chord (`hold_ms`, `count`, `gap_ms`); `async:true` (with `hold_ms`) returns a `job_id` at once, `replace` |
 | `key_down` / `key_up` | hold / release a key (or mouse button name) |
 | `type_text` | type Unicode text (`as_keys` for games that read raw keys) |
-| `pad` | XInput pad 0: `buttons`, sticks `lx ly rx ry`, triggers `lt rt`, `ms`, `hold`, `off` |
+| `pad` | XInput pad 0: `buttons`, sticks `lx ly rx ry`, triggers `lt rt`, `ms`, `hold`, `off`; `async:true` (with `ms`) returns a `job_id` |
+| `pad_ramp` | ramp one pad axis `from` -> `to` over `ms` with the other axes / `buttons` held, `end_hold_ms`, `pacing` frames / time, `async` |
+| `pad_timeline` | timed list of pad states (`at_ms`, sticks, triggers), `strict_frames`, `pacing`, `async` |
+| `pulse` | key PWM: `key` down `duty` percent of each `period_ms` for `ms`, `async` |
+| `hold_while` | hold a key (or pad buttons / sticks) until `until_text` appears or `timeout_ms`; always releases |
+| `job_status` / `job_cancel` | follow / stop a background input job (no `id`: list all jobs) |
 | `list_keys` | all key names |
 | `run_script` | run a `.vin` macro file |
 | `release` | release all held input |

@@ -6,10 +6,12 @@ are the MCP tools in [`mcp/README.md`](../mcp/README.md).
 ## Set the game up first
 
 - **Use a fixed windowed or borderless size, set in the game's own settings or INI.** Exclusive fullscreen cannot be
-  captured or driven in the background: vinput refuses `SetFullscreenState(TRUE)`, and some engines then retry every
-  frame and never present a frame (GTA Trilogy DE deadlocked this way). `launch` and `capture` now say so
-  (`fullscreen_refusals`, a warning naming the fix); `log` with `contains:"fullscreen"` shows the refusals.
-  A saved fullscreen setting usually overrides command-line switches, so fix the INI, not just `args`.
+  captured or driven in the background. By default vinput answers a DXGI fullscreen request with a virtual (borderless)
+  fullscreen so the game keeps presenting (`config fullscreen:"borderless"`); `fullscreen:"refuse"` makes the request
+  fail instead, and some engines then retry every frame and never present a frame (GTA Trilogy DE deadlocked this way).
+  `launch` and `capture` say so (`fullscreen_refusals`, a warning naming the fix); `log` with `contains:"fullscreen"`
+  shows the requests; `status` `fullscreen` shows the policy. A saved fullscreen setting usually overrides
+  command-line switches, so fix the INI, not just `args`.
 - **A window that drifts in size** (a game that re-fits itself) moves every coordinate. Pin the size in the game's
   config and re-read `status` `client` after launch.
 - **Background launch plus autoactivate.** `launch` keeps the real foreground where it was. A game started in the
@@ -27,10 +29,14 @@ are the MCP tools in [`mcp/README.md`](../mcp/README.md).
   at `path` stays clean, so `find_image` templates cut from it are exact.
 - **Zoom in on small things.** `capture region:{x,y,w,h} zoom:3 grid:20` shows a crop at 3x with the grid still in
   client coordinates.
-- **Save tokens on big frames.** `capture max_width:960` (or `scale:0.5`) downsizes the returned image. The reply's
-  `image: {scale, offset_x, offset_y}` maps it back (`client = offset + image / scale`). Pass `coord_space:"capture"`
+- **Save tokens on big frames.** `capture max_width:960` (or `scale:0.5`) downsizes the returned image, and
+  `format:"jpeg"` (`quality`, default 85) makes it much smaller still. vinput shrinks the frame inside the game when its
+  DLL supports it (`image.scaled_by:"vinput"`), otherwise the MCP server does (`"mcp"`). The reply's
+  `image: {scale, offset_x, offset_y}` maps it back either way (`client = offset + image / scale`). Pass `coord_space:"capture"`
   to `click` / `move` / `drag` and they convert the pixels you read off that image for you (they use the last capture
   of that game; give `mapping` to override). The default stays client coordinates.
+- **Watch something happen in one image.** `capture_burst frames:8 interval_ms:250` returns a contact sheet of tiles in
+  time order (animations, loading, whether a held key moves the character). Do not click coordinates read off a sheet.
 - **Act and look in one call.** `capture_after:true` on `click`, `key`, `click_text`, `move`, `drag` and `pad` returns
   the frame after the action (it waits 3 presented frames; pass a number for more). A failed action takes no picture.
 - `status` is compact by default. Read `warnings` first; `verbose:true` gives the full 3 KB reply with every counter.
@@ -42,26 +48,37 @@ are the MCP tools in [`mcp/README.md`](../mcp/README.md).
   square button drawn next to the text; clicking the label does nothing and looks like a dead mouse. `click_text` aims at
   the text, so for those menus use `capture grid` and click the graphic, or `click_image` on the button.
 - **Hover first, and hold the press.** Games that poll the mouse once per frame or tick miss short clicks. `click`
-  hovers 80 ms over the target (`hover_ms`) and holds the button 140 ms (`hold_ms`) by default. Measured: under about
+  hovers 80 ms over the target (`hover_ms`) and holds the button 140 ms (`hold_ms`) by default. For games that read the
+  mouse through DirectInput vinput also waits until the game has read the press and the release; the reply's
+  `evidence` (`di_poll_confirmed`, `di_release_confirmed`) says what was observed, and `di_poll_timeout_ms` /
+  `di_release_timeout_ms` make those reads required. Measured: under about
   200 ms is often ignored in The Sims; Fallout 1 menus needed about 300 ms (`hold_ms:300`); placing furniture in The Sims
   needed about 900 ms (`hold_ms:900`). Raise `hover_ms` too if hover-gated UI (highlight, tooltip) must appear first.
 - **Drag-and-drop** (inventory, furniture, map items): `drag` presses, holds `hold_start_ms` (150), moves in `steps`
   over `ms`, dwells `hold_end_ms` (250) at the destination and then releases. A plain press-move-release is dropped by
-  many games; raise `hold_end_ms` to 500-900 for placement. Never use `key_down`/`key_up` for mouse drags unless you
+  many games; raise `hold_end_ms` to 500-900 for placement. `drag placement:true` runs the whole drag inside the game
+  and waits for the game to read each step (games that read `GetCursorPos` and DirectInput buttons); with an older DLL
+  it falls back to the normal sequence and says so (`placement_fallback`). Never use `key_down`/`key_up` for mouse drags unless you
   need to look mid-drag (`key_down lbutton`, `move`, `capture`, `key_up lbutton` also works).
 - **Edge scrolling.** Many games pan the view while the cursor rests at the window edge (The Sims, strategy games), so
   items land in the wrong place. `click`, `move`, `drag` and `scroll` warn when a position is within `edge_margin` px
-  (default 8) of the edge. Aim further in, or add `park_cursor:true` so the cursor ends in the middle.
+  (default 8) of the edge. Aim further in, or add `park_cursor:true` so the cursor ends in the middle. A current
+  vinput DLL also keeps injected cursor paths that many px inside the edge itself (`config edge_margin:N`, 0 = off);
+  replies then carry `edge_contact` / `edge_guard_applied`, and `status` warns while the cursor rests on the edge.
 - **Verify every action.** `ok:true` means the input was delivered, not that the game acted. Use `capture_after`,
   `wait_text` or `wait_change`.
 
 ## Holding input while you look
 
-- **`key` with `hold_ms` blocks the game's command queue** for the whole hold: a capture sent meanwhile waited its full
-  length (1.7 s measured). To look while holding (driving, walking), use `key_down`, then `capture`, then `key_up`
-  (or `pad` with `hold:true`, then `pad off`). Always `release` at the end.
-- Keyboard steering is all-or-nothing: a 400 ms tap of `d` at speed turned a car about 90 degrees. Use taps of
-  100-150 ms and look in between.
+- **Hold in the background, keep looking.** `key hold_ms:2000 async:true` (and `pad ms:... async:true`) returns at once
+  with a `job_id`; the hold runs inside the game with its own deadline while `capture` and `status` keep working.
+  `job_status` follows it, `job_cancel` stops it early and releases only what that job held. Accepted means scheduled,
+  not delivered: check `job_status` or a capture.
+- **Hold until something shows up.** `hold_while key:"w" until_text:"Village" timeout_ms:5000` holds and watches the
+  screen in one call, and always releases when it returns.
+- Keyboard steering is all-or-nothing: a 400 ms tap of `d` at speed turned a car about 90 degrees. Use `pulse`
+  (key PWM: `duty` percent of each `period_ms`) for gentler digital steering, or `pad_ramp` / `pad_timeline` for
+  proportional stick input on games that read XInput. Without those, use taps of 100-150 ms and look in between.
 - Each decision costs a round trip (a capture-view-decide loop took 5 s median on a real run, about 75 m of travel in a
   car). Prefer slow, safe moves in real-time games, and use `capture_after` to cut the loop.
 
