@@ -100,6 +100,7 @@ struct Counters {
     std::atomic<long> min_blocked{0}, min_restored{0};
     std::atomic<long> act_swallowed{0}, act_synth{0}, present{0}, present_ours{0}, captures{0};
     std::atomic<long> posted{0}, raw_posted{0}, raw_queued{0};
+    std::atomic<long> fs_refused{0};   // SetFullscreenState(TRUE) calls refused by nofullscreen
 } C;
 
 std::string g_hooksOk, g_hooksFail;
@@ -954,7 +955,12 @@ HRESULT STDMETHODCALLTYPE h_Present1(IDXGISwapChain1* sc, UINT sync, UINT flags,
     return o_Present1(sc, sync, flags, pp);
 }
 HRESULT STDMETHODCALLTYPE h_SetFullscreenState(IDXGISwapChain* sc, BOOL fs, IDXGIOutput* out) {
-    if (fs && g_cfg.nofullscreen) { Log("refused DXGI exclusive fullscreen"); return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE; }
+    if (fs && g_cfg.nofullscreen) {
+        // a game that retries every frame would flood the log (and the 200-line ring): log the first and every 256th
+        long n = ++C.fs_refused;
+        if (n == 1 || n % 256 == 0) Log("refused DXGI exclusive fullscreen (%ld so far); set the game to windowed or borderless in its own settings", n);
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+    }
     return o_SetFullscreenState(sc, fs, out);
 }
 // ResizeBuffers: drop our D3D12 readback objects (they never hold a back buffer, so the resize is never blocked).
@@ -1524,11 +1530,12 @@ std::string StatusJson() {
     CN(gaks); CN(gks); CN(gkbs); CN(gcur); CN(scur); CN(clip); CN(gfg); CN(setfg); CN(setfg_blocked);
     CN(rid); CN(rid_magic); CN(rib); CN(rib_injected); CN(reg_raw); CN(di_kbd); CN(di_mouse); CN(di_data_kbd); CN(di_data_mouse); CN(di_acq); CN(di_fake); CN(xinput);
     CN(wm_key); CN(wm_char); CN(wm_mouse); CN(wm_input); CN(wm_input_dropped); CN(wm_mouse_dropped); CN(act_swallowed); CN(act_synth); CN(min_blocked); CN(min_restored); CN(present); CN(present_ours); CN(captures);
-    CN(posted); CN(raw_posted); CN(raw_queued);
+    CN(posted); CN(raw_posted); CN(raw_queued); CN(fs_refused);
 #undef CN
     o.raw("counters", c.done());
     { std::lock_guard<std::mutex> lk(g_hookStrMx); o.str("hooks_ok", g_hooksOk); o.str("hooks_failed", g_hooksFail); }
     o.num("uptime_ms", GetTickCount() - g_t0);
+    if (g_logPath[0]) o.str("log_path", W2U(g_logPath));
     ClaimFields(o);
     return o.done();
 }

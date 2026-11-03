@@ -22,7 +22,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node build/index.js",
     "test": "node test/run.mjs",
-    "smoke": "node test/smoke.mjs"
+    "smoke": "node test/smoke.mjs && node test/glue.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",

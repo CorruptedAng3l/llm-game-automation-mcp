@@ -536,6 +536,12 @@ static int Launch(const Args& a) {
     int timeout = atoi(GetOpt(a, "timeout", "240").c_str()), settle = atoi(GetOpt(a, "settle", "5").c_str()), retry = atoi(GetOpt(a, "lock-retry", "60").c_str());
     if (exe.empty() && steam.empty() && aumid.empty()) { printf("{\"ok\":false,\"error\":\"launch needs --exe, --steam or --aumid\"}\n"); return 2; }
     if (!steam.empty() && waitExe.empty()) { printf("{\"ok\":false,\"error\":\"--steam needs --wait-exe <name.exe>\"}\n"); return 2; }
+    std::wstring cwd = U2W(GetOpt(a, "cwd"));
+    if (!cwd.empty()) {
+        if (exe.empty()) { printf("{\"ok\":false,\"error\":\"--cwd needs --exe (steam / aumid launches choose their own folder)\"}\n"); return 2; }
+        DWORD at = GetFileAttributesW(cwd.c_str());
+        if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY)) { printf("{\"ok\":false,\"error\":\"--cwd is not an existing folder: %s\"}\n", JEsc(W2U(cwd)).c_str()); return 2; }
+    }
     bool early = HasOpt(a, "early");
     if (early && exe.empty()) { printf("{\"ok\":false,\"error\":\"--early needs --exe (the process must be created suspended by vinput)\"}\n"); return 2; }
     if (early && HasOpt(a, "no-inject")) { printf("{\"ok\":false,\"error\":\"--early and --no-inject contradict each other\"}\n"); return 2; }
@@ -556,6 +562,7 @@ static int Launch(const Args& a) {
         std::set<DWORD> before; if (!waitExe.empty()) before = PidsByName(waitExe);
         if (!exe.empty()) {
             std::wstring dir = exe; size_t sl = dir.find_last_of(L"\\/"); dir = sl == std::wstring::npos ? L"." : dir.substr(0, sl);
+            if (!cwd.empty()) dir = cwd;   // --cwd: working directory for the game (default: the exe's own folder)
             std::wstring cl = L"\"" + exe + L"\" " + args;
             STARTUPINFOW si = {sizeof(si)}; PROCESS_INFORMATION pi;
             si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_SHOWNOACTIVATE;
@@ -693,11 +700,13 @@ static void Usage() {
         "  vinput launch (--exe PATH | --steam APPID --wait-exe NAME.exe | --aumid PFN!AppId) [--args \"...\"] [--wait-exe NAME.exe]\n"
         "                [--lock PATH] [--lock-retry 60] [--timeout 240] [--settle 5] [--fg-guard 5] [--early] [--dll PATH] [--no-inject] [--claim-ttl 300]\n"
         "                --early: create suspended, inject, resume (needs --exe; covers Vulkan/GL device creation)\n"
+        "                --cwd DIR: the game's working directory (needs --exe; default: the exe's own folder)\n"
         "                --fg-guard S: keep handing the real foreground back for S s after the restore (0 = off)\n"
         "  vinput list                                  pids with a live pipe: exe, owner, uptime, really_foreground\n"
         "  vinput [--owner NAME] [--force-claim] --pid N <command>   (or env VINPUT_OWNER; launch --owner claims the new pid)\n"
         "  vinput --owner NAME --pid N claim [--ttl 300] | unclaim     other owners are refused until unclaim/expiry\n"
         "  vinput --pid N status | ping | log | activate | release | restore\n"
+        "  vinput --pid N waitexit [--timeout MS]       block until the process exits; reply has exit_code (works on any pid, injected or not)\n"
         "  vinput --pid N key <combo> [ms] [--count N] [--gap ms]      combo: enter, esc, w, ctrl+s, f1, 0x2D ...\n"
         "  vinput --pid N down <combo> | up <combo> | hold <combo> <ms>\n"
         "  vinput --pid N type \"text\" [--delay ms] [--keys]\n"
@@ -768,6 +777,18 @@ int wmain(int argc, wchar_t** wargv) {
         printf("{\"ok\":%s,\"vk\":%u}\n", (n1 && n2) ? "true" : "false", vk); return (n1 && n2) ? 0 : 1;
     }
     if (!pid) { printf("{\"ok\":false,\"error\":\"--pid N required\"}\n"); return 2; }
+    if (cmd == "waitexit") {
+        // Holds a handle so the exit code is still readable after the process is gone (a pipe error cannot tell us).
+        HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!h) { printf("{\"ok\":false,\"pid\":%lu,\"exited\":true,\"error\":\"no such process (OpenProcess failed %lu)\"}\n", pid, GetLastError()); return 1; }
+        DWORD ms = HasOpt(a, "timeout") ? (DWORD)strtoul(GetOpt(a, "timeout").c_str(), nullptr, 0) : INFINITE;
+        DWORD w = WaitForSingleObject(h, ms), code = 0;
+        if (w == WAIT_TIMEOUT) { CloseHandle(h); printf("{\"ok\":true,\"pid\":%lu,\"exited\":false}\n", pid); return 0; }
+        if (w != WAIT_OBJECT_0 || !GetExitCodeProcess(h, &code)) { CloseHandle(h); printf("{\"ok\":false,\"pid\":%lu,\"error\":\"wait failed %lu\"}\n", pid, GetLastError()); return 1; }
+        CloseHandle(h);
+        printf("{\"ok\":true,\"pid\":%lu,\"exited\":true,\"exit_code\":%lu,\"exit_code_hex\":\"0x%08lX\"}\n", pid, code, code);
+        return 0;
+    }
     if (cmd == "foreground") {
         // VERIFY / HANDOFF ONLY: really bring the game's window to the front (steals focus from everyone).
         std::string resp; Request(pid, "{\"cmd\":\"status\"}", resp);
