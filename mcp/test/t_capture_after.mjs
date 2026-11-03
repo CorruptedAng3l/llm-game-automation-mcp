@@ -5,7 +5,7 @@ const pid = process.pid;
 const t = await startFake({ replies: { capture: { ok: true, method: "swapchain", capture_path: "d3d11", w: 1, h: 1, frame: 9 } } });
 const cases = [
   ["click", { x: 10, y: 20 }, "click"], ["key", { key: "enter" }, "key"], ["click_text", { text: "Play" }, "click-text"],
-  ["move", { x: 5, y: 6 }, "mouse"], ["drag", { x1: 1, y1: 2, x2: 3, y2: 4 }, "drag"], ["pad", { buttons: "a" }, "pad"],
+  ["move", { x: 5, y: 6 }, "mouse"], ["drag", { x1: 1, y1: 2, x2: 3, y2: 4, hold_start_ms: 0, hold_end_ms: 0 }, "mouseup"], ["pad", { buttons: "a" }, "pad"],
 ];
 try {
   const props = Object.fromEntries((await t.client.listTools()).tools.map((x) => [x.name, x.inputSchema?.properties ?? {}]));
