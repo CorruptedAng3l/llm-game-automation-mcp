@@ -65,11 +65,47 @@ static LRESULT CALLBACK Wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 // External foreground thief (never injected): exit 0 = the target really was foreground right after the call.
 static int FgThief(HWND target) {
+    // An out-of-process OS witness observes even a gain that the guard restores before our next snapshot.
+    // Keep this state inside the helper process; nothing here reads an injected counter or invents a gain.
+    static HWND watched = nullptr; static LONG foregroundEvents = 0;
+    watched = target; foregroundEvents = 0;
+    bool observeOnly = false; wchar_t witnessLog[MAX_PATH] = {};
+    int argc = 0; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    for (int i = 3; argv && i < argc; ++i) {
+        if (!wcscmp(argv[i], L"--observe-only")) observeOnly = true;
+        else if (!wcscmp(argv[i], L"--witness-log") && i + 1 < argc) wcsncpy_s(witnessLog, argv[++i], _TRUNCATE);
+    }
+    if (argv) LocalFree(argv);
+    MSG queue; PeekMessageW(&queue, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+    SetLastError(ERROR_SUCCESS);
+    HWINEVENTHOOK witness = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
+        [](HWINEVENTHOOK, DWORD event, HWND window, LONG, LONG, DWORD, DWORD) {
+            if (event == EVENT_SYSTEM_FOREGROUND && window == watched) InterlockedIncrement(&foregroundEvents);
+        }, 0, 0, WINEVENT_OUTOFCONTEXT);
+    DWORD hookError = witness ? ERROR_SUCCESS : GetLastError();
     HWND fg = GetForegroundWindow(); DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0, me = GetCurrentThreadId();
-    BOOL attached = fgThread && fgThread != me ? AttachThreadInput(me, fgThread, TRUE) : FALSE;
-    BOOL set = SetForegroundWindow(target); bool was = GetForegroundWindow() == target; BringWindowToTop(target);
+    BOOL attached = !observeOnly && fgThread && fgThread != me ? AttachThreadInput(me, fgThread, TRUE) : FALSE;
+    BOOL set = FALSE;
+    if (!observeOnly) { set = SetForegroundWindow(target); BringWindowToTop(target); }
+    bool was = GetForegroundWindow() == target;
     if (attached) AttachThreadInput(me, fgThread, FALSE);
-    return (set && was) ? 0 : set ? 2 : 1;   // 0 = really foreground right after the call; 2 = granted but already handed back
+    // Out-of-context WinEvent callbacks are delivered on this thread's message queue. Detach the human's
+    // queue BEFORE pumping it, and bound this independent observation window to 100 ms.
+    DWORD start = GetTickCount();
+    do {
+        for (int i = 0; i < 256 && GetTickCount() - start < 100 && PeekMessageW(&queue, nullptr, 0, 0, PM_REMOVE); ++i) { TranslateMessage(&queue); DispatchMessageW(&queue); }
+        Sleep(1);
+    } while (GetTickCount() - start < 100);
+    if (witness) UnhookWinEvent(witness);
+    if (witnessLog[0]) {
+        FILE* f = _wfsopen(witnessLog, L"w", _SH_DENYNO);
+        if (f) {
+            fprintf(f, "observe_only=%d hook=%d hook_error=%lu attached=%d set_return=%d direct_snapshot=%d target_foreground_events=%ld target=0x%llX\n",
+                (int)observeOnly, witness != nullptr, hookError, (int)attached, (int)set, (int)was, foregroundEvents, (unsigned long long)(ULONG_PTR)target);
+            fclose(f);
+        }
+    }
+    return was || foregroundEvents > 0 ? 0 : set ? 2 : 1; // TRUE from SetForegroundWindow alone is not positive proof.
 }
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);

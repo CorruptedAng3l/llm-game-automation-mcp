@@ -1,0 +1,23 @@
+param([string]$Out="$PSScriptRoot\..\build\test\vk_create_boundary\after",[string]$DllDir='',[switch]$KeepGoing)
+$ErrorActionPreference='Stop';$root=(Resolve-Path "$PSScriptRoot\..").Path;$cli="$root\dist\vinput.exe";if(!$DllDir){$DllDir="$root\dist"};$DllDir=(Resolve-Path $DllDir).Path
+. "$PSScriptRoot\_vcvars.ps1";$vcDir=Get-VcVarsDir
+. "$PSScriptRoot\vi_ownedprocess.ps1";Add-Type 'using System;using System.Runtime.InteropServices;public static class ViVkBoundary{[DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);}'
+New-Item -ItemType Directory -Force $Out|Out-Null;$Out=(Resolve-Path $Out).Path;$runId=[guid]::NewGuid().ToString('N');$checks=[Collections.Generic.List[object]]::new();$records=[Collections.Generic.List[object]]::new()
+function Check($pass,$name){$checks.Add(@{pass=[bool]$pass;name=$name});"$(if($pass){'PASS'}else{'FAIL'}) $name";if(!$pass-and!$KeepGoing){throw $name}}
+function Log($path){if(!(Test-Path $path)){return ''};$f=[IO.FileStream]::new($path,'Open','Read',([IO.FileShare]::ReadWrite-bor[IO.FileShare]::Delete));$r=[IO.StreamReader]::new($f);try{return $r.ReadToEnd()}finally{$r.Dispose();$f.Dispose()}}
+function WaitLog($path,$pattern){$until=[Environment]::TickCount64+5000;do{if((Log $path)-match$pattern){return $true};Start-Sleep -Milliseconds 15}while([Environment]::TickCount64-lt$until);return $false}
+try{foreach($arch in @('x64','x86')){$vc=if($arch-eq'x64'){'vcvars64.bat'}else{'vcvars32.bat'};$d="$Out\$arch\run_$runId";New-Item -ItemType Directory -Force "$d\temp"|Out-Null;$aliases=if($arch-eq'x64'){"vkCreateSwapchainKHR`nFixtureMode`nFixtureCounts"}else{"vkCreateSwapchainKHR=_vkCreateSwapchainKHR@16`nFixtureMode=_FixtureMode@4`nFixtureCounts=_FixtureCounts@4"};"EXPORTS`n$aliases"|Set-Content "$d\loader.def" -Encoding ascii
+ $batch=@"
+@echo off
+set "TEMP=$d\temp"
+set "TMP=$d\temp"
+call "$vcDir\$vc" >nul || exit /b 2
+cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 /DVI_FAKE_VK_LOADER /LD "$root\test\vi_vkcreateboundary.cpp" /Fo:"$d\loader.obj" /Fe:"$d\vulkan-1.dll" /link /DEF:"$d\loader.def" || exit /b 2
+cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_vkcreateboundary.cpp" /Fo:"$d\fixture.obj" /Fe:"$d\fixture.exe" /link /SUBSYSTEM:WINDOWS || exit /b 2
+"@;[IO.File]::WriteAllText("$d\build.cmd",$batch,[Text.Encoding]::ASCII);cmd /d /c "$d\build.cmd" *> "$d\build.log";Check ($LASTEXITCODE-eq0) "$arch boundary ABI fixture W4 WX";if($LASTEXITCODE-ne0){throw 'fixture build failed'};$p=$null;$log="$d\target.log";try{
+  $p=Start-Process "$d\fixture.exe" -ArgumentList "`"$log`" `"$d\vulkan-1.dll`"" -WindowStyle Hidden -PassThru;Check (WaitLog $log READY) "$arch owned ABI target ready";$dll=Join-Path $DllDir $(if($arch-eq'x64'){'vinput64.dll'}else{'vinput32.dll'});$inject=&$cli --json inject --pid $p.Id --dll $dll|ConvertFrom-Json;Check $inject.ok "$arch actual DLL injected";$s=&$cli --json --pid $p.Id status|ConvertFrom-Json;$h=[IntPtr]::new([Convert]::ToInt64($s.hwnd,16));[ViVkBoundary]::PostMessage($h,0x8001,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;Check (WaitLog $log DONE) "$arch actual hook invokes controlled native boundary"
+  $lines=@([regex]::Matches((Log $log),'CASE index=(\d+) mode=(\d+) old=(\d) provided_source=(\d) calls=(\d+) source_calls=(\d+) old_calls=(\d+) result=(-?\d+) input_usage=(\d+)'));$expected=@(@{calls=1;result=-1000001004},@{calls=1;result=-1000000000},@{calls=1;result=-4},@{calls=2;result=0},@{calls=1;result=0},@{calls=1;result=-1000001004},@{calls=1;result=-1000001004});Check ($lines.Count-eq7) "$arch all controlled native policies observed"
+  for($i=0;$i-lt$lines.Count;$i++){$m=$lines[$i];$requested=if([int]$m.Groups[4].Value){3}else{2};$oldCalls=if([int]$m.Groups[3].Value){$expected[$i].calls}else{0};$pass=[int]$m.Groups[5].Value-eq$expected[$i].calls-and[int]$m.Groups[8].Value-eq$expected[$i].result-and[int]$m.Groups[6].Value-eq1-and[int]$m.Groups[7].Value-eq$oldCalls-and[int]$m.Groups[9].Value-eq$requested;Check $pass "$arch native case$i exact calls flags and original error (old handle never retried)";$records.Add(@{arch=$arch;case=$i;observed=$m.Value;expected=$expected[$i]})};$s=&$cli --json --pid $p.Id status|ConvertFrom-Json;Check (-not$s.really_foreground) "$arch ABI control stays background";$records.Add(@{arch=$arch;status=$s})
+ }finally{if($p){Stop-ViOwnedProcess $p}}
+}}finally{$checks|ConvertTo-Json -Depth 6|Set-Content "$Out\checks.json";$records|ConvertTo-Json -Depth 15|Set-Content "$Out\evidence.json"}
+$failed=@($checks|Where-Object{-not$_.pass}).Count;"$($checks.Count-$failed) PASS / $failed FAIL";if($failed){exit 1};exit 0

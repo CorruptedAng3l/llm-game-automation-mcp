@@ -23,12 +23,16 @@
 #include "../third_party/vulkan/vulkan_core.h"
 #include "../third_party/vulkan/vulkan_win32.h"
 #include "vi_pattern.h"
+#include "vi_capturetiming.h"
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
 
 static FILE* g_log; static HWND g_hwnd; static volatile bool g_resize = false;
+static unsigned long long g_raceToken=0;static unsigned g_raceWidth=0,g_raceHeight=0;
 static void L(const char* f, ...) { if (!g_log) return; va_list a; va_start(a, f); vfprintf(g_log, f, a); va_end(a); fputc('\n', g_log); fflush(g_log); }
 static LRESULT CALLBACK Wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if(vi_capture_timing::Message(m,w))return 0;
+    if(m==WM_APP+120){g_raceToken=(unsigned long long)w;g_raceWidth=LOWORD(l);g_raceHeight=HIWORD(l);L("RACE_ARMED token=%llu outer=%ux%u",g_raceToken,g_raceWidth,g_raceHeight);return 0;}
     if (m == WM_SIZE) g_resize = true;
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcW(h, m, w, l);
@@ -139,6 +143,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     VkSwapchainKHR sc = VK_NULL_HANDLE; std::vector<VkImage> imgs; std::vector<VkSemaphore> done; VkExtent2D ext{};
     auto destroySems = [&]() { for (auto s : done) vkDestroySemaphore(dev, s, nullptr); done.clear(); };
     // returns 0 ok, 1 zero-size (minimized), 2+ failure
+    unsigned swapRetries=0;
     auto makeSwapchain = [&]() -> int {
         VkSurfaceCapabilitiesKHR caps; VKCK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, surf, &caps));
         RECT rc; GetClientRect(g_hwnd, &rc);
@@ -150,8 +155,17 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
         VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
         ci.surface = surf; ci.minImageCount = n; ci.imageFormat = sf.format; ci.imageColorSpace = sf.colorSpace; ci.imageExtent = ext;
         ci.imageArrayLayers = 1; ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT; ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        ci.preTransform = caps.currentTransform; ci.compositeAlpha = ca; ci.presentMode = pm; ci.clipped = VK_TRUE; ci.oldSwapchain = sc;
-        VkSwapchainKHR nsc = VK_NULL_HANDLE; VKCK(vkCreateSwapchainKHR(dev, &ci, nullptr, &nsc));
+        ci.preTransform = caps.currentTransform; ci.compositeAlpha = ca; ci.presentMode = pm; ci.clipped = VK_FALSE; /* Whole-image offscreen readback needs defined obscured pixels. */ ci.oldSwapchain = sc;
+        VkSwapchainKHR nsc = VK_NULL_HANDLE;VkResult created=vkCreateSwapchainKHR(dev,&ci,nullptr,&nsc);
+        if(created!=VK_SUCCESS){
+            // oldSwapchain was retired by this call even on failure. Never pass
+            // it into a second create. The caller has already waited idle.
+            if(sc){vkDestroySwapchainKHR(dev,sc,nullptr);sc=VK_NULL_HANDLE;}imgs.clear();destroySems();
+            RECT current{};GetClientRect(g_hwnd,&current);bool changed=(uint32_t)current.right!=ext.width||(uint32_t)current.bottom!=ext.height;
+            bool transient=created==VK_ERROR_OUT_OF_DATE_KHR||(created==VK_ERROR_INITIALIZATION_FAILED&&changed);
+            if(transient&&++swapRetries<=8){L("RETRY_SWAPCHAIN attempt=%u vk=%d requested=%ux%u client=%ldx%ld",swapRetries,(int)created,ext.width,ext.height,current.right,current.bottom);return 1;}
+            L("FAIL vkCreateSwapchainKHR vk=%d attempts=%u",(int)created,swapRetries);return 2;
+        }swapRetries=0;
         if (sc) vkDestroySwapchainKHR(dev, sc, nullptr);
         sc = nsc;
         uint32_t ni = 0; VKCK(vkGetSwapchainImagesKHR(dev, sc, &ni, nullptr)); imgs.resize(ni); VKCK(vkGetSwapchainImagesKHR(dev, sc, &ni, imgs.data()));
@@ -160,7 +174,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
         for (auto& s : done) VKCK(vkCreateSemaphore(dev, &si, nullptr, &s));
         return 0;
     };
-    if (makeSwapchain() != 0) { L("FAIL initial swapchain"); return 2; }
+    int initial=1;for(unsigned attempt=0;attempt<8&&initial==1;attempt++){initial=makeSwapchain();if(initial==1)Sleep(10);}if(initial!=0){L("FAIL initial swapchain after bounded attempts");return 2;}
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO}; pci.queueFamilyIndex = fam; pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     VkCommandPool pool; VKCK(vkCreateCommandPool(dev, &pci, nullptr, &pool));
@@ -179,6 +193,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
             if (msg.message == WM_QUIT) { vkDeviceWaitIdle(dev); L("EXIT frames=%u resizes=%d", frame, resizes); return 0; }
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
+        if(vi_capture_timing::pendingReset){QueryPerformanceCounter(&prevT);maxMs=worstMs=0;lastLog=GetTickCount();L("CAPTURE_TIMING_START token=%llu frame=%u",(unsigned long long)vi_capture_timing::pendingReset,frame);vi_capture_timing::pendingReset=0;}
         if (g_resize || recreate) {
             RECT rc; GetClientRect(g_hwnd, &rc);
             if (recreate || (uint32_t)rc.right != ext.width || (uint32_t)rc.bottom != ext.height) {
@@ -189,7 +204,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
                 L("RESIZE %ux%u hr=0x00000000", ext.width, ext.height);
                 resizes++; prevT.QuadPart = 0;
             }
-            g_resize = false; recreate = false;
+            RECT latest{};GetClientRect(g_hwnd,&latest);g_resize=(uint32_t)latest.right!=ext.width||(uint32_t)latest.bottom!=ext.height;recreate=g_resize;if(recreate)continue;
         }
         VkDeviceSize need = (VkDeviceSize)ext.width * ext.height * vipat::Bpp(pf);
         if (need > stgSize) {
@@ -209,6 +224,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
         VkResult ar = vkAcquireNextImageKHR(dev, sc, 2000000000ULL, acq, VK_NULL_HANDLE, &idx);
         if (ar == VK_ERROR_OUT_OF_DATE_KHR) { recreate = true; continue; }
         if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) { L("FAIL vkAcquireNextImageKHR vk=%d", (int)ar); return 4; }
+        const bool acquiredSuboptimal=ar==VK_SUBOPTIMAL_KHR;unsigned long long race=g_raceToken;
+        if(race){g_raceToken=0;BOOL resized=SetWindowPos(g_hwnd,nullptr,0,0,(int)g_raceWidth,(int)g_raceHeight,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);RECT current{};GetClientRect(g_hwnd,&current);bool changed=(uint32_t)current.right!=ext.width||(uint32_t)current.bottom!=ext.height;L("RACE_AFTER_ACQUIRE token=%llu index=%u acquire=%d extent=%ux%u client=%ldx%ld resized=%d changed=%d",race,idx,(int)ar,ext.width,ext.height,current.right,current.bottom,(int)resized,(int)changed);}
         for (uint32_t yy = 0; yy < ext.height; yy++) vipat::Row(pf, (int)yy, (int)ext.width, frame, stgMap + (size_t)yy * ext.width * vipat::Bpp(pf));
         VKCK(vkResetCommandBuffer(cb, 0));
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO}; bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -232,12 +249,15 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
         // one frame in flight: the staging buffer and the command buffer are reused next frame
         VkResult fr = vkWaitForFences(dev, 1, &fence, VK_TRUE, 5000000000ULL);
         if (fr != VK_SUCCESS) { L("FAIL vkWaitForFences vk=%d", (int)fr); return 4; }
+        if(race)L("RACE_PRESENT token=%llu result=%d",race,(int)pr);
         if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) recreate = true;
         else if (pr != VK_SUCCESS) { L("FAIL vkQueuePresentKHR vk=%d", (int)pr); return 4; }
+        if(acquiredSuboptimal||g_resize)recreate=true;
         ++frame;
         LARGE_INTEGER now; QueryPerformanceCounter(&now);
         if (prevT.QuadPart) { double ms = (now.QuadPart - prevT.QuadPart) * 1000.0 / qpf.QuadPart; if (ms > maxMs) maxMs = ms; if (ms > worstMs) worstMs = ms; }
         prevT = now;
+        if(vi_capture_timing::pendingReport){L("CAPTURE_TIMING_END token=%llu maxms=%.1f",(unsigned long long)vi_capture_timing::pendingReport,worstMs);vi_capture_timing::pendingReport=0;}
         if (GetTickCount() - lastLog > 1000) { lastLog = GetTickCount(); L("FRAME %u maxms=%.1f worstms=%.1f", frame, maxMs, worstMs); maxMs = 0; }
         Sleep(4);
     }

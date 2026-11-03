@@ -1,28 +1,29 @@
-# Capture of a DDraw-wrapper style game: the game window stays black, the picture is in a separate
-# "DDrawCompatPresentationWindow" (scaled 2x, centred). Regression: capture used to return an all-black frame.
-param([string]$CliDir="$PSScriptRoot\..\dist",[string]$Exe='vi_overlaytarget.exe')
-$ErrorActionPreference='Stop'
-$D=(Resolve-Path "$PSScriptRoot\..\dist").Path; $V=(Resolve-Path "$CliDir\vinput.exe").Path
-$Out="$PSScriptRoot\..\build\test\overlaycapture"; New-Item -ItemType Directory -Force $Out | Out-Null; $Out=(Resolve-Path $Out).Path
-$p=$null
-function Px($x,$y){ $r=& $V --pid $p.Id pixel $x $y | ConvertFrom-Json; if(-not $r.ok){throw "pixel $x $y failed"}; $r }
-function Near($c,$r,$g,$b){ [math]::Abs($c.r-$r) -le 12 -and [math]::Abs($c.g-$g) -le 12 -and [math]::Abs($c.b-$b) -le 12 }
-try {
-  $p=Start-Process -FilePath "$D\$Exe" -WindowStyle Hidden -PassThru
-  $ok=$false; for($i=0;$i -lt 50;$i++){ $r=& $V inject --pid $p.Id | ConvertFrom-Json; if($r.ok){$ok=$true;break}; Start-Sleep -Milliseconds 100 }
-  if(-not $ok){throw 'Injection failed'}
-  Start-Sleep -Milliseconds 500
-  $sw=[Diagnostics.Stopwatch]::StartNew()
-  $c=& $V --pid $p.Id capture "$Out\full.png" | ConvertFrom-Json
-  $ms=$sw.ElapsedMilliseconds
-  if(-not $c.ok){throw "capture failed: $($c | ConvertTo-Json -Compress)"}
-  if($c.w -ne 320 -or $c.h -ne 240){throw "capture size $($c.w)x$($c.h), expected 320x240"}
-  if(-not (Near (Px 100 200) 220 20 20)){throw 'left half is not red: overlay window not captured (black frame)'}
-  if(-not (Near (Px 250 200) 20 20 220)){throw 'right half is not blue'}
-  if(-not (Near (Px 10 10) 20 220 20)){throw 'green marker not at the top-left: aspect-fit/centre mapping wrong'}
-  if(-not (Near (Px 145 120) 220 20 20)){throw 'stale yellow square from the game window leaked into the capture'}
-  if(-not (Near (Px 100 100) 220 20 20)){throw 'red region wrong below the marker'}
-  if($c.capture_path -ne 'printwindow_overlay'){throw "capture_path $($c.capture_path)"}
-  if($ms -gt 2500){throw "capture took $ms ms: waited for a swapchain frame that never comes"}
-  "PASS overlay-window capture (red/blue/green at the right client pixels, ${ms} ms)"
-} finally { if($p -and -not $p.HasExited){Stop-Process -Id $p.Id -Force -Confirm:$false} }
+param([string]$Out="$PSScriptRoot\..\build\test\overlay_capture\after",[string]$CliDir="$PSScriptRoot\..\dist",[string]$DllDir='',[switch]$KeepGoing)
+$ErrorActionPreference='Stop';$root=(Resolve-Path "$PSScriptRoot\..").Path;$CliDir=(Resolve-Path $CliDir).Path;$cli=Join-Path $CliDir 'vinput.exe';if(!$DllDir){$DllDir=$CliDir};$DllDir=(Resolve-Path $DllDir).Path
+. "$PSScriptRoot\_vcvars.ps1";$vcDir=Get-VcVarsDir
+. "$PSScriptRoot\vi_ownedprocess.ps1";Add-Type -AssemblyName System.Drawing
+Add-Type 'using System;using System.Runtime.InteropServices;public static class ViOverlayTest{[DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);}'
+New-Item -ItemType Directory -Force $Out|Out-Null;$Out=(Resolve-Path $Out).Path;$runId=[guid]::NewGuid().ToString('N');$checks=[Collections.Generic.List[object]]::new();$records=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.List[Diagnostics.Process]]::new()
+function Check($pass,$name){$checks.Add(@{pass=[bool]$pass;name=$name});"$(if($pass){'PASS'}else{'FAIL'}) $name";if(!$pass-and!$KeepGoing){throw $name}}
+function Log($path){if(!(Test-Path $path)){return ''};$f=[IO.FileStream]::new($path,'Open','Read',([IO.FileShare]::ReadWrite-bor[IO.FileShare]::Delete));$r=[IO.StreamReader]::new($f);try{return $r.ReadToEnd()}finally{$r.Dispose();$f.Dispose()}}
+function Vi($target,[string[]]$arguments){$raw=&$cli --json --pid $target @arguments;return $raw|ConvertFrom-Json}
+function Near($pixel,$r,$g,$b){return [math]::Abs($pixel.R-$r)-le12-and[math]::Abs($pixel.G-$g)-le12-and[math]::Abs($pixel.B-$b)-le12}
+function Pixels($path,$scaled=$false){$b=[Drawing.Bitmap]::new($path);try{$factor=if($scaled){0.5}else{1.0};return @{left=$b.GetPixel([int](100*$factor),[int](200*$factor));right=$b.GetPixel([int](250*$factor),[int](200*$factor));marker=$b.GetPixel([int](10*$factor),[int](10*$factor));stale=$b.GetPixel([int](145*$factor),[int](120*$factor));width=$b.Width;height=$b.Height}}finally{$b.Dispose()}}
+function StartTarget($d,$arch,$name,$hide){$log="$d\$name.log";$argument=if($hide){'hide'}else{'visible'};$p=Start-Process "$d\fixture.exe" -ArgumentList "`"$log`" $argument" -WindowStyle Hidden -PassThru;$owned.Add($p);$until=[Environment]::TickCount64+3000;do{$text=Log $log;if($text-match'READY game=(0x[0-9A-F]+) overlay=(0x[0-9A-F]+)'){$game=[Convert]::ToInt64($Matches[1],16);$overlay=[Convert]::ToInt64($Matches[2],16);break};Start-Sleep -Milliseconds 10}while([Environment]::TickCount64-lt$until);if(!$game){throw 'owned overlay target not ready'};$dll=Join-Path $DllDir $(if($arch-eq'x64'){'vinput64.dll'}else{'vinput32.dll'});$inj=&$cli --json inject --pid $p.Id --dll $dll|ConvertFrom-Json;Check $inj.ok "$arch $name injected"|Out-Host;return @{process=$p;pid=$p.Id;game=$game;overlay=$overlay;log=$log}}
+function Shot($t,$path,$hint=$null,$scaled=$false){$watch=[Diagnostics.Stopwatch]::StartNew();if($null-ne$hint){$request=@{cmd='capture';method='printwindow';path=$path;overlay=$hint}|ConvertTo-Json -Compress;$reply=Vi $t.pid @('json',$request)}elseif($scaled){$reply=Vi $t.pid @('capture',$path,'--scale','0.5')}else{$reply=Vi $t.pid @('capture',$path)};$watch.Stop();$pixels=if($reply.ok){Pixels $path $scaled}else{$null};$records.Add(@{pid=$t.pid;hint=$hint;reply=$reply;pixels=$pixels;elapsed_ms=$watch.ElapsedMilliseconds});return @{reply=$reply;pixels=$pixels;ms=$watch.ElapsedMilliseconds}}
+try{foreach($arch in @('x64','x86')){$vc=if($arch-eq'x64'){'vcvars64.bat'}else{'vcvars32.bat'};$d="$Out\$arch\run_$runId";New-Item -ItemType Directory -Force "$d\temp"|Out-Null;$batch=@"
+@echo off
+set "TEMP=$d\temp"
+set "TMP=$d\temp"
+call "$vcDir\$vc" >nul || exit /b 2
+cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 /I"$root\src" /I"$root\third_party\minhook\include" "$root\test\vi_overlaytarget.cpp" /Fo:"$d\fixture.obj" /Fe:"$d\fixture.exe" /link /SUBSYSTEM:WINDOWS "$root\build\$arch\vimh_buffer.obj" "$root\build\$arch\vimh_hook.obj" "$root\build\$arch\vimh_trampoline.obj" "$root\build\$arch\vimh_hde.obj" || exit /b 2
+"@;[IO.File]::WriteAllText("$d\build.cmd",$batch,[Text.Encoding]::ASCII);cmd /d /c "$d\build.cmd" *> "$d\build.log";Check ($LASTEXITCODE-eq0) "$arch overlay fixture W4 WX";if($LASTEXITCODE-ne0){throw 'fixture build failed'}
+ $visible=StartTarget $d $arch 'visible' $false;$shot=Shot $visible "$d\visible.png";Check ($shot.reply.ok-and$shot.reply.capture_path-eq'printwindow_overlay'-and$shot.pixels.width-eq320-and$shot.pixels.height-eq240) "$arch presentation picture keeps game client dimensions";if($shot.reply.ok){$p=$shot.pixels;Check ((Near $p.left 220 20 20)-and(Near $p.right 20 20 220)-and(Near $p.marker 20 220 20)-and(Near $p.stale 220 20 20)) "$arch actual aspect-fitted red blue green replaces stale yellow game picture"};Check ($shot.ms-lt2500) "$arch no-Present auto capture skips doomed native wait"
+ $hidden=StartTarget $d $arch 'hidden' $true;$noHint=Shot $hidden "$d\hidden_no_hint.png" 0;Check ($noHint.reply.ok-and$noHint.reply.capture_path-eq'printwindow'-and!(Near $noHint.pixels.marker 20 220 20)) "$arch actual hidden window is not discoverable in-process without a hint"
+ $automatic=Shot $hidden "$d\hidden_auto.png";Check ($automatic.reply.ok-and$automatic.reply.capture_path-eq'printwindow_overlay'-and(Near $automatic.pixels.marker 20 220 20)-and(Near $automatic.pixels.stale 220 20 20)) "$arch external CLI hint reaches the hidden same-process presentation window"
+ foreach($bad in @(@{name='foreign same-class HWND';value=$visible.overlay},@{name='same-process wrong-class HWND';value=$hidden.game})){$shot=Shot $hidden "$d\$($bad.value)_rejected.png" $bad.value;Check ($shot.reply.ok-and$shot.reply.capture_path-eq'printwindow'-and$shot.reply.hash-eq$noHint.reply.hash) "$arch ignores $($bad.name) and retains actual no-hint game print"}
+ $scaled=Shot $hidden "$d\scaled.png" $null $true;Check ($scaled.reply.ok-and$scaled.reply.w-eq160-and$scaled.reply.h-eq120-and$scaled.reply.client_w-eq320-and$scaled.reply.client_h-eq240-and(Near $scaled.pixels.marker 20 220 20)) "$arch overlay scaling preserves existing client coordinate transform"
+ [ViOverlayTest]::PostMessage([IntPtr]$hidden.game,0x8001,[IntPtr]1,[IntPtr]::Zero)|Out-Null;$until=[Environment]::TickCount64+2000;do{if((Log $hidden.log)-match'UNIFORM 1'){break};Start-Sleep -Milliseconds 10}while([Environment]::TickCount64-lt$until);$flat=Shot $hidden "$d\uniform.png";Check ($flat.reply.ok-and$flat.reply.capture_path-eq'printwindow_overlay'-and(Near $flat.pixels.stale 255 255 255)) "$arch actual uniform game and presentation prints follow reviewed uniform-source policy"
+ foreach($t in @($visible,$hidden)){$s=Vi $t.pid @('status');Check (-not$s.really_foreground) "$arch owned overlay target remains background";Stop-ViOwnedProcess $t.process}
+}}finally{foreach($p in $owned){Stop-ViOwnedProcess $p};$checks|ConvertTo-Json -Depth 6|Set-Content "$Out\checks.json";$records|ConvertTo-Json -Depth 18|Set-Content "$Out\evidence.json"}
+$failed=@($checks|Where-Object{-not$_.pass}).Count;"$($checks.Count-$failed) PASS / $failed FAIL";if($failed){exit 1};exit 0

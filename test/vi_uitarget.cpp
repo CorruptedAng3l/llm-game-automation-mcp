@@ -26,10 +26,12 @@
 
 enum Screen { LOAD, MAIN, SELECT, GAME };
 struct Button { const wchar_t* label; RECT r; Screen screen; };
-static const int kW = 800, kH = 450;
+static int kW = 800;
+static const int kH = 450;
 static FILE* g_log; static HWND g_hwnd; static Screen g_screen = LOAD;
 static DWORD g_loadMs = 0, g_start = 0;
 static double g_iconScale = 1.0, g_buttonScale = 1.0;
+static int g_stylised = 0;
 static std::vector<Button> g_buttons;
 
 static void Log(const char* fmt, ...) {
@@ -79,6 +81,23 @@ static void Text(HDC dc, const wchar_t* t, RECT r, int px, COLORREF col, UINT fm
     DrawTextW(dc, t, -1, &r, fmt | DT_SINGLELINE | DT_NOPREFIX); SelectObject(dc, old); DeleteObject(f);
 }
 static void Paint(HDC dc) {
+    if (g_stylised) {
+        // Difficult but deterministic labels: dim condensed italics and a tiny territory prompt.
+        // The label shapes are real GDI font glyphs; no OCR output is mocked.
+        HBRUSH bg = CreateSolidBrush(RGB(112, 112, 112)); RECT all{0, 0, kW, kH}; FillRect(dc, &all, bg); DeleteObject(bg);
+        HFONT f = CreateFontW(g_stylised == 1 ? -13 : -10, 0, 0, 0, FW_BOLD, TRUE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY, DEFAULT_PITCH, L"Arial Narrow");
+        HGDIOBJ previous = SelectObject(dc, f); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(120, 120, 120));
+        RECT battle{60, 110, 260, 170}, resume{300, 110, 540, 170}, ok{60, 220, 260, 280}, prompt{50, 330, 750, 400};
+        DrawTextW(dc, L"BATTLE", -1, &battle, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(dc, L"RESUME GAME", -1, &resume, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(dc, L"Tap any of your territories", -1, &prompt, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, previous); DeleteObject(f);
+        HFONT shortLabel = CreateFontW(-24, 0, 0, 0, FW_BOLD, TRUE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Arial");
+        previous = SelectObject(dc, shortLabel); DrawTextW(dc, L"OK", -1, &ok, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, previous); DeleteObject(shortLabel); return;
+    }
     HBRUSH bg = CreateSolidBrush(RGB(18, 28, 56)); RECT all{0, 0, kW, kH}; FillRect(dc, &all, bg); DeleteObject(bg);
     if (g_screen == LOAD) { Text(dc, L"Loading game assets", {0, 150, kW, 250}, 40, RGB(255, 255, 255), DT_CENTER | DT_VCENTER); return; }
     if (g_screen == GAME) { Text(dc, L"Game started", {0, 150, kW, 250}, 48, RGB(120, 255, 120), DT_CENTER | DT_VCENTER); return; }
@@ -126,6 +145,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
         if (!wcscmp(argv[i], L"--load-ms")) g_loadMs = (DWORD)_wtoi(argv[++i]);
         else if (!wcscmp(argv[i], L"--icon-scale")) g_iconScale = _wtof(argv[++i]);
         else if (!wcscmp(argv[i], L"--button-scale")) g_buttonScale = _wtof(argv[++i]);
+        else if (!wcscmp(argv[i], L"--stylised")) g_stylised = _wtoi(argv[++i]);
+        else if (!wcscmp(argv[i], L"--canvas-width")) { int width = _wtoi(argv[++i]); if (width >= 800 && width <= 2560) kW = width; }
     }
     BuildButtons();
     WNDCLASSW wc = {}; wc.lpfnWndProc = Wnd; wc.hInstance = hi; wc.lpszClassName = L"vi_uitarget"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW);

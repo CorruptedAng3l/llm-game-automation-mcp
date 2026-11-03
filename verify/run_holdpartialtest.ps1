@@ -1,0 +1,12 @@
+param([string]$CliDir="$PSScriptRoot\..\dist",[string]$Out="$PSScriptRoot\..\build\test\input_jobs\hold_maintained\partial_after")
+$ErrorActionPreference='Stop';$root=(Resolve-Path "$PSScriptRoot\..").Path;New-Item -ItemType Directory -Force "$Out\tools\temp"|Out-Null;$Out=(Resolve-Path $Out).Path;$tools="$Out\tools";$checks=@();$records=@()
+. "$PSScriptRoot\_vcvars.ps1";$vcDir=Get-VcVarsDir
+foreach($arch in @('x64','x86')){$suffix=if($arch-eq'x64'){''}else{'32'};$vc=if($suffix){'vcvars32.bat'}else{'vcvars64.bat'};$cli=(Resolve-Path (Join-Path $CliDir "vinput$suffix.exe")).Path;$batch=@"
+@echo off
+set "TEMP=$tools\temp"
+set "TMP=$tools\temp"
+call "$vcDir\$vc" >nul || exit /b 2
+cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\verify\input_jobs\hold_maintained\vi_partialpipe.cpp" /Fo:"$tools\partial$suffix.obj" /Fd:"$tools\partial$suffix.pdb" /Fe:"$tools\partial$suffix.exe" || exit /b 2
+"@;[IO.File]::WriteAllText("$tools\build_$arch.cmd",$batch,[Text.Encoding]::ASCII);& cmd /d /c "$tools\build_$arch.cmd" *> "$tools\build_$arch.log";if($LASTEXITCODE-ne0){throw 'fixture compile failed'};$log="$Out\server$suffix.log";$process=Start-Process "$tools\partial$suffix.exe" -ArgumentList "`"$log`"" -WindowStyle Hidden -PassThru
+try{$end=[Environment]::TickCount64+2000;do{if((Get-Content $log -Raw -ErrorAction SilentlyContinue)-match'READY'){break};Start-Sleep -Milliseconds 5}while([Environment]::TickCount64-lt$end);$raw=@(& $cli --json --pid $process.Id hold-while w --until-text EXPECTED --timeout-ms 1000);$code=$LASTEXITCODE;$parsed=$null;$parseError='';try{$parsed=$raw|ConvertFrom-Json}catch{$parseError=$_.Exception.Message};$good=$raw.Count-eq1-and$code-ne0-and$parsed-and-not$parsed.ok-and$null-eq$parsed.input-and$parsed.input_raw-match'truncated'-and$parsed.delivery_unknown-and$parsed.raw_encoding-eq'json-u00-byte-escapes'-and$parsed.input_raw.EndsWith([char]0xC3)-and@($raw[0].ToCharArray()|Where-Object{[int]$_-gt127}).Count-eq0;$checks+=@{pass=[bool]$good;arch=$arch};$records+=@{arch=$arch;raw=$raw;exit=$code;parse_error=$parseError;server=(Get-Content $log -Raw)};"$(if($good){'PASS'}else{'FAIL'}) $arch partial ack remains one valid error JSON with escaped raw data";$process.WaitForExit(3000)|Out-Null}finally{if(-not$process.HasExited){Stop-Process -Id $process.Id -Force}}}
+@{checks=$checks;records=$records}|ConvertTo-Json -Depth 8|Set-Content "$Out\result.json" -Encoding utf8NoBOM;$failed=@($checks|Where-Object{-not$_.pass}).Count;"$($checks.Count-$failed) PASS / $failed FAIL";if($failed){exit 1};$global:LASTEXITCODE=0

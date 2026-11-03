@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <share.h>
 #include "vi_pattern.h"
+#include "vi_capturetiming.h"
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
@@ -20,6 +21,7 @@
 static FILE* g_log;
 static void L(const char* f, ...) { if (!g_log) return; va_list a; va_start(a, f); vfprintf(g_log, f, a); va_end(a); fputc('\n', g_log); fflush(g_log); }
 static LRESULT CALLBACK Wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if(vi_capture_timing::Message(m,w))return 0;
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcW(h, m, w, l);
 }
@@ -59,6 +61,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     MSG msg;
     for (;;) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { if (msg.message == WM_QUIT) { L("EXIT frames=%u state_bad=%d", frame, stateBad); return 0; } TranslateMessage(&msg); DispatchMessageW(&msg); }
+        if(vi_capture_timing::pendingReset){QueryPerformanceCounter(&prevT);maxMs=0;lastLog=GetTickCount();L("CAPTURE_TIMING_START token=%llu frame=%u",(unsigned long long)vi_capture_timing::pendingReset,frame);vi_capture_timing::pendingReset=0;}
         RECT cr; GetClientRect(hwnd, &cr); int cw = cr.right, ch = cr.bottom;
         if (cw > 0 && ch > 0) {
             glViewport(0, 0, cw, ch);
@@ -85,6 +88,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
         LARGE_INTEGER now; QueryPerformanceCounter(&now);
         if (prevT.QuadPart) { double ms = (now.QuadPart - prevT.QuadPart) * 1000.0 / qpf.QuadPart; if (ms > maxMs) maxMs = ms; }
         prevT = now;
+        if(vi_capture_timing::pendingReport){L("CAPTURE_TIMING_END token=%llu maxms=%.1f",(unsigned long long)vi_capture_timing::pendingReport,maxMs);vi_capture_timing::pendingReport=0;}
         if (GetTickCount() - lastLog > 1000) { lastLog = GetTickCount(); L("FRAME %u maxms=%.1f", frame, maxMs); maxMs = 0; }
         Sleep(4);
     }

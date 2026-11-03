@@ -4,10 +4,13 @@
 # AND vinput's captured_present to advance by >= 10. Cases with Leak=$true also run 50 resize+capture cycles
 # and compare the target's handle count / private bytes before and after. Every target is background,
 # started and stopped by this script (by PID).
-param([string]$Out = "$PSScriptRoot\..\build\test\nativecapture", [string[]]$Only = @())
+param([string]$Out = "$PSScriptRoot\..\build\test\nativecapture", [string[]]$Only = @(), [string]$Vinput = '')
 $ErrorActionPreference = 'Stop'
-$D = (Resolve-Path "$PSScriptRoot\..\dist").Path; $V = "$D\vinput.exe"
+$D = (Resolve-Path "$PSScriptRoot\..\dist").Path; $V = if ($Vinput) { (Resolve-Path $Vinput).Path } else { "$D\vinput.exe" }
 . "$PSScriptRoot\vi_patterncheck.ps1"
+. "$PSScriptRoot\vi_capturetiming.ps1"
+. "$PSScriptRoot\vi_resizecycle.ps1"
+. "$PSScriptRoot\vi_logwindow.ps1"
 New-Item -ItemType Directory -Force $Out | Out-Null; $Out = (Resolve-Path $Out).Path
 $log = "$Out\nativecapture_log.txt"; Set-Content -LiteralPath $log -Value ''
 function Note($m) { ("{0:HH:mm:ss.fff} {1}" -f (Get-Date), $m) | Tee-Object -Append $log }
@@ -17,10 +20,20 @@ Add-Type -Namespace ViNc -Name W -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
 '@
 }
 function FgPid { $p = [uint32]0; [void][ViNc.W]::GetWindowThreadProcessId([ViNc.W]::GetForegroundWindow(), [ref]$p); return $p }
 function Cmd([int]$TargetPid, [string[]]$C) { $r = & $V --pid $TargetPid @C | ConvertFrom-Json; return $r }
+function TimingControl($Process,$Status,$TargetLog,[long]$Token,[bool]$Start){
+ $h=[IntPtr]::new([Convert]::ToInt64($Status.hwnd,16));[uint32]$owner=0;[ViNc.W]::GetWindowThreadProcessId($h,[ref]$owner)|Out-Null
+ if($owner-ne$Process.Id){throw 'timing control HWND is not owned'}
+ $message=if($Start){0x8000+117}else{0x8000+118};$label=if($Start){'START'}else{'END'}
+ if(-not[ViNc.W]::PostMessage($h,$message,[IntPtr]::new($Token),[IntPtr]::Zero)){throw 'owned timing control post failed'}
+ $until=[Environment]::TickCount64+3000
+ do{if((Get-Content -LiteralPath $TargetLog -Raw)-match"CAPTURE_TIMING_$label token=$Token "){return};Start-Sleep -Milliseconds 10}while([Environment]::TickCount64-lt$until)
+ throw "timing $label acknowledgement unavailable"
+}
 
 # n, exe, args, api (expected capture_path), leak, pre (vinput commands before the first capture), inject ('early'
 # = target waits for the vinput pipe before creating its device)
@@ -39,16 +52,20 @@ $cases = @(
   @{ n='vk_gdpa_x64';   exe='vi_vktest.exe';   a='--fmt bgra --gdpa'; api='vk'; leak=$false; early=$true },
   @{ n='vk_rgba_x86';   exe='vi_vktest32.exe'; a='--fmt rgba';        api='vk'; leak=$false; early=$true; optional=$true },
   @{ n='vk_r10_x64';    exe='vi_vktest.exe';   a='--fmt r10';         api='vk'; leak=$false; early=$true; optional=$true },
-  @{ n='vk_bgra_x86';   exe='vi_vktest32.exe'; a='--fmt bgra';        api='vk'; leak=$false; early=$true },
+  @{ n='vk_bgra_x86';   exe='vi_vktest32.exe'; a='--fmt bgra';        api='vk'; leak=$true; early=$true },
   # negative: injected after the device exists -> native capture refuses with a clear reason, auto falls back to
   # PrintWindow, and the driver's internal DXGI swapchain is not counted as a second (d3d12) frame source
   @{ n='vk_late_inject_x64'; exe='vi_vktest.exe'; a='--fmt bgra'; api='vk'; leak=$false; late=$true }
 )
-if ($Only.Count) { $cases = $cases | Where-Object { $Only -contains $_.n } }
+if ($Only.Count) { foreach($name in $Only){if($name-notin$cases.n){throw "Unknown native capture case: $name"}};$cases = @($cases | Where-Object { $Only -contains $_.n }) }
+$nativeResult=[ordered]@{schema=1;status='running';started_utc=[DateTime]::UtcNow.ToString('o');finished_utc=$null;expected_resize_cycles=50;cycle_indices_are_zero_based=$true;cases=[Collections.Generic.List[object]]::new()}
+$resultPath=Join-Path $Out 'result.json';Write-ViNativeCaptureResult $resultPath $nativeResult
+$caseRecord=$null
 $owned = @()
 $fgBefore = FgPid
 try {
   foreach ($c in $cases) {
+    $caseRecord=[ordered]@{name=$c.n;expected_api=$c.api;expected_resize_cycles=$(if($c.leak){50}else{0});status='running';pid=$null;resize_cycles=[Collections.Generic.List[object]]::new();failed_cycle_indices=[Collections.Generic.List[int]]::new()};$nativeResult.cases.Add($caseRecord);Write-ViNativeCaptureResult $resultPath $nativeResult
     $tl = "$Out\$($c.n)_target.log"
     if ($c.ac) {
       # same sandbox as a UWP / Xbox app game: AppContainer with no capabilities (test\vi_aclaunch.cpp)
@@ -59,16 +76,21 @@ try {
       $p = Get-Process -Id $j.pid
     } else {
       $extra = if ($c.early) { ' --wait-vinput 20000' } else { '' }
-      $p = Start-Process -FilePath "$D\$($c.exe)" -ArgumentList "`"$tl`" -28000 600 820 480 $($c.a)$extra" -PassThru
+      $p = Start-Process -FilePath "$D\$($c.exe)" -ArgumentList "`"$tl`" -28000 600 820 480 $($c.a)$extra" -WindowStyle Hidden -PassThru
     }
-    $owned += $p
+    $owned += $p;$caseRecord.pid=$p.Id;$caseRecord.target_log=$tl
     Start-Sleep -Milliseconds $(if ($c.early) { 300 } elseif ($c.late) { 2500 } else { 700 })
+    if ($p.HasExited) {
+      $startup = Get-Content -LiteralPath $tl -Tail 12 -ErrorAction SilentlyContinue
+      throw "FAIL $($c.n) fixture exited before injection (exit=$($p.ExitCode)): $($startup -join '; ')"
+    }
     $r = & $V inject --pid $p.Id | ConvertFrom-Json
+    $r | ConvertTo-Json -Depth 8 | Set-Content "$Out\$($c.n)_inject.json"
     Require $r.ok "$($c.n) inject"
     if ($c.optional) {
       Start-Sleep -Milliseconds 2500
       $tlog0 = Get-Content -LiteralPath $tl -Raw
-      if ($tlog0 -match 'FAIL surface does not offer format') { Note "$($c.n) SKIP (not a vinput result): $(($tlog0 -split "`n" | Select-String 'FAIL').Line)"; Stop-Process -Id $p.Id -Force -Confirm:$false; continue }
+      if ($tlog0 -match 'FAIL surface does not offer format') { $caseRecord.status='skipped'; Note "$($c.n) SKIP (not a vinput result): $(($tlog0 -split "`n" | Select-String 'FAIL').Line)"; Stop-Process -Id $p.Id -Force -Confirm:$false; continue }
     }
     if ($c.late) {
       $s = $null
@@ -84,7 +106,7 @@ try {
       Require ($a.ok -and $a.capture_path -eq 'printwindow' -and $a.note -match 'before vinput was injected') "$($c.n) auto capture falls back to PrintWindow and says why"
       $pa = Test-VinputPattern "$Out\$($c.n)_auto.png"
       Note "$($c.n) INFO PrintWindow of a Vulkan window: pattern ok=$($pa.ok) $($pa.detail)"
-      Require (-not $p.HasExited) "$($c.n) target alive"
+      Require (-not $p.HasExited) "$($c.n) target alive";$caseRecord.status='passed'
       Stop-Process -Id $p.Id -Force -Confirm:$false
       continue
     }
@@ -106,7 +128,12 @@ try {
       Require ($acl -notmatch 'APPLICATION PACKAGE|S-1-15-2') "$($c.n) control: $noac grants no AppContainer access"
       $n = Cmd $p.Id @('capture', "$noac\capture.png", '--method', 'native')
       Require ($n.ok -and $n.path -eq "$noac\capture.png" -and (Test-Path "$noac\capture.png") -and (Test-VinputPattern "$noac\capture.png").ok) "$($c.n) capture to a folder the container cannot write: staged + moved, pixels exact (err=$($n.error))"
+      $nested = "$noac\missing_$([guid]::NewGuid().ToString('N'))\child\capture.png"
+      $n2 = Cmd $p.Id @('capture', $nested, '--method', 'native')
+      Require ($n2.ok -and $n2.path -eq $nested -and (Test-Path -LiteralPath $nested) -and (Test-VinputPattern $nested).ok) "$($c.n) CLI creates missing destination parents outside AppContainer and moves staged pixels"
     }
+    $timingToken=Get-Random -Minimum 1 -Maximum 1000000000
+    TimingControl $p $s $tl $timingToken $true
     $a = Cmd $p.Id @('capture', "$Out\$($c.n)_a.png", '--method', 'native')
     $a | ConvertTo-Json -Compress | Set-Content "$Out\$($c.n)_a.json"
     Require ($a.ok -and $a.capture_path -eq $c.api -and $a.method -eq 'swapchain') "$($c.n) native capture A path=$($a.capture_path) err=$($a.error)"
@@ -129,18 +156,36 @@ try {
       $p.Refresh(); $h0 = $p.HandleCount; $m0 = $p.PrivateMemorySize64
       $bad = 0; $mismatch = 0
       for ($i = 0; $i -lt 50; $i++) {
-        $cw = 700 + ($i % 5) * 60; $chh = 420 + ($i % 3) * 50
-        [void][ViNc.W]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, $cw, $chh, 0x0002 -bor 0x0004 -bor 0x0010)   # NOMOVE|NOZORDER|NOACTIVATE
-        Start-Sleep -Milliseconds 40
-        $k = Cmd $p.Id @('capture', "$Out\$($c.n)_loop.png", '--after-frames', '2', '--method', 'native')
-        if (-not $k.ok -or $k.capture_path -ne $c.api) { $bad++; Note "loop $i capture failed: $($k.error)"; continue }
-        $pk = Test-VinputPattern "$Out\$($c.n)_loop.png"
-        if (-not $pk.ok) { $bad++; Note "loop $i pattern: $($pk.detail)" }
-        if ($k.w -ne $k.client_w -or $k.h -ne $k.client_h) { $mismatch++ }
+        $cw=700+($i%5)*60;$chh=420+($i%3)*50;$raced=$c.api-eq'vk'-and$i%10-eq0
+        $cycle=[ordered]@{index=$i;number=$i+1;status='running';classification='in_progress';requested_outer_w=$cw;requested_outer_h=$chh;race_attempted=$raced;race_observed=$false;resize_ok=$false;capture=$null;pattern=$null;elapsed_ms=0;target_alive=$true}
+        $caseRecord.resize_cycles.Add($cycle);Write-ViNativeCaptureResult $resultPath $nativeResult;$cycleWatch=[Diagnostics.Stopwatch]::StartNew()
+        try{
+          [uint32]$windowOwner=0;[ViNc.W]::GetWindowThreadProcessId($hwnd,[ref]$windowOwner)|Out-Null
+          if($p.HasExited-or$windowOwner-ne$p.Id){$cycle.classification='target_window_not_owned';$cycle.status='failed';$bad++;break}
+          if($raced){
+            $token=$i+1;$packed=$cw-bor($chh-shl16);$cycle.resize_ok=[ViNc.W]::PostMessage($hwnd,0x8000+120,[IntPtr]$token,[IntPtr]$packed)
+            $until=[Environment]::TickCount64+3000
+            do{$snapshot=[ViLogWindow]::Read($tl);$text=if($snapshot.valid){[Text.Encoding]::UTF8.GetString($snapshot.bytes)}else{''};if($text-match"RACE_AFTER_ACQUIRE token=$token .*resized=1 changed=1"){$cycle.race_observed=$true;break};Start-Sleep -Milliseconds 10}while([Environment]::TickCount64-lt$until)
+          }else{$cycle.resize_ok=[ViNc.W]::SetWindowPos($hwnd,[IntPtr]::Zero,0,0,$cw,$chh,0x0002-bor0x0004-bor0x0010)}
+          Start-Sleep -Milliseconds 40
+          if($p.HasExited){$cycle.status='failed';$cycle.classification='target_exited_before_capture';$bad++;break}
+          $k=Cmd $p.Id @('capture',"$Out\$($c.n)_loop.png",'--after-frames','2','--method','native');$cycle.capture=$k
+          $pk=$null;if($k.ok){$pk=Test-VinputPattern "$Out\$($c.n)_loop.png"};$cycle.pattern=$pk
+          $cycle.classification=Get-ViResizeCycleClass $cycle.resize_ok $raced $cycle.race_observed $k $c.api $pk
+          $cycle.status=if($cycle.classification-eq'passed'){'passed'}else{'failed'}
+          if($cycle.status-eq'failed'){
+            $bad++;Note "loop $i failed: $($cycle.classification) error=$($k.error) pattern=$($pk.detail)"
+            if($k.ok-and(Test-Path "$Out\$($c.n)_loop.png")){$failureImage="$Out\$($c.n)_bad_cycle_$('{0:D2}'-f$i).png";try{Copy-Item -LiteralPath "$Out\$($c.n)_loop.png" -Destination $failureImage;$cycle.failure_image=$failureImage}catch{$cycle.image_copy_error=$_.Exception.Message}}
+            if(!$p.HasExited){try{$cycle.diagnostic_status=Cmd $p.Id @('status')}catch{$cycle.diagnostic_error=$_.Exception.Message}}
+          }
+          $cycle.size_lag=$k.ok-and($k.w-ne$k.client_w-or$k.h-ne$k.client_h);if($cycle.size_lag){$mismatch++}
+        }catch{$cycle.status='failed';$cycle.classification='exception';$cycle.error=$_.Exception.Message;$bad++;throw}
+        finally{$cycleWatch.Stop();$cycle.elapsed_ms=$cycleWatch.ElapsedMilliseconds;$cycle.target_alive=!$p.HasExited;if(!$cycle.target_alive){$cycle.exit_code=$p.ExitCode};if($cycle.status-eq'failed'){$caseRecord.failed_cycle_indices.Add($i)};Write-ViNativeCaptureResult $resultPath $nativeResult}
+        if($p.HasExited){break}
       }
       Start-Sleep -Milliseconds 500
       $p.Refresh(); $h1 = $p.HandleCount; $m1 = $p.PrivateMemorySize64
-      $st = Cmd $p.Id @('status')
+      $st = Cmd $p.Id @('status');$caseRecord.after_resize_status=$st
       Note ("{0} 50 resize+capture cycles: handles {1}->{2}, private MB {3:N1}->{4:N1}, size-lag captures {5}, d3d12={6}" -f $c.n, $h0, $h1, ($m0/1MB), ($m1/1MB), $mismatch, ($st.d3d12 | ConvertTo-Json -Compress))
       Require ($bad -eq 0) "$($c.n) all 50 resize+capture cycles native and pattern-exact"
       Require (-not $p.HasExited) "$($c.n) target alive after 50 resizes"
@@ -153,15 +198,20 @@ try {
       if ($c.api -eq 'd3d12') { Require ($st.d3d12.releases -ge 1 -and $st.d3d12.leaks -eq 0) "$($c.n) ResizeBuffers released our D3D12 objects ($($st.d3d12.releases)x), no leaks" }
       if ($c.api -eq 'vk') { Require ($st.vk.swapchains -eq 1 -and $st.vk.usage_added -ge 10) "$($c.n) old swapchains forgotten (tracked now: $($st.vk.swapchains)), TRANSFER_SRC added to every recreated one ($($st.vk.usage_added))" }
     }
+    TimingControl $p $s $tl $timingToken $false
     $tlog = Get-Content -LiteralPath $tl
-    $worst = ($tlog | Select-String 'maxms=([\d.]+)' | ForEach-Object { [double]$_.Matches[0].Groups[1].Value } | Measure-Object -Maximum).Maximum
-    if ($null -ne $worst) { Note "$($c.n) worst per-second max frame time while injected/capturing: $worst ms"; Require ($worst -lt 250) "$($c.n) no capture stall >= 250 ms" }
+    $timing=Get-ViCaptureTiming ($tlog-join"`n") $timingToken;$timing|ConvertTo-Json|Set-Content "$Out\$($c.n)_timing.json"
+    $worst=$timing.worst_ms
+    Note "$($c.n) worst frame interval in acknowledged capture phase: $worst ms ($($timing.samples) samples)"
+    Require ($timing.samples-ge1-and$worst-lt250) "$($c.n) no capture-phase stall >= 250 ms (startup/injection measured separately)"
     Require (-not (($tlog -join "`n") -match 'STATE_CHANGED')) "$($c.n) game-visible API state unchanged by captures (target self-check)"
     Require ((FgPid) -ne $p.Id) "$($c.n) target never became the real foreground"
+    $caseRecord.status='passed';Write-ViNativeCaptureResult $resultPath $nativeResult
     Stop-Process -Id $p.Id -Force -Confirm:$false
   }
-  Note 'PASS native capture suite'
-} finally {
+  $nativeResult.status='passed';Note 'PASS native capture suite'
+} catch {$nativeResult.status='failed';$nativeResult.error=$_.Exception.Message;if($caseRecord-and$caseRecord.status-eq'running'){$caseRecord.status='failed';$caseRecord.error=$_.Exception.Message};throw} finally {
+  $nativeResult.finished_utc=[DateTime]::UtcNow.ToString('o');Write-ViNativeCaptureResult $resultPath $nativeResult
   foreach ($p in $owned) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -Confirm:$false } }
   Note "owned targets stopped by PID; real foreground pid before=$fgBefore after=$(FgPid)"
 }

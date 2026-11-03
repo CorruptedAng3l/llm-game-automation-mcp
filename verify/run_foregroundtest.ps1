@@ -6,7 +6,9 @@ $owned=@(); $results=@(); $lock="$Out\owned_$([guid]::NewGuid().ToString('N')).l
 try {
   foreach($name in @('vi_testinput.exe','vi_testinput32.exe')) {
     $target="$D\$name"; $targetArgs="`"$Out\$name.log`" -28000 600 640 360"
-    $reply=& $V launch --exe $target --args $targetArgs --lock $lock --settle 0 --timeout 10 --no-inject | ConvertFrom-Json | Select-Object -Last 1
+    # Initial nonactivating cleanup only. Delayed foreground re-grab coverage
+    # lives in run_foreground_suite.ps1; do not spend its observation window here.
+    $reply=& $V launch --exe $target --args $targetArgs --lock $lock --settle 0 --fg-guard 0 --timeout 10 --no-inject | ConvertFrom-Json | Select-Object -Last 1
     if($reply.pid){$owned += Get-Process -Id $reply.pid}
     $results += $reply
     $results | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$Out\result.json"

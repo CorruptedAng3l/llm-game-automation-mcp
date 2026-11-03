@@ -1,0 +1,15 @@
+param([string]$Out="$PSScriptRoot\..\build\test\_out\resize_cycle")
+$ErrorActionPreference='Stop';. "$PSScriptRoot\vi_resizecycle.ps1";New-Item -ItemType Directory -Force $Out|Out-Null;$checks=[Collections.Generic.List[object]]::new()
+foreach($case in @(
+ @{name='native exact';resize=$true;race=$false;observed=$false;capture=@{ok=$true;method='swapchain';capture_path='vk'};pattern=@{ok=$true};expected='passed'},
+ @{name='fallback cannot be native success';resize=$true;race=$false;observed=$false;capture=@{ok=$true;method='printwindow';capture_path='printwindow'};pattern=@{ok=$true};expected='non_native'},
+ @{name='wrong native API';resize=$true;race=$false;observed=$false;capture=@{ok=$true;method='swapchain';capture_path='d3d12'};pattern=@{ok=$true};expected='non_native'},
+ @{name='native pixel failure stays failure';resize=$true;race=$false;observed=$false;capture=@{ok=$true;method='swapchain';capture_path='vk'};pattern=@{ok=$false;detail='bar3 mismatch'};expected='pattern_mismatch'},
+ @{name='capture error retains no-fallback failure';resize=$true;race=$false;observed=$false;capture=@{ok=$false;error='GPU copy timeout'};pattern=$null;expected='capture_failed'},
+ @{name='failed resize never passes old-size pixels';resize=$false;race=$false;observed=$false;capture=@{ok=$true;method='swapchain';capture_path='vk'};pattern=@{ok=$true};expected='resize_failed'},
+ @{name='unobserved controlled race never passes';resize=$true;race=$true;observed=$false;capture=@{ok=$true;method='swapchain';capture_path='vk'};pattern=@{ok=$true};expected='race_not_observed'}
+)){$actual=Get-ViResizeCycleClass $case.resize $case.race $case.observed $case.capture 'vk' $case.pattern;$checks.Add(@{pass=$actual-eq$case.expected;name=$case.name;actual=$actual});"$(if($actual-eq$case.expected){'PASS'}else{'FAIL'}) $($case.name)"}
+$cycle=[ordered]@{index=5;number=6;status='running';capture=$null};$receipt=[ordered]@{schema=1;status='running';cases=@(@{name='vk_bgra_x64';resize_cycles=@($cycle);failed_cycle_indices=@()})};$path=Join-Path $Out 'result.json';Write-ViNativeCaptureResult $path $receipt
+try{throw 'controlled capture parser failure'}catch{$cycle.status='failed';$cycle.classification='exception';$cycle.error=$_.Exception.Message;$receipt.status='failed';$receipt.cases[0].failed_cycle_indices=@(5)}finally{Write-ViNativeCaptureResult $path $receipt}
+$saved=Get-Content $path -Raw|ConvertFrom-Json;$pass=$saved.status-eq'failed'-and$saved.cases[0].resize_cycles[0].index-eq5-and$saved.cases[0].resize_cycles[0].number-eq6-and$saved.cases[0].resize_cycles[0].error-eq'controlled capture parser failure'-and$saved.cases[0].failed_cycle_indices[0]-eq5-and!(Test-Path ($path+'.tmp'));$checks.Add(@{pass=$pass;name='actual exception finally receipt preserves exact failed cycle and error atomically'});"$(if($pass){'PASS'}else{'FAIL'}) exact failed cycle survives exception"
+$checks|ConvertTo-Json -Depth 6|Set-Content "$Out\checks.json";$failed=@($checks|Where-Object{-not$_.pass}).Count;"$($checks.Count-$failed) PASS / $failed FAIL";if($failed){exit 1};exit 0

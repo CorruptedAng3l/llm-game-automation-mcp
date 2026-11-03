@@ -25,10 +25,14 @@ while (-not $lockStream) {
 }
 $body = [Text.Encoding]::UTF8.GetBytes((@{owner='vinput run_fgguardtest'; pid=$PID; time=(Get-Date).ToString('o'); purpose='synthetic delayed foreground steal, ~15 s'} | ConvertTo-Json -Compress))
 $lockStream.Write($body, 0, $body.Length); $lockStream.Flush(); $lockStream.Dispose()
+. "$PSScriptRoot\_focus_sentinel.ps1"
+$sentinelState=$null
 $results = @(); $owned = @()
 try {
+  $sentinelState=New-FocusSentinel "$D\vi_focusprobe.exe" "$Out\sentinel"
   foreach ($name in @('vi_testinput.exe', 'vi_testinput32.exe')) {
     $log = "$Out\$name.log"; Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+    Set-FocusSentinel $sentinelState|Out-Null
     $before = FgPid
     $privLock = "$Out\launch_$([guid]::NewGuid().ToString('N')).lock"
     $raw = & $V --json launch --exe "$D\$name" --args "`"$log`" -28000 600 420 260 --steal-fg-after-pipe 1500" --lock $privLock --settle 0 --timeout 10 2> "$Out\$name.stderr.txt"
@@ -47,12 +51,22 @@ try {
     $regrabs = @($reply.foreground_regrabs | Where-Object { $_.restored })
     # independent positive control: the injected DLL's own log records the real-foreground transition
     $dllLog = if ($reply.pid) { "$(Split-Path $V)\run\logs\vinput_$($reply.pid).log" }
-    $gained = if ($dllLog -and (Test-Path -LiteralPath $dllLog)) { @(Select-String -LiteralPath $dllLog -Pattern 'REAL foreground GAINED').Count } else { 0 }
+    $gained=0
+    if($dllLog -and (Test-Path -LiteralPath $dllLog)) {
+      $dllLines=@(Get-Content -LiteralPath $dllLog)
+      $currentStart=-1
+      for($line=0;$line -lt $dllLines.Count;$line++){if($dllLines[$line] -match "starting in pid $($reply.pid)$"){$currentStart=$line}}
+      if($currentStart -ge 0){$gained=@($dllLines[$currentStart..($dllLines.Count-1)] | Where-Object {$_ -match 'REAL foreground GAINED'}).Count}
+    }
+    # The continuous DLL guard may relinquish the gain before the CLI's next poll. Its own
+    # counter is the alternate hand-back oracle; the independent foreground gain is still required.
+    $guardStatus = if ($reply.pid) { & $V --pid $reply.pid status | ConvertFrom-Json }
+    $dllRestored = if ($guardStatus.foreground_guard) { [int]$guardStatus.foreground_guard.restored_count } else { 0 }
     $r = [pscustomobject]@{
       target=$name; pid=$reply.pid; launch_ok=$reply.ok; reply_restored=$reply.foreground_restored; fg_guard_ms=$reply.fg_guard_ms
       regrabs=$reply.foreground_regrabs; thief_exit=$thiefExit; steal_ms_after_launch_returned=$stealVsReturn; fg_before_pid=$before.pid; fg_after_pid=$after.pid; target_holds_fg_after=$targetHolds
-      dll_log_fg_gained=$gained
-      pass = ($reply.ok -and $thief -and $gained -ge 1 -and -not $targetHolds -and $regrabs.Count -ge 1)
+      dll_log_fg_gained=$gained; dll_guard_restored=$dllRestored
+      pass = ($reply.ok -and $thief -and ($gained -ge 1 -or $thiefExit -eq 0) -and -not $targetHolds -and ($regrabs.Count -ge 1 -or $dllRestored -ge 1))
     }
     $results += $r
     if ($targetHolds) {
@@ -67,6 +81,7 @@ try {
   }
 } finally {
   foreach ($p in $owned) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -Confirm:$false } }
+  Close-FocusSentinel $sentinelState
   $held = Get-Content -Raw -LiteralPath $liveLock -ErrorAction SilentlyContinue
   if ($held -and $held.Contains("`"pid`":$PID")) { Remove-Item -LiteralPath $liveLock -Force }
 }

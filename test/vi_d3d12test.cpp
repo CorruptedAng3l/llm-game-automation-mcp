@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <share.h>
 #include "vi_pattern.h"
+#include "vi_capturetiming.h"
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "user32.lib")
@@ -20,6 +21,7 @@
 static FILE* g_log; static HWND g_hwnd; static volatile bool g_resize = false;
 static void L(const char* f, ...) { if (!g_log) return; va_list a; va_start(a, f); vfprintf(g_log, f, a); va_end(a); fputc('\n', g_log); fflush(g_log); }
 static LRESULT CALLBACK Wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if(vi_capture_timing::Message(m,w))return 0;
     if (m == WM_SIZE) g_resize = true;
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcW(h, m, w, l);
@@ -74,6 +76,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
     MSG msg;
     for (;;) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { if (msg.message == WM_QUIT) { wait(); L("EXIT frames=%u resizes=%d", frame, resizes); return 0; } TranslateMessage(&msg); DispatchMessageW(&msg); }
+        if(vi_capture_timing::pendingReset){QueryPerformanceCounter(&prevT);maxMs=worstMs=0;lastLog=GetTickCount();L("CAPTURE_TIMING_START token=%llu frame=%u",(unsigned long long)vi_capture_timing::pendingReset,frame);vi_capture_timing::pendingReset=0;}
         if (g_resize) {
             g_resize = false;
             GetClientRect(g_hwnd, &rc);
@@ -116,6 +119,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR, int) {
         LARGE_INTEGER now; QueryPerformanceCounter(&now);
         if (prevT.QuadPart) { double ms = (now.QuadPart - prevT.QuadPart) * 1000.0 / qpf.QuadPart; if (ms > maxMs) maxMs = ms; if (ms > worstMs) worstMs = ms; }
         prevT = now;
+        if(vi_capture_timing::pendingReport){L("CAPTURE_TIMING_END token=%llu maxms=%.1f",(unsigned long long)vi_capture_timing::pendingReport,worstMs);vi_capture_timing::pendingReport=0;}
         if (GetTickCount() - lastLog > 1000) { lastLog = GetTickCount(); L("FRAME %u maxms=%.1f worstms=%.1f", frame, maxMs, worstMs); maxMs = 0; }
         Sleep(4);   // bounded render rate (an offscreen flip-model window is never vsync-throttled)
     }

@@ -220,12 +220,14 @@ int main() {
   ExpectKey("numpad2", VK_NUMPAD2); ExpectKey("insert", VK_INSERT); ExpectKey("capslock", VK_CAPITAL);
   ExpectKey("lwin", VK_LWIN); ExpectKey("volume_up", VK_VOLUME_UP); ExpectKey("browserback", VK_BROWSER_BACK);
   ExpectKey(" CTRL ", VK_CONTROL); ExpectKey("NumPad+", VK_ADD); ExpectKey("+", VK_OEM_PLUS);
+  for (int digit = 0; digit <= 9; ++digit) ExpectKey(("num" + std::to_string(digit)).c_str(), VK_NUMPAD0 + digit);
+  ExpectKey("VK_NUM6", VK_NUMPAD6); ExpectKey(" Num6 ", VK_NUMPAD6);
   for (int vk = 1; vk <= 255; ++vk) {
     char hex[16]; sprintf_s(hex, "0x%02X", vk);
     ExpectKey(hex, vk); ExpectKey(("vk" + std::to_string(vk)).c_str(), vk);
     Check(!vi_keys::Name(vk).empty(), "all VKs have listed names");
   }
-  for (const char* invalid : {"", " ", "0x", "0x0", "0x100", "0x2Djunk", "0x-1", "vk", "vk0", "vk999", "vk45junk", "f0", "f25", "f1junk", "numpad10", "unknown", "vk99999999999999999999999999"}) {
+  for (const char* invalid : {"", " ", "0x", "0x0", "0x100", "0x2Djunk", "0x-1", "vk", "vk0", "vk999", "vk45junk", "f0", "f25", "f1junk", "numpad10", "num", "num10", "num-1", "num6x", "num6.0", "num06", "unknown", "vk99999999999999999999999999"}) {
     int vk = 987;
     Check(!vi_keys::ParseKey(invalid, vk) && vk == 0, invalid);
   }
@@ -239,6 +241,7 @@ int main() {
   ExpectChord("+", {VK_OEM_PLUS}); ExpectChord("ctrl+plus+w", {VK_CONTROL, VK_OEM_PLUS, 'W'});
   ExpectChord("w+w+space", {'W', VK_SPACE});
   ExpectChord("0x57+vk32", {'W', VK_SPACE});
+  ExpectChord("ctrl+num6+num0+numpad6", {VK_CONTROL, VK_NUMPAD6, VK_NUMPAD0});
   for (const char* invalid : {"ctrl+", "++", "ctrl++space", "w+unknown", "w+vk256", "w+ +space", "+w", ""}) {
     std::vector<int> keys = {'Q'};
     std::string error;
