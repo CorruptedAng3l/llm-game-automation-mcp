@@ -7,6 +7,8 @@ import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { drawGrid, type Mapping } from "./imgtools.js";
+import { decodePng, encodePng } from "./png.js";
 import { compactStatus, configView, diagnoseFrames, tailLog } from "./status.js";
 import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
@@ -255,15 +257,22 @@ tool("capture", "Capture a frame",
     after_frames: z.number().int().min(0).max(3600).optional().describe("Wait for this many new presented frames first (e.g. 3 after an action)."),
     method: z.enum(["auto", "native", "printwindow"]).optional().describe("auto (default) falls back to PrintWindow and says why in 'note'."),
     include_image: z.boolean().optional().describe("Return the image content (default true). False = path + JSON only."),
+    grid: z.number().int().min(10).max(2000).optional().describe(
+      "Draw a labelled coordinate grid on the RETURNED image only (the saved PNG stays clean): a line every N client pixels, " +
+      "labelled with the client x (top edge) and y (left edge). Read exact coordinates off it instead of guessing: 100 for a " +
+      "full frame, 20-50 inside a region."),
   },
   async (a) => {
-    const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image });
+    const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image, grid: a.grid });
     return g.out;
   });
 
+/** Mapping of the last image returned per game (image_px = (client_px - offset) * scale), for coord_space:"capture". */
+const lastMapping = new Map<number, Mapping>();
+
 /** One frame grab: runs vinput capture, attaches the PNG, and diagnoses "nothing presented / fullscreen refused" when the
  *  native path was not used. Shared by capture and the capture_after option of the action tools. */
-async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeof regionSchema>; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean }) {
+async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeof regionSchema>; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean; grid?: number }) {
   const path = resolve(o.path ?? defaultCapturePath(pid));
   const r = await runVinput([...at(pid), "capture", path, ...region(o.region), ...opt("--after-frames", o.after_frames), ...opt("--method", o.method === "native" ? "swapchain" : o.method)], 60000);
   const j0 = (r.json && typeof r.json === "object" ? r.json : {}) as { method?: string; path?: string; error?: string };
@@ -285,16 +294,30 @@ async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeo
     const out = reply({ ...r, ok: false }, { ...extra, error: r.ok ? msg : `${j0.error ?? "capture failed"}. ${msg}` });
     return { r, out, saved: undefined as string | undefined, summary: undefined as Record<string, unknown> | undefined };
   }
-  const out = reply(r, extra);
   let saved: string | undefined;
+  let png: Buffer | undefined, imgErr: string | undefined;
+  const mapping: Mapping = { scale: 1, offset_x: o.region?.x ?? 0, offset_y: o.region?.y ?? 0 };
+  let imageInfo: Record<string, unknown> | undefined;
   if (r.ok && o.include_image !== false) {
     saved = j0.path || path;
     try {
-      const size = statSync(saved).size;
-      if (size > MAX_IMAGE_BYTES) out.content.push({ type: "text", text: `image not attached: ${size} bytes > ${MAX_IMAGE_BYTES}; use region to capture less` });
-      else out.content.push({ type: "image", data: readFileSync(saved).toString("base64"), mimeType: "image/png" });
-    } catch (e) { out.content.push({ type: "text", text: `capture reported ok but the PNG could not be read: ${(e as Error).message}` }); out.isError = true; }
+      png = readFileSync(saved);
+      let w = (r.json as { w?: number }).w, h = (r.json as { h?: number }).h;
+      if (o.grid) {
+        try {
+          const im = drawGrid(decodePng(png), mapping, o.grid);
+          png = encodePng(im); w = im.width; h = im.height;
+        } catch (e) { imgErr = `could not draw the grid (${(e as Error).message}); the original image is returned unchanged`; }
+      }
+      imageInfo = { w, h, ...mapping, ...(o.grid && !imgErr ? { grid: o.grid } : {}), ...(imgErr ? { image_note: imgErr } : {}) };
+      lastMapping.set(pid, { ...mapping });
+    } catch (e) { imgErr = `capture reported ok but the PNG could not be read: ${(e as Error).message}`; }
   }
+  const out = reply(r, { ...extra, ...(imageInfo ? { image: imageInfo } : {}), ...(imageInfo?.image_note ? { image_note: imageInfo.image_note } : {}) });
+  if (png) {
+    if (png.length > MAX_IMAGE_BYTES) out.content.push({ type: "text", text: `image not attached: ${png.length} bytes > ${MAX_IMAGE_BYTES}; use region to capture less` });
+    else out.content.push({ type: "image", data: png.toString("base64"), mimeType: "image/png" });
+  } else if (imgErr) { out.content.push({ type: "text", text: imgErr }); out.isError = true; }
   const j = r.json as Record<string, unknown>;
   const summary = r.ok ? { path: j.path, w: j.w, h: j.h, method: j.method, capture_path: j.capture_path, frame: j.frame, ...extra } : undefined;
   return { r, out, saved, summary };

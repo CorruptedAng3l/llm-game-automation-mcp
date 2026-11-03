@@ -34,7 +34,19 @@ if (pid && cmd !== "launch" && cmd !== "inject" && !alive(pid))
   say({ ok: false, error: `cannot connect to \\\\.\\pipe\\vinput_${pid} (not injected / process gone)` }, 1);
 
 if (cmd === "capture" && rest[1]) {
-  writeFileSync(rest[1], Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
+  if (scen.png) {
+    // synthetic frame: pixel (cx,cy) in CLIENT coordinates = rgb(cx&255, cy&255, 77); honours --region like vinput
+    const { encodePng } = await import("../build/png.js");
+    let [ox, oy, w, h] = [0, 0, scen.png.w, scen.png.h];
+    const ri = rest.indexOf("--region");
+    if (ri > 0) [ox, oy, w, h] = rest[ri + 1].split(",").map(Number);
+    const data = Buffer.alloc(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const o = (y * w + x) * 4; data[o] = (ox + x) & 255; data[o + 1] = (oy + y) & 255; data[o + 2] = 77; data[o + 3] = 255; }
+    writeFileSync(rest[1], scen.png.garbage ? Buffer.from("this is not a png") : encodePng({ width: w, height: h, data }));
+    scen.replies = { ...scen.replies, capture: { ok: true, method: "swapchain", capture_path: "d3d11", w, h, frame: 1, ...(scen.replies?.capture ?? {}) } };
+  } else {
+    writeFileSync(rest[1], Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
+  }
 }
 let rep = scen.replies?.[cmd] ?? { ok: true };
 if (cmd === "capture" && rep.ok !== false && rest[1] && rep.path === undefined) rep = { ...rep, path: rest[1] };
