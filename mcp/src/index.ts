@@ -82,6 +82,7 @@ tool("launch", "Launch a game",
   {
     exe: z.string().optional().describe("Full path of the game executable."),
     args: z.string().optional().describe("Command line arguments for the game, e.g. \"-windowed -width 1280 -height 720\"."),
+    cwd: z.string().optional().describe("Working directory for the game (exe launches only). Default: the exe's own folder, which is what most old games need, so leave it out unless the game wants something else."),
     aumid: z.string().optional().describe("UWP / Xbox app user model id, e.g. 'Publisher.Game_abc123!App'."),
     steam_appid: z.string().optional().describe("Steam app id; starts the game through Steam (needs wait_exe)."),
     wait_exe: z.string().optional().describe("Executable name to wait for, e.g. 'Game-Win64-Shipping.exe' (launchers, Steam relaunches)."),
@@ -94,9 +95,16 @@ tool("launch", "Launch a game",
   async (a) => {
     const n = [a.exe, a.aumid, a.steam_appid].filter((v) => v).length;
     if (n !== 1) return fail("give exactly one of exe, aumid or steam_appid");
+    let cwd: string | undefined;
+    if (a.cwd) {
+      if (!a.exe) return fail("cwd only applies to exe launches (aumid / steam_appid games choose their own folder)");
+      cwd = resolve(a.cwd);
+      let isDir = false; try { isDir = statSync(cwd).isDirectory(); } catch { /* not there */ }
+      if (!isDir) return fail(`cwd does not exist or is not a folder: ${cwd}`);
+    }
     const argv = ["--owner", OWNER, "launch",
       ...opt("--exe", a.exe), ...opt("--aumid", a.aumid), ...opt("--steam", a.steam_appid), ...opt("--wait-exe", a.wait_exe),
-      ...opt("--args", a.args), ...opt("--early", a.early), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
+      ...opt("--args", a.args), ...opt("--cwd", cwd), ...opt("--early", a.early), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
       ...opt("--lock", a.lock)];
     const r = await runVinput(argv, ((a.timeout_s ?? 240) + (a.settle_s ?? 5) + 120) * 1000);
     if (r.ok && a.claim) {
