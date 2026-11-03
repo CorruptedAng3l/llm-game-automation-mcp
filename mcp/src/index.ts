@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { configView, tailLog } from "./status.js";
+import { configView, diagnoseFrames, tailLog } from "./status.js";
 import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 
@@ -39,6 +39,18 @@ function readTail(path: string, bytes: number): string[] {
 function exitedReply(pid: number, code: number | null): ToolReply {
   const error = exitMessage(pid, code);
   return { content: [{ type: "text", text: JSON.stringify({ ok: false, error, target_exited: true, pid, exit_code: code }) }], isError: true };
+}
+/** Extra reply fields describing frame health, from one status call ({} when status cannot be read). */
+async function frameHealth(pid: number): Promise<Record<string, unknown>> {
+  const st = await runVinput([...at(pid), "status"], 15000);
+  if (!st.ok || typeof st.json !== "object" || !st.json) return {};
+  const d = diagnoseFrames(st.json as Record<string, unknown>);
+  const out: Record<string, unknown> = {};
+  if (d.nothingPresented) out.nothing_presented = true;
+  if (d.refusals) out.fullscreen_refusals = d.refusals;
+  if (d.warning) out.warnings = [d.warning];
+  if (d.note) out.notes = [d.note];
+  return out;
 }
 function fail(message: string): ToolReply {
   return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }], isError: true };
@@ -127,11 +139,11 @@ tool("launch", "Launch a game",
       ...opt("--lock", a.lock)];
     const r = await runVinput(argv, ((a.timeout_s ?? 240) + (a.settle_s ?? 5) + 120) * 1000);
     { const np = (r.json as { pid?: unknown }).pid; if (typeof np === "number" && np > 0) { forgetExit(np); watchTarget(np); } }
-    if (r.ok && a.claim) {
-      const p = (r.json as { pid?: number }).pid;
-      if (p) { const c = await runVinput([...at(p), "claim", "--ttl", "3600"], 15000); return reply(r, { claim: c.json }); }
-    }
-    return reply(r);
+    const lp = r.ok ? (r.json as { pid?: number }).pid : undefined;
+    const extra: Record<string, unknown> = {};
+    if (lp && a.claim) { const c = await runVinput([...at(lp), "claim", "--ttl", "3600"], 15000); extra.claim = c.json; }
+    if (lp) Object.assign(extra, await frameHealth(lp));
+    return reply(r, extra);
   });
 
 tool("attach", "Attach to a running game",
@@ -236,19 +248,48 @@ tool("capture", "Capture a frame",
     include_image: z.boolean().optional().describe("Return the image content (default true). False = path + JSON only."),
   },
   async (a) => {
-    const path = resolve(a.path ?? defaultCapturePath(a.pid));
-    const r = await runVinput([...at(a.pid), "capture", path, ...region(a.region), ...opt("--after-frames", a.after_frames), ...opt("--method", a.method === "native" ? "swapchain" : a.method)], 60000);
-    const out = reply(r);
-    if (r.ok && a.include_image !== false) {
-      const saved = ((r.json as { path?: string }).path) || path;
-      try {
-        const size = statSync(saved).size;
-        if (size > MAX_IMAGE_BYTES) out.content.push({ type: "text", text: `image not attached: ${size} bytes > ${MAX_IMAGE_BYTES}; use region to capture less` });
-        else out.content.push({ type: "image", data: readFileSync(saved).toString("base64"), mimeType: "image/png" });
-      } catch (e) { out.content.push({ type: "text", text: `capture reported ok but the PNG could not be read: ${(e as Error).message}` }); out.isError = true; }
-    }
-    return out;
+    const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image });
+    return g.out;
   });
+
+/** One frame grab: runs vinput capture, attaches the PNG, and diagnoses "nothing presented / fullscreen refused" when the
+ *  native path was not used. Shared by capture and the capture_after option of the action tools. */
+async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeof regionSchema>; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean }) {
+  const path = resolve(o.path ?? defaultCapturePath(pid));
+  const r = await runVinput([...at(pid), "capture", path, ...region(o.region), ...opt("--after-frames", o.after_frames), ...opt("--method", o.method === "native" ? "swapchain" : o.method)], 60000);
+  const j0 = (r.json && typeof r.json === "object" ? r.json : {}) as { method?: string; path?: string; error?: string };
+  let extra: Record<string, unknown> = {};
+  let stuck = false;
+  if (!r.ok || j0.method === "printwindow") {
+    const st = await runVinput([...at(pid), "status"], 15000);
+    if (st.ok && st.json && typeof st.json === "object") {
+      const d = diagnoseFrames(st.json as Record<string, unknown>);
+      stuck = d.stuck;
+      if (d.nothingPresented) extra.nothing_presented = true;
+      if (d.refusals) extra.fullscreen_refusals = d.refusals;
+      if (d.warning) extra.warnings = [d.warning];
+      if (d.note) extra.notes = [d.note];
+    }
+  }
+  if (stuck) {
+    const msg = (extra.warnings as string[])[0];
+    const out = reply({ ...r, ok: false }, { ...extra, error: r.ok ? msg : `${j0.error ?? "capture failed"}. ${msg}` });
+    return { r, out, saved: undefined as string | undefined, summary: undefined as Record<string, unknown> | undefined };
+  }
+  const out = reply(r, extra);
+  let saved: string | undefined;
+  if (r.ok && o.include_image !== false) {
+    saved = j0.path || path;
+    try {
+      const size = statSync(saved).size;
+      if (size > MAX_IMAGE_BYTES) out.content.push({ type: "text", text: `image not attached: ${size} bytes > ${MAX_IMAGE_BYTES}; use region to capture less` });
+      else out.content.push({ type: "image", data: readFileSync(saved).toString("base64"), mimeType: "image/png" });
+    } catch (e) { out.content.push({ type: "text", text: `capture reported ok but the PNG could not be read: ${(e as Error).message}` }); out.isError = true; }
+  }
+  const j = r.json as Record<string, unknown>;
+  const summary = r.ok ? { path: j.path, w: j.w, h: j.h, method: j.method, capture_path: j.capture_path, frame: j.frame, ...extra } : undefined;
+  return { r, out, saved, summary };
+}
 
 tool("ocr", "Read text on screen",
   "OCR the current frame with the built-in Windows OCR engine. Returns text and lines[] with boxes [x,y,w,h] in client " +
