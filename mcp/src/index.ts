@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { configView } from "./status.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 
 const VERSION = "0.1.0";
@@ -110,6 +111,35 @@ tool("attach", "Attach to a running game",
       await new Promise((res) => setTimeout(res, 200));
     }
     return fail("unreachable");
+  });
+
+const bool = (what: string) => z.boolean().optional().describe(what);
+tool("config", "Configure vinput for a game",
+  "Change (or, with no settings, just read) how vinput treats one game, and return the config now in effect. Use it when the " +
+  "game ignores input or focus tricks misbehave: raw=post / buffer for games that never see WM_INPUT, cursor=real for games " +
+  "that read the real cursor, msgs=on for games that need window messages, nofullscreen=false to allow exclusive fullscreen. " +
+  "Check 'warnings' in the reply: it lists any requested value that did not take effect.",
+  {
+    pid,
+    fakefocus: bool("Fake focus / activation APIs so a background game believes it is active (default on)."),
+    autoactivate: bool("Send the activation messages a real window switch would, to a game that started in the background (default on)."),
+    isolate: bool("Hide real background input from the game so the user's mouse and keyboard do not leak in (default on)."),
+    blockfocus: bool("Stop the game taking the real foreground (default on)."),
+    nofullscreen: bool("Refuse DXGI exclusive fullscreen (default on). Exclusive fullscreen loses its swapchain in the background."),
+    keepvisible: bool("Undo a minimise of a background game (minimised games stop rendering) (default on)."),
+    cursor: z.enum(["auto", "virtual", "real"]).optional().describe("Which cursor the game sees: virtual (vinput's own), real, or auto (decided per game)."),
+    raw: z.enum(["auto", "post", "buffer", "off"]).optional().describe("How raw-input mouse deltas reach the game: post (WM_INPUT messages), buffer (GetRawInputBuffer), off, or auto."),
+    msgs: z.enum(["auto", "on", "off"]).optional().describe("Whether window messages are sent for input: on, off, or auto."),
+  },
+  async (a) => {
+    const keys = ["fakefocus", "autoactivate", "isolate", "blockfocus", "nofullscreen", "keepvisible", "cursor", "raw", "msgs"] as const;
+    const want: Record<string, unknown> = {};
+    for (const k of keys) if (a[k] !== undefined) want[k] = a[k];
+    const r = await runVinput([...at(a.pid), "config", ...Object.entries(want).map(([k, v]) => `${k}=${v}`)], 30000);
+    if (!r.ok || !r.json || typeof r.json !== "object") return reply(r);
+    const eff = configView(r.json as Record<string, unknown>);
+    const warnings = Object.entries(want).filter(([k, v]) => eff[k] !== v).map(([k, v]) => `${k}=${v} requested but the game reports ${k}=${eff[k]}`);
+    return reply({ ...r, json: { ok: true, pid: a.pid, config: eff, ...(warnings.length ? { warnings } : {}) } });
   });
 
 tool("list_targets", "List controllable games",
