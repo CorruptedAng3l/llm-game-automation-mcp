@@ -34,10 +34,10 @@ game in front, steals your mouse and keyboard, and allows exactly one game at a 
 
 | | supported | notes |
 |---|---|---|
-| **Capture** | Direct3D 11, Direct3D 12, OpenGL, Vulkan, `PrintWindow` fallback | HDR formats (R10G10B10A2, RGBA16F) converted to 8-bit; Vulkan needs early injection (`launch --early`); D3D9/D3D10 fall back to `PrintWindow` |
+| **Capture** | Direct3D 11, Direct3D 12, OpenGL, Vulkan, DirectDraw (virtual primary surface), `PrintWindow` fallback | HDR formats (R10G10B10A2, RGBA16F) converted to 8-bit; PNG or JPEG, optionally scaled inside the game; contact sheets (`capture-burst`); Vulkan needs early injection (`launch --early`); D3D9/D3D10 fall back to `PrintWindow` |
 | **Keyboard** | window messages (`WM_KEYDOWN`/`WM_CHAR`, with the game's own `TranslateMessage`), Raw Input (`WM_INPUT`, `GetRawInputBuffer` on x64), DirectInput 8 and legacy `dinput.dll` (DirectInput 1-7), `GetAsyncKeyState`/`GetKeyState`/`GetKeyboardState` | mirrors the game's own `RegisterRawInputDevices` choices (e.g. `RIDEV_NOLEGACY`) |
 | **Mouse** | messages, Raw Input, DirectInput 8, virtual cursor behind `GetCursorPos` / `WindowFromPoint` | absolute (`click`, `move`) and relative (`move_relative`, mouse-look) |
-| **Gamepad** | XInput pad 0 (`XInputGetState`, `XInputGetStateEx`) | buttons, both sticks, triggers |
+| **Gamepad** | XInput pad 0 (`XInputGetState`, `XInputGetStateEx`) | buttons, both sticks, triggers; timed ramps and state timelines for proportional steering |
 | **Vision (CLI side)** | Windows OCR (`Windows.Media.Ocr`), normalised cross-correlation template matching | runs in the CLI, nothing extra is loaded into the game |
 | **Targets** | 64-bit and 32-bit games, UWP / Xbox-app (AppContainer) games | `vinput.exe` hands 32-bit targets to `vinput32.exe` |
 
@@ -130,7 +130,7 @@ Then ask the agent to launch a game and play it. The tools, their schemas and a 
 | part | how |
 |---|---|
 | fake focus | `GetForegroundWindow` / `GetActiveWindow` / `GetFocus` report the game; the game's window procedure is subclassed and deactivation (`WM_ACTIVATEAPP(0)`, `WM_ACTIVATE(WA_INACTIVE)`, `WM_NCACTIVATE(0)`, `WM_KILLFOCUS`) is swallowed, so it keeps running and rendering in the background |
-| no focus stealing | while the game is not really in front, `SetForegroundWindow` / `BringWindowToTop` / `SetActiveWindow` are no-ops, `SetWindowPos` gets `SWP_NOACTIVATE`, showing the window does not activate it, `ClipCursor` / `SetCursorPos` never touch the real cursor, DXGI exclusive fullscreen is refused; every attempt is logged |
+| no focus stealing | while the game is not really in front, `SetForegroundWindow` / `BringWindowToTop` / `SetActiveWindow` are no-ops, `SetWindowPos` gets `SWP_NOACTIVATE`, showing the window does not activate it, `ClipCursor` / `SetCursorPos` never touch the real cursor, DXGI / DirectDraw / D3D9 exclusive fullscreen becomes a windowed virtual fullscreen (or is refused, `config fullscreen=refuse`); every attempt is logged |
 | virtual input | each event is delivered on every channel the game can read, as a real key would be (see Supported APIs) |
 | isolation | while the game is not really in front, the real keyboard and mouse are hidden from it, so your typing elsewhere does not leak into it; when it is in front, real input works and virtual input is added on top |
 | eyes | native capture from the game's swapchain (per API), with `PrintWindow` as the fallback; replies report `capture_path` and the frame number |
@@ -161,8 +161,9 @@ anti-cheat that stays resident (for example Vanguard's `vgc` service) blocks vin
 
 ## Limitations
 
-- **Exclusive fullscreen** is not supported (run windowed / borderless); a **minimised** game stops rendering (vinput
-  puts a background game back unless `config keepvisible=false`).
+- **Exclusive fullscreen** is not supported: vinput turns DXGI, DirectDraw and D3D9 fullscreen requests into a windowed
+  virtual fullscreen, but a game's own saved fullscreen mode is best switched to windowed / borderless in its settings.
+  A **minimised** game stops rendering (vinput puts a background game back unless `config keepvisible=false`).
 - **Inputs vinput does not reach:** direct syscall / `NtUserGetAsyncKeyState` readers; Windows.Gaming.Input,
   GameInput and WinRT `CoreWindow` keyboard events (many UWP games: use `pad`); HID read directly; DirectInput
   joysticks; Steam Input; `GetRawInputBuffer` in 32-bit processes; XInput users 1-3.

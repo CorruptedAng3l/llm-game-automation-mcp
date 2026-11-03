@@ -12,18 +12,26 @@ pwsh -File verify\run_selftest.ps1
 cd mcp && npm ci && npm run build && npm test && npm run smoke
 ```
 
-PowerShell 7 (`pwsh`) is required. `run_selftest.ps1` stops at the first failure and stops only the processes it
-started, by PID. Test output goes to `build\test\` (git-ignored).
+PowerShell 7 (`pwsh`) is required. `run_selftest.ps1` runs the **background** suite plan (`verify\vi_suiteplan.ps1`):
+none of its cases touches the real foreground, keyboard or mouse, so it can run while the machine is in use. It stops at
+the first failure, stops only the processes it started (by PID), and writes `suite_result.json` plus one folder per
+case under `build\test\selftest\` (git-ignored). `-PlanOnly` prints the plan.
 
-Only `run_fgguardtest.ps1` touches the real foreground (for a few milliseconds, to simulate a game stealing it). It holds
-a lock file meanwhile: set `VINPUT_LOCK` to the lock file that other foreground-taking tools on your machine use, or it
-uses `build\foreground.lock`. Close fullscreen games before running the suite.
+The **foreground** cases (`run_foreground_suite.ps1`: `run_fgguardtest.ps1`, `run_foregroundtest.ps1`,
+`run_windowfocustest.ps1`, `run_userintenttest.ps1` and similar) take the real foreground or simulate a user's
+Alt+Tab. Run them only on an idle machine. They hold a lock file meanwhile: set `VINPUT_LOCK` to the lock file that
+other foreground-taking tools on your machine use, or they use `build\foreground.lock`.
 
 ## What is covered
 
 | script | covers |
 |---|---|
-| `run_selftest.ps1` | every input channel on x64 / x86, injected DLL and compiled-in mode, D3D11 capture, background isolation; then runs the scripts below (except the three standalone ones) |
+| `run_selftest.ps1` | every input channel on x64 / x86, injected DLL and compiled-in mode, D3D11 capture, background isolation; then every background case of `vi_suiteplan.ps1` (the scripts below and the ones in the next rows) |
+| `run_inputjobstest.ps1`, `run_steeringsemanticstest.ps1` | owned input jobs (async key / hold / pad, job status / cancel / replace, deadlines), key PWM duty, XInput ramps and timelines with frame pacing |
+| `run_dipollclicktest.ps1`, `run_direleasepolltest.ps1`, `run_placementtest.ps1`, `run_edgeguardtest.ps1` | polled click press / release evidence through DirectInput, owned placement drag, edge guard paths |
+| `run_captureoutputtest.ps1`, `run_imageencodetest.ps1`, `run_outputreusecontracttest.ps1`, `run_capturetimingtest.ps1` | in-game scaling / JPEG output and its capture-space map, capture bursts, encoder, capture timing |
+| `run_fullscreentest.ps1`, `run_ddrawwindowedtest.ps1`, `run_dinput1test.ps1` | DXGI virtual fullscreen and refusal, DirectDraw exclusive mode turned windowed (pixels, flips, no display-mode change), legacy DirectInput 1-7 |
+| `run_doctortest.ps1`, `run_pipesecuritytest.ps1`, `run_hwndownershiptest.ps1`, `run_hostselecttest.ps1`, `run_sentinel*test.ps1`, `run_profiletest.ps1` and the other `vi_suiteplan.ps1` cases | read-only diagnostics, pipe ACLs, window ownership and host selection, focus sentinels, per-game profiles |
 | `run_clicktest.ps1`, `run_activatetest.ps1`, `run_keytest.ps1`, `run_tracetest.ps1`, `run_movetest.ps1` | hover-gated clicks, focus shims, key names / chords / mouse buttons, per-API key tracing, relative and raw mouse motion |
 | `run_overlaycapturetest.ps1` | capture of a DDraw-wrapper style game (game window black or stale, picture in a separate `...PresentationWindow`), x64 and x86 |
 | `run_capturetest.ps1`, `run_nativecapture.ps1` | capture regions and frame waits; native D3D12 / OpenGL / Vulkan capture (BGRA, RGBA, R10G10B10A2, RGBA16F; x64 / x86; AppContainer), pixel-exact pattern decode, 50 resizes per API, late-injection refusal for Vulkan |
