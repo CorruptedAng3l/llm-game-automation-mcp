@@ -6,7 +6,7 @@ const t = await startFake({ replies: { ping: { ok: true, pong: 1 } } });
 try {
   const r = await t.call("release", { pid: process.pid });
   check(!r.isError && r.json?.ok === true, "release reaches the fake vinput", r.text);
-  const c = t.calls()[0] ?? [];
+  const c = t.callsOf("release")[0] ?? [];
   check(c.includes("--owner") && c.includes("mcp-test") && c.includes(String(process.pid)) && cmdOf(c)[0] === "release", "argv carries --owner/--pid/release", JSON.stringify(c));
 } finally { await t.close(); }
 console.log(state.failures ? `harness: FAIL (${state.failures})` : `harness: PASS (${state.passes})`);

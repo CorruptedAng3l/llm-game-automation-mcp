@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { configView, diagnoseFrames, tailLog } from "./status.js";
+import { compactStatus, configView, diagnoseFrames, tailLog } from "./status.js";
 import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 
@@ -158,7 +158,7 @@ tool("attach", "Attach to a running game",
     for (let i = 0; i < 50; i++) {
       const s = await runVinput([...at(a.pid), "status"], 15000);
       const hwnd = (s.json as { hwnd?: string }).hwnd;
-      if (!s.ok || (hwnd && hwnd !== "0x0") || i === 49) return reply(s, { injected: true });
+      if (!s.ok || (hwnd && hwnd !== "0x0") || i === 49) return statusReply(s, false, { injected: true });
       await new Promise((res) => setTimeout(res, 200));
     }
     return fail("unreachable");
@@ -200,10 +200,19 @@ tool("list_targets", "List controllable games",
     return reply({ ...r, json: Array.isArray(r.json) ? { ok: r.ok, targets: r.json } : r.json });
   }, true);
 
+/** status reply as the tool returns it: compact unless verbose */
+function statusReply(r: CliResult, verbose?: boolean, extra?: Record<string, unknown>): ToolReply {
+  if (verbose || !r.ok || !r.json || typeof r.json !== "object" || Array.isArray(r.json)) return reply(r, extra);
+  return reply({ ...r, json: compactStatus(r.json as Record<string, unknown>) }, extra);
+}
 tool("status", "Game status",
-  "vinput status of one game: window, client size, capture path in use, really_foreground, claim, and counters showing " +
-  "which input APIs the game actually reads (read these when the game ignores input).",
-  { pid }, async (a) => reply(await runVinput([...at(a.pid), "status"], 15000)), true);
+  "Essentials of one game: pid, window handle, client size, really_foreground, app_active (0 = the game thinks it is " +
+  "inactive and may ignore input), present count (0 = no frame presented yet), cursor / raw / msgs modes, the input-API " +
+  "counters that are non-zero (they show which APIs the game actually reads: read them when it ignores input) and " +
+  "warnings[] (fullscreen refusal loop, no window, minimized, failed hooks). verbose:true returns vinput's full status " +
+  "(about 3 KB: every counter, hook lists, per-API frame counts, Vulkan / D3D12 internals).",
+  { pid, verbose: z.boolean().optional().describe("Return the full vinput status instead of the compact view.") },
+  async (a) => statusReply(await runVinput([...at(a.pid), "status"], 15000), a.verbose), true);
 
 tool("log", "Read vinput's log for a game",
   "Tail of vinput's log for this game (hooks installed, refused fullscreen, injected-input problems, anything the DLL " +

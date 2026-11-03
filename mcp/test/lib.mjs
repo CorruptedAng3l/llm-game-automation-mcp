@@ -36,6 +36,8 @@ export async function startFake(scenario = {}, extraEnv = {}) {
     dir, client,
     setScenario: (s) => writeFileSync(scenFile, JSON.stringify(s)),
     calls: () => readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).argv),
+    /** recorded calls whose vinput command is `name` (ignores waitexit / status helpers) */
+    callsOf(name) { return this.calls().filter((a) => cmdOf(a)[0] === name); },
     clearCalls: () => writeFileSync(logFile, ""),
     /** call a tool; returns {r, json, text, image, texts} */
     async call(name, args = {}) {

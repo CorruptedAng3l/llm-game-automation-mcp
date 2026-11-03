@@ -68,3 +68,33 @@ export function diagnoseFrames(s: Obj): FrameDiag {
   }
   return d;
 }
+
+/** The essentials of a status reply (about 0.5 KB instead of 3 KB) plus warnings; `verbose` on the tool gives the raw reply. */
+export function compactStatus(s: Obj): Obj {
+  const c = (s.counters ?? {}) as Record<string, unknown>;
+  const nonzero: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(c)) if (typeof v === "number" && v !== 0) nonzero[k] = v;
+  const warnings: string[] = [];
+  const d = diagnoseFrames(s);
+  if (d.warning) warnings.push(d.warning);
+  else if (d.note && d.refusals > 0) warnings.push(d.note);
+  if (s.hwnd === "0x0") warnings.push("No game window has been adopted yet (hwnd 0x0): the game may still be starting, or it has no top-level window. Wait and check status again; capture and mouse input need the window.");
+  if (s.app_active === 0 && s.really_foreground === false)
+    warnings.push(`app_active is 0 while the game is in the background: the game believes it is inactive and may ignore input (old DirectDraw-era games often do). ${s.autoactivate === false ? "autoactivate is OFF: set config autoactivate=true. " : "autoactivate is on, so this should clear shortly after the first input. "}If it persists, check the game's own background-input settings.`);
+  if (s.minimized === true) warnings.push("The game window is minimized; minimized games stop rendering, so captures go stale. Restore it (keepvisible=true keeps it visible).");
+  if (typeof s.hooks_failed === "string" && s.hooks_failed) warnings.push(`Some hooks failed to install: ${s.hooks_failed}. Related input or capture channels may not work.`);
+  if (s.anticheat_disabled === true) warnings.push("An anti-cheat module was detected after injection: vinput refuses input and capture commands for this game.");
+  const claim = s.claim as { active?: boolean; owner?: string } | undefined;
+  const out: Obj = {
+    ok: s.ok, pid: s.pid, hwnd: s.hwnd, title: s.title,
+    client: { w: s.client_w, h: s.client_h },
+    really_foreground: s.really_foreground, app_active: s.app_active,
+    present: c.present, frames: s.frames, capture_path: s.capture_path, frame_api: s.frame_api,
+    cursor: name(CURSOR_NAMES, s.cursor_mode) ?? s.cursor_mode,
+    raw: name(RAW_NAMES, s.rawmode) ?? s.rawmode, msgs: name(MSGS_NAMES, s.msgmode) ?? s.msgmode,
+    counters: nonzero,
+  };
+  if (claim?.active) out.claimed_by = claim.owner;
+  out.warnings = warnings;
+  return out;
+}
