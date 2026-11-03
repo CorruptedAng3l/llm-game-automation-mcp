@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { drawGrid, type Mapping } from "./imgtools.js";
+import { drawGrid, resample, toClient, type Mapping } from "./imgtools.js";
 import { decodePng, encodePng } from "./png.js";
 import { compactStatus, configView, diagnoseFrames, tailLog } from "./status.js";
 import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
@@ -261,9 +261,16 @@ tool("capture", "Capture a frame",
       "Draw a labelled coordinate grid on the RETURNED image only (the saved PNG stays clean): a line every N client pixels, " +
       "labelled with the client x (top edge) and y (left edge). Read exact coordinates off it instead of guessing: 100 for a " +
       "full frame, 20-50 inside a region."),
+    max_width: z.number().int().min(64).max(8192).optional().describe(
+      "Downscale the RETURNED image to at most this many pixels wide (never upscales) to save tokens, e.g. 960. The reply's image " +
+      "{scale, offset_x, offset_y} maps it back: client = offset + image / scale. click / move / drag take coord_space:\"capture\" to " +
+      "do that for you."),
+    scale: z.number().min(0.05).max(8).optional().describe("Explicit resize factor for the returned image (0.5 = half size). Give only one of max_width, scale, zoom."),
+    zoom: z.number().min(1).max(8).optional().describe("Enlarge the returned image (crisp pixels) to read small text / icons: use with region, e.g. region 200x100 + zoom 4. Give only one of max_width, scale, zoom."),
   },
   async (a) => {
-    const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image, grid: a.grid });
+    if ([a.max_width, a.scale, a.zoom].filter((v) => v !== undefined).length > 1) return fail("give only one of max_width, scale, zoom");
+    const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image, grid: a.grid, max_width: a.max_width, scale: a.scale, zoom: a.zoom });
     return g.out;
   });
 
@@ -272,7 +279,7 @@ const lastMapping = new Map<number, Mapping>();
 
 /** One frame grab: runs vinput capture, attaches the PNG, and diagnoses "nothing presented / fullscreen refused" when the
  *  native path was not used. Shared by capture and the capture_after option of the action tools. */
-async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeof regionSchema>; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean; grid?: number }) {
+async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeof regionSchema>; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean; grid?: number; max_width?: number; scale?: number; zoom?: number }) {
   const path = resolve(o.path ?? defaultCapturePath(pid));
   const r = await runVinput([...at(pid), "capture", path, ...region(o.region), ...opt("--after-frames", o.after_frames), ...opt("--method", o.method === "native" ? "swapchain" : o.method)], 60000);
   const j0 = (r.json && typeof r.json === "object" ? r.json : {}) as { method?: string; path?: string; error?: string };
@@ -303,11 +310,24 @@ async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeo
     try {
       png = readFileSync(saved);
       let w = (r.json as { w?: number }).w, h = (r.json as { h?: number }).h;
-      if (o.grid) {
+      const wantScale = o.scale ?? o.zoom, wantW = o.max_width;
+      if (o.grid || wantScale !== undefined || wantW !== undefined) {
         try {
-          const im = drawGrid(decodePng(png), mapping, o.grid);
-          png = encodePng(im); w = im.width; h = im.height;
-        } catch (e) { imgErr = `could not draw the grid (${(e as Error).message}); the original image is returned unchanged`; }
+          let im = decodePng(png);
+          let factor = wantScale ?? 1;
+          if (wantW !== undefined && im.width > wantW) factor = wantW / im.width;
+          if (factor !== 1) {
+            const nw = Math.max(1, Math.round(im.width * factor)), nh = Math.max(1, Math.round(im.height * factor));
+            mapping.scale = nw / im.width;
+            im = resample(im, nw, nh);
+          }
+          if (o.grid) im = drawGrid(im, mapping, o.grid);
+          if (o.grid || factor !== 1) png = encodePng(im);
+          w = im.width; h = im.height;
+        } catch (e) {
+          imgErr = `could not process the image (${(e as Error).message}); the original image is returned unchanged`;
+          mapping.scale = 1;
+        }
       }
       imageInfo = { w, h, ...mapping, ...(o.grid && !imgErr ? { grid: o.grid } : {}), ...(imgErr ? { image_note: imgErr } : {}) };
       lastMapping.set(pid, { ...mapping });
@@ -433,6 +453,24 @@ const xy = {
   norm: z.boolean().optional().describe("x and y are fractions of the client size (0..1)."),
   capture_space: z.boolean().optional().describe("x and y are pixels of the last capture (use after a region capture)."),
 };
+const mappingSchema = z.object({ scale: z.number().positive(), offset_x: z.number(), offset_y: z.number() })
+  .describe("Image-to-client mapping as returned by capture (image: {scale, offset_x, offset_y}).");
+const coordArgs = {
+  coord_space: z.enum(["client", "capture"]).optional().describe(
+    "client (default): x / y are game client pixels. capture: x / y are pixels of the image you were shown by capture (after " +
+    "max_width / scale / zoom / region), converted with the last capture's mapping, or with 'mapping' when given."),
+  mapping: mappingSchema.optional(),
+};
+type CoordIn = { coord_space?: "client" | "capture"; mapping?: Mapping; norm?: boolean; capture_space?: boolean };
+/** Convert image-space points to client points when coord_space is "capture"; an error string when that is impossible. */
+function mapPoints(pid: number, a: CoordIn, pts: [number, number][]): { pts: [number, number][]; mapped: boolean } | { error: string } {
+  if (a.coord_space !== "capture") return { pts, mapped: false };
+  if (a.norm || a.capture_space) return { error: "coord_space \"capture\" cannot be combined with norm or capture_space" };
+  const m = a.mapping ?? lastMapping.get(pid);
+  if (!m) return { error: "coord_space \"capture\" needs a capture first (the mapping comes from the last capture of this game) or an explicit mapping" };
+  return { pts: pts.map(([x, y]) => toClient(m, x, y)), mapped: true };
+}
+
 const DEFAULT_CLICK_HOVER_MS = 80, DEFAULT_CLICK_HOLD_MS = 140;
 tool("click", "Click",
   "Click a mouse button at a position (or at the current virtual cursor when x/y are omitted). The cursor hovers there " +
@@ -447,20 +485,31 @@ tool("click", "Click",
     hover_ms: z.number().int().min(0).max(5000).optional().describe(
       `Extra pause with the cursor already over the target, before the button goes down (default ${DEFAULT_CLICK_HOVER_MS} ms; 0 = none). ` +
       "vinput already waits for the hover to be dispatched and rendered; this adds time for hover-gated UI. Ignored when x / y are omitted."),
-    capture_after: captureAfterSchema },
+    ...coordArgs, capture_after: captureAfterSchema },
   async (a) => {
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
-    const pos = a.x === undefined ? [] : [String(a.x), String(a.y)];
+    let pos: string[] = a.x === undefined ? [] : [String(a.x), String(a.y)];
+    let mappedInfo: Record<string, unknown> | undefined;
+    if (a.x !== undefined) {
+      const m = mapPoints(a.pid, a, [[a.x, a.y as number]]);
+      if ("error" in m) return fail(m.error);
+      pos = [String(m.pts[0][0]), String(m.pts[0][1])];
+      if (m.mapped) mappedInfo = { mapped: { x: m.pts[0][0], y: m.pts[0][1] } };
+    }
     return look(a.pid, reply(await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
       ...(a.x === undefined ? [] : ["--settle-ms", String(a.hover_ms ?? DEFAULT_CLICK_HOVER_MS)]),
-      ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS)], 60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0))), a.capture_after);
+      ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS)], 60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0)), mappedInfo), a.capture_after);
   });
 
 tool("move", "Move the cursor",
   "Move the game's virtual cursor to an absolute position (hover). The real cursor is not touched.",
-  { pid, ...xy, steps: z.number().int().min(1).max(200).optional().describe("Intermediate moves (default 1)."), capture_after: captureAfterSchema },
-  async (a) => look(a.pid, reply(await runVinput([...at(a.pid), "mouse", String(a.x), String(a.y), ...opt("--norm", a.norm),
-    ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000)), a.capture_after));
+  { pid, ...xy, steps: z.number().int().min(1).max(200).optional().describe("Intermediate moves (default 1)."), ...coordArgs, capture_after: captureAfterSchema },
+  async (a) => {
+    const m = mapPoints(a.pid, a, [[a.x, a.y]]);
+    if ("error" in m) return fail(m.error);
+    return look(a.pid, reply(await runVinput([...at(a.pid), "mouse", String(m.pts[0][0]), String(m.pts[0][1]), ...opt("--norm", a.norm),
+      ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000), m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : undefined), a.capture_after);
+  });
 
 tool("move_relative", "Relative mouse motion",
   "Relative mouse motion (raw input / DirectInput deltas) for mouse-look / camera control in 3D games.",
@@ -472,9 +521,14 @@ tool("drag", "Drag",
   "Press a mouse button at (x1,y1), move with it held, release at (x2,y2). Always releases, even if a step fails.",
   { pid, x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number(),
     ms: z.number().int().min(1).max(30000).optional().describe("Duration of the drag (default 300)."), button: button.optional(),
-    capture_after: captureAfterSchema },
-  async (a) => look(a.pid, reply(await runVinput([...at(a.pid), "drag", String(a.x1), String(a.y1), String(a.x2), String(a.y2),
-    ...opt("--ms", a.ms), ...opt("--button", a.button)], 90000)), a.capture_after));
+    ...coordArgs, capture_after: captureAfterSchema },
+  async (a) => {
+    const m = mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
+    if ("error" in m) return fail(m.error);
+    const [[x1, y1], [x2, y2]] = m.pts;
+    return look(a.pid, reply(await runVinput([...at(a.pid), "drag", String(x1), String(y1), String(x2), String(y2),
+      ...opt("--ms", a.ms), ...opt("--button", a.button)], 90000), m.mapped ? { mapped: { x1, y1, x2, y2 } } : undefined), a.capture_after);
+  });
 
 tool("scroll", "Scroll the mouse wheel",
   "Scroll N wheel notches (positive = up / away, negative = down) at the virtual cursor, after moving it to x,y if given.",
