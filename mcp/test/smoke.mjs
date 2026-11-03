@@ -76,6 +76,30 @@ try {
   check(!C2.r.isError && C2.json?.w === 400 && !C2.image, "capture region without image", C2.text);
   const S = await call("status", { pid });
   check(!S.r.isError && S.json?.really_foreground === false, "status: the game stayed in the background", S.text.slice(0, 300));
+  check(S.json?.client?.w === 800 && S.json?.client?.h === 450 && Array.isArray(S.json?.warnings) && S.text.length < 1500, "status: compact reply with client size and warnings[]", S.text.slice(0, 400));
+  const SV = await call("status", { pid, verbose: true });
+  check(!SV.r.isError && SV.json?.counters && SV.json?.frames_by_api, "status verbose:true: the full reply", SV.text.slice(0, 200));
+
+  // 3b. the diagnostics and precision tools against the real vinput
+  const CF = await call("config", { pid });
+  check(!CF.r.isError && CF.json?.config?.cursor && typeof CF.json.config.fakefocus === "boolean", "config: effective config with names", CF.text.slice(0, 300));
+  const CF2 = await call("config", { pid, raw: "post", cursor: "virtual" });
+  check(!CF2.r.isError && CF2.json?.config?.raw === "post" && CF2.json?.config?.cursor === "virtual" && !CF2.json?.warnings, "config: raw=post cursor=virtual took effect", CF2.text.slice(0, 300));
+  await call("config", { pid, raw: "auto", cursor: "auto" });
+  const LG = await call("log", { pid, lines: 5 });
+  check(!LG.r.isError && Array.isArray(LG.json?.lines) && LG.json.lines.length > 0, "log: lines from the game's ring", LG.text.slice(0, 300));
+  const LF = await call("log", { pid, lines: 3, source: "file" });
+  check(!LF.r.isError && LF.json?.source === "file" && LF.json.lines.length > 0, "log source:file: lines from the log file on disk", LF.text.slice(0, 300));
+  const TR = await call("trace", { pid, key: "a" });
+  check(!TR.r.isError && TR.json?.ok === true && TR.json?.name, "trace key a", TR.text.slice(0, 200));
+  const CG = await call("capture", { pid, grid: 100, max_width: 400 });
+  check(!CG.r.isError && !!CG.image && CG.json?.image?.scale === 0.5 && CG.json?.w === 800, "capture grid + max_width: image content, mapping scale 0.5", CG.text.slice(0, 300));
+  const CM = await call("click", { pid, x: 200, y: 100, coord_space: "capture" });
+  check(!CM.r.isError && CM.json?.mapped?.x === 400 && CM.json?.mapped?.y === 200, "click coord_space capture: image (200,100) -> client (400,200)", CM.text.slice(0, 300));
+  const CA = await call("click", { pid, x: 4, y: 4, hold_ms: 150, capture_after: 2, park_cursor: true });
+  check(!CA.r.isError && !!CA.image && CA.json?.capture_after?.w === 800 && /edge/.test((CA.json?.warnings ?? []).join(" ")) && CA.json?.parked, "click: capture_after image, edge warning, parked cursor", CA.text.slice(0, 400));
+  const DR = await call("drag", { pid, x1: 100, y1: 300, x2: 160, y2: 300, ms: 200, hold_start_ms: 100, hold_end_ms: 100 });
+  check(!DR.r.isError && DR.json?.ok === true, "drag: press, hold, stepped move, dwell, release", DR.text.slice(0, 300));
 
   // 4. explicit errors
   const E1 = await call("click_text", { pid, text: "NO SUCH BUTTON", timeout_ms: 500 });
