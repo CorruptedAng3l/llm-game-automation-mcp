@@ -91,6 +91,23 @@ std::atomic<bool> g_fgGuardArmed{false};
 std::atomic<long> g_fgGained{0}, g_fgRestored{0}, g_fgRestoreFailed{0};
 std::atomic<HWND> g_fgRestoreWindow{nullptr};
 vi_user_intent::Detector g_userIntent;
+// Owner (human) input that arrives while the game is the REAL foreground. Real messages are the ones that did not
+// come from our own posted-message ring. g_ownerSeq / g_agentSeq order that input against vinput's own injection:
+// the virtual cursor stands down while the owner's input is newer than the agent's last injected input.
+std::atomic<unsigned long long> g_activitySeq{0}, g_ownerSeq{0}, g_agentSeq{0};
+std::atomic<ULONGLONG> g_ownerHoldAt{0};       // deliberate owner input (button / key / wheel / activation); guard stands down
+std::atomic<bool> g_ownerHolding{false};
+std::atomic<long> g_ownerInputCount{0}, g_ownerStanddowns{0};
+std::atomic<int> g_testRealFg{-1};             // test hook: -1 off, 0/1 force the "is the game the real foreground" predicate
+bool TestHooksEnabled() {
+    static const bool on = [] { char v[8] = {}; return GetEnvironmentVariableA("VINPUT_TEST_HOOKS", v, sizeof(v)) && v[0] == '1'; }();
+    return on;
+}
+void NoteAgentInput() { g_agentSeq = ++g_activitySeq; }
+void NoteOwnerInput(bool deliberate) {
+    g_ownerSeq = ++g_activitySeq; ++g_ownerInputCount;
+    if (deliberate) { g_ownerHoldAt = GetTickCount64(); g_ownerHolding = true; }
+}
 std::atomic<bool> g_adoptionActivationSafe{false};
 UINT g_adoptionActivationMessage=0;
 std::atomic<ULONG_PTR> g_adoptionActivationSequence{0};
@@ -233,12 +250,19 @@ bool ForegroundBelongsToTarget(HWND window) {
     HWND root=targetOwner==g_pid ? GetAncestor(target,GA_ROOT) : nullptr;
     return root && root==GetAncestor(window,GA_ROOT);
 }
-bool ComputeRealFg() { return ForegroundBelongsToTarget(RealForeground()); }
+// The single "is the game the real foreground" predicate. The test hook (VINPUT_TEST_HOOKS=1 in the target's
+// environment plus config test_realfg) replaces only the answer, never the OS state.
+bool TestRealFgOverride(bool actual) { int t = g_testRealFg.load(); return t >= 0 && TestHooksEnabled() ? t == 1 : actual; }
+bool ComputeRealFg() { return TestRealFgOverride(ForegroundBelongsToTarget(RealForeground())); }
 inline bool RealFg() { return g_realFg.load(std::memory_order_relaxed); }
+// The owner is using the game: it is the real foreground and real (non-injected) input arrived after the agent's last
+// injected input. Until the agent's next command the virtual cursor must not override GetCursorPos / raw input.
+inline bool OwnerCursorActive() { return RealFg() && g_ownerSeq.load() > g_agentSeq.load(); }
 inline bool Isolating() { return g_cfg.isolate && !RealFg(); }
 inline bool Faking() { return g_cfg.fakefocus && !RealFg(); }
 bool UseVirtualCursor() {
     if (!g_hwnd) return false;
+    if (OwnerCursorActive()) return false;
     int c = g_cfg.cursor; if (c == 1) return true; if (c == 2) return false;
     return !RealFg();
 }
@@ -485,7 +509,7 @@ bool RawWanted(bool kbd, const RawReg& rr) {
 void MouseButton(int vk, bool down);
 
 void KeyEvent(int vk, bool down) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);if(!g_jobApplying)JobsOverrideKey(vk);
+    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);NoteAgentInput();if(!g_jobApplying)JobsOverrideKey(vk);
     if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2) { MouseButton(vk, down); return; }
     SetVkState(vk, down);
     UINT sc = ScanOf(vk); bool ext = IsExtendedVk(vk);
@@ -505,7 +529,7 @@ void KeyEvent(int vk, bool down) {
 // Reuse this position for the posted message rather than rereading a game-written
 // cursor after setting the key state. Concurrent application reads remain unconfirmed.
 bool MouseButtonChecked(int vk, bool down, const POINT* expected, POINT* used) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
+    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);NoteAgentInput();
     POINT position{g_vcurX,g_vcurY};
     if(used)*used=position;
     if(down && expected && (position.x!=expected->x || position.y!=expected->y))return false;
@@ -551,7 +575,7 @@ struct MotionAccounting {
 };
 struct AppliedMouse { long long dx=0, dy=0; bool message_attempted=false, message_accepted=false;MotionAccounting accounting; };
 AppliedMouse MouseMoveTo(LONG x, LONG y, bool relativeOrigin, LONG rdx, LONG rdy, bool unbounded=false,PointerPath* path=nullptr,const POINT* pathPoint=nullptr) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
+    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);NoteAgentInput();
     if(!g_jobApplying)JobsOverrideCursor("manual_cursor_override");
     LONG ox = g_vcurX, oy = g_vcurY;
     long long dx = relativeOrigin ? rdx : (long long)x-ox, dy = relativeOrigin ? rdy : (long long)y-oy;
@@ -583,6 +607,7 @@ AppliedMouse MouseMoveTo(LONG x, LONG y, bool relativeOrigin, LONG rdx, LONG rdy
     a.dx=(long long)nx-ox;a.dy=(long long)ny-oy;a.message_attempted=attempted;a.message_accepted=accepted;return a;
 }
 void MouseWheel(int delta, bool horizontal) {
+    NoteAgentInput();
     g_diDZ += delta; DiPush(false, DIMOFS_Z, (DWORD)delta);
     RawReg rr = QueryRawReg();
     if (RawWanted(false, rr)) RawMouse(0, 0, horizontal ? RI_MOUSE_HWHEEL : RI_MOUSE_WHEEL, (SHORT)delta, rr.mouseTarget);
@@ -918,7 +943,7 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     bool fg = ComputeRealFg();
     g_realFg = fg;
-    if(m==WM_MOUSEACTIVATE)g_userIntent.MouseActivate(h,g_pid,l,RealForeground());
+    if(m==WM_MOUSEACTIVATE){g_userIntent.MouseActivate(h,g_pid,l,RealForeground());NoteOwnerInput(true);}  // only a real mouse click produces this
     if(!fg && (m==WM_KILLFOCUS || (m==WM_ACTIVATEAPP && !w) || (m==WM_ACTIVATE && LOWORD(w)==WA_INACTIVE)))g_userIntent.Lost(h,GetTickCount());
     if (g_cfg.fakefocus) {
         switch (m) {
@@ -939,6 +964,8 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if ((m >= WM_KEYFIRST && m <= WM_KEYLAST)) {
         if (m == WM_CHAR || m == WM_SYSCHAR) C.wm_char++; else C.wm_key++;
         bool ours = RingConsume(m, w, l);
+        // Not WM_CHAR: the type command posts characters outside the ring, and TranslateMessage derives them from keys.
+        if (!ours && fg && m != WM_CHAR && m != WM_SYSCHAR) NoteOwnerInput(true);
         if (ours && w > 0 && w < 256 && (m == WM_KEYDOWN || m == WM_SYSKEYDOWN || m == WM_KEYUP || m == WM_SYSKEYUP))
             g_keyTrace[w].delivery(m == WM_KEYDOWN || m == WM_SYSKEYDOWN);
     }
@@ -946,12 +973,14 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         C.wm_mouse++;
         bool ours = RingConsume(m, w, l);
         if (!ours && g_cfg.isolate && !fg) { C.wm_mouse_dropped++; return 0; }
+        if (!ours && fg) NoteOwnerInput(m != WM_MOUSEMOVE);
         if (ours && m == WM_MOUSEMOVE) g_mouseMovesDelivered++;
         bool down = false; int vk = MessageKey(m, w, down);
         if (ours && vk) g_keyTrace[vk].delivery(down);
     }
     if (m == WM_INPUT) {
         C.wm_input++;
+        if (!IsMagic((HRAWINPUT)l) && fg) NoteOwnerInput(false);
         if (!IsMagic((HRAWINPUT)l) && g_cfg.isolate && !fg) {
             C.wm_input_dropped++;
             return g_hwndUnicode ? DefWindowProcW(h, m, w, l) : DefWindowProcA(h, m, w, l);
@@ -1853,7 +1882,7 @@ std::string StatusJson() {
     }
     o.bol("fakefocus", g_cfg.fakefocus); o.bol("autoactivate",g_cfg.autoactivate);o.num("app_active",g_appActive);o.num("autoactivate_attempts_left",g_synthLeft); o.bol("isolate", g_cfg.isolate); o.bol("blockfocus", g_cfg.blockfocus); o.bol("nofullscreen", g_cfg.nofullscreen); o.bol("keepvisible", g_cfg.keepvisible); if (g_hwnd) o.bol("minimized", IsIconic(g_hwnd) != FALSE);
     { JOut fs;fs.str("policy",g_cfg.nofullscreen?(g_fullscreenPolicy==1?"refuse":"borderless"):"native");fs.num("requests",g_fsRequests);fs.num("emulated",g_fsEmulated);fs.num("refused",g_fsRefused);fs.num("failures",g_fsFailed);fs.num("passthrough",g_fsPassthrough);fs.num("states_live",g_fsStates);fs.num("output_refs",g_fsOutputs);fs.num("last_hresult",(double)(unsigned long)g_fsLastResult.load());fs.bol("blocked_before_first_present",FullscreenBlockedBeforePresent());o.raw("fullscreen",fs.done()); }
-    o.num("cursor_mode", g_cfg.cursor);o.str("cursor_mode_name",g_cfg.cursor==1?"virtual":g_cfg.cursor==2?"real":"auto");o.str("effective_cursor",UseVirtualCursor()?"virtual":"real");o.bol("user_took_foreground",g_userIntent.Active()); o.num("rawmode", g_cfg.rawmode); o.num("msgmode", g_cfg.msgmode);
+    o.num("cursor_mode", g_cfg.cursor);o.str("cursor_mode_name",g_cfg.cursor==1?"virtual":g_cfg.cursor==2?"real":"auto");o.str("effective_cursor",UseVirtualCursor()?"virtual":"real");o.str("cursor_effective",UseVirtualCursor()?"virtual":"real");o.bol("owner_active",OwnerCursorActive());o.bol("owner_holding",g_ownerHolding);o.num("owner_input_count",g_ownerInputCount);o.num("owner_guard_standdowns",g_ownerStanddowns);if(TestHooksEnabled())o.num("test_realfg",g_testRealFg);o.bol("user_took_foreground",g_userIntent.Active()); o.num("rawmode", g_cfg.rawmode); o.num("msgmode", g_cfg.msgmode);
     o.num("vcur_x", g_vcurX); o.num("vcur_y", g_vcurY);
     EdgeFields(o);o.raw("input_precision","{\"edge_guard\":true,\"release_poll\":true,\"placement_drag\":true}");
     o.num("relative_accounting_version",1);o.str("di_pending_dx",std::to_string(g_diDX.load()));o.str("di_pending_dy",std::to_string(g_diDY.load()));o.num("raw_unread_overwrites",(double)g_rawRingOverwrites.load());
@@ -2082,6 +2111,7 @@ std::string Exec(const std::string& line) {
         if (JHas(j, "nofullscreen")) g_cfg.nofullscreen = JBool(j, "nofullscreen", true);
         if (JHas(j, "keepvisible")) g_cfg.keepvisible = JBool(j, "keepvisible", true);
         if (JHas(j, "vk")) g_vkEnabled = JBool(j, "vk", true);   // vk=off: Vulkan hooks pass through (no usage change, no capture)
+        if (JHas(j, "test_realfg")) { if (!TestHooksEnabled()) return ErrJ("test_realfg needs VINPUT_TEST_HOOKS=1 in the target's environment; no configuration changed"); std::string t = JStr(j, "test_realfg"); g_testRealFg = t == "1" ? 1 : t == "0" ? 0 : -1; }
         if (JHas(j, "cursor")) { std::string c = JStr(j, "cursor"); g_cfg.cursor = c == "virtual" ? 1 : c == "real" ? 2 : 0; }
         if (JHas(j,"edge_margin"))g_cfg.edgeMargin=(int)JNum(j,"edge_margin",8);
         if (JHas(j, "raw")) { std::string c = JStr(j, "raw"); g_cfg.rawmode = c == "post" ? 1 : c == "buffer" ? 2 : c == "off" ? 3 : 0; }
@@ -2577,10 +2607,19 @@ DWORD WINAPI ForegroundGuardThread(LPVOID) {
     for (;;) {
         g_userIntent.SetTarget(g_hwnd,g_pid);g_userIntent.Pump();
         HWND fg=RealForeground(); DWORD pid=0; if(fg)GetWindowThreadProcessId(fg,&pid);
-        bool ours=ForegroundBelongsToTarget(fg);
+        bool oursActual=ForegroundBelongsToTarget(fg);
+        bool ours=TestRealFgOverride(oursActual);
         g_realFg=ours;
         bool human=g_userIntent.Refresh(fg);
-        if(fg && pid && !ours) {
+        // Deliberate owner input (a click, key or wheel the game received while it was really foreground) is a human who
+        // activated the window themselves. Hold until the game loses the real foreground; drop a stale activation click
+        // that never produced a foreground gain.
+        if(g_ownerHolding) {
+            if(wasOurs && !ours) g_ownerHolding=false;
+            else if(!ours && GetTickCount64()-g_ownerHoldAt.load()>1500) g_ownerHolding=false;
+        }
+        const bool ownerHolds=g_ownerHolding.load();
+        if(fg && pid && !oursActual) {
             if(history.empty() || history.back().hwnd!=fg) {
                 history.erase(std::remove_if(history.begin(),history.end(),[&](const Destination& d){return d.hwnd==fg;}),history.end());
                 history.push_back({fg,pid});if(history.size()>32)history.erase(history.begin());
@@ -2590,7 +2629,13 @@ DWORD WINAPI ForegroundGuardThread(LPVOID) {
         if(human)g_fgGuardArmed=false;
         if(ours && !wasOurs) { ++g_fgGained; Log("REAL foreground GAINED (continuous guard, hwnd=%p)",fg); }
         ULONGLONG now=GetTickCount64();
-        if(ours && !human && !g_userIntent.EvaluatingAltTab() && g_cfg.blockfocus && g_fgGuardArmed && !ForegroundLeased() && now-lastAttempt>=100) {
+        {
+            static thread_local bool stoodDown=false;
+            const bool wouldHandBack=ours && ownerHolds && !human && g_cfg.blockfocus && g_fgGuardArmed && !ForegroundLeased();
+            if(wouldHandBack && !stoodDown){++g_ownerStanddowns;Log("foreground guard stands down: the owner is using the game window (real input received)");}
+            stoodDown=wouldHandBack;
+        }
+        if(ours && !human && !ownerHolds && !g_userIntent.EvaluatingAltTab() && g_cfg.blockfocus && g_fgGuardArmed && !ForegroundLeased() && now-lastAttempt>=100) {
             lastAttempt=now; HWND dest=nullptr;
             while(!history.empty()) {
                 const auto& d=history.back();DWORD owner=0;GetWindowThreadProcessId(d.hwnd,&owner);

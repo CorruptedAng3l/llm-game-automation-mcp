@@ -23,6 +23,8 @@ function Get-VinputForegroundCases {
 }
 function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'userintentstate' 'run_userintentstate.ps1'
+ New-VinputSuiteCase 'owner_input' 'run_ownerinputtest.ps1' @{} 'Owner input pass-through in the real foreground, via a fake foreground predicate (VINPUT_TEST_HOOKS); no OS input.'
+ New-VinputSuiteCase 'chord' 'run_chordtest.ps1' @{} 'Ctrl/Shift chords reach TranslateMessage-derived WM_CHAR.'
  New-VinputSuiteCase 'profiles' 'run_profiletest.ps1'
  New-VinputSuiteCase 'hover_load' 'run_hoverloadtest.ps1'
  New-VinputSuiteCase 'hostselect' 'run_hostselecttest.ps1'
