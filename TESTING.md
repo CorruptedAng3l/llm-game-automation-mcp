@@ -25,6 +25,7 @@ uses `build\foreground.lock`. Close fullscreen games before running the suite.
 |---|---|
 | `run_selftest.ps1` | every input channel on x64 / x86, injected DLL and compiled-in mode, D3D11 capture, background isolation; then runs the scripts below (except the three standalone ones) |
 | `run_clicktest.ps1`, `run_activatetest.ps1`, `run_keytest.ps1`, `run_tracetest.ps1`, `run_movetest.ps1` | hover-gated clicks, focus shims, key names / chords / mouse buttons, per-API key tracing, relative and raw mouse motion |
+| `run_overlaycapturetest.ps1` | capture of a DDraw-wrapper style game (game window black or stale, picture in a separate `...PresentationWindow`), x64 and x86 |
 | `run_capturetest.ps1`, `run_nativecapture.ps1` | capture regions and frame waits; native D3D12 / OpenGL / Vulkan capture (BGRA, RGBA, R10G10B10A2, RGBA16F; x64 / x86; AppContainer), pixel-exact pattern decode, 50 resizes per API, late-injection refusal for Vulkan |
 | `run_xinputtest.ps1` | XInput pad 0: buttons, sticks, triggers, durations, hold, off, Guide via `XInputGetStateEx` |
 | `run_actest.ps1` | anti-cheat refusal (below) |
