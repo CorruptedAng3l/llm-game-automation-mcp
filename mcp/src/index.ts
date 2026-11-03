@@ -410,18 +410,27 @@ const xy = {
   norm: z.boolean().optional().describe("x and y are fractions of the client size (0..1)."),
   capture_space: z.boolean().optional().describe("x and y are pixels of the last capture (use after a region capture)."),
 };
+const DEFAULT_CLICK_HOVER_MS = 80, DEFAULT_CLICK_HOLD_MS = 140;
 tool("click", "Click",
   "Click a mouse button at a position (or at the current virtual cursor when x/y are omitted). The cursor hovers there " +
-  "first so hover-dependent UI reacts. ok:true = the click was delivered; verify with capture / wait_text.",
+  "first (hover_ms) and the button is held for hold_ms, both long enough for games that poll input once a frame. Old menus: hold_ms 300. " +
+  "Placement / drop-in-world clicks: hold_ms ~900. ok:true = the click was delivered; verify with capture / wait_text.",
   { pid, x: xy.x.optional(), y: xy.y.optional(), norm: xy.norm, capture_space: xy.capture_space, button: button.optional(),
     count: z.number().int().min(1).max(10).optional().describe("2 = double click."),
-    hold_ms: z.number().int().min(1).max(10000).optional().describe("How long the button stays down (default 60)."),
+    hold_ms: z.number().int().min(1).max(10000).optional().describe(
+      `How long the button stays down (default ${DEFAULT_CLICK_HOLD_MS} ms). Games that poll the mouse once a frame or per tick ignore very short ` +
+      "presses: measured, under about 200 ms is often ignored in some old games, old menus needed about 300 ms, and furniture / item placement " +
+      "needed about 900 ms."),
+    hover_ms: z.number().int().min(0).max(5000).optional().describe(
+      `Extra pause with the cursor already over the target, before the button goes down (default ${DEFAULT_CLICK_HOVER_MS} ms; 0 = none). ` +
+      "vinput already waits for the hover to be dispatched and rendered; this adds time for hover-gated UI. Ignored when x / y are omitted."),
     capture_after: captureAfterSchema },
   async (a) => {
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     const pos = a.x === undefined ? [] : [String(a.x), String(a.y)];
     return look(a.pid, reply(await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
-      ...opt("--count", a.count), ...opt("--ms", a.hold_ms)], 60000)), a.capture_after);
+      ...(a.x === undefined ? [] : ["--settle-ms", String(a.hover_ms ?? DEFAULT_CLICK_HOVER_MS)]),
+      ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS)], 60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0))), a.capture_after);
   });
 
 tool("move", "Move the cursor",
