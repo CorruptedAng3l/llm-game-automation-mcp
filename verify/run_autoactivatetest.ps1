@@ -26,7 +26,10 @@ function StartTarget($arch,$name,$flags){
  $p.resume_removed=$hadResume;$p.previous_log_bytes=$priorBytes
  if(!$p.readyMarker){throw 'current activation READY marker unavailable'}
  Check ((Text $p)-notmatch'ACTIVATEAPP 1') "$arch $name never activated before injection" | Out-Host
- $inject=Vi $p @('inject');return $p
+ # These negative controls deliberately stop the queue until the parent resumes
+ # it. Bootstrap hooks explicitly; a normal full-ready injection must refuse it.
+ $injectArgs=@('inject');if($flags-match'--pause-pump'){$injectArgs+='--hooks-only'}
+ $inject=Vi $p $injectArgs;return $p
 }
 try{foreach($arch in @('x64','x86')){
  $p=StartTarget $arch 'default' ''

@@ -41,6 +41,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'edge_guard' 'run_edgeguardtest.ps1'
  New-VinputSuiteCase 'nativecapture' 'run_nativecapture.ps1'
  New-VinputSuiteCase 'capture_timing' 'run_capturetimingtest.ps1'
+ New-VinputSuiteCase 'capture_diagnostics' 'run_capturediagnosticssurrogatetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'xinput' 'run_xinputtest.ps1'
  New-VinputSuiteCase 'unit' 'run_unittests.ps1'
  New-VinputSuiteCase 'ocr' 'run_ocrtest.ps1'
@@ -53,6 +54,10 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'inputrobust' 'run_inputrobusttest.ps1'
  New-VinputSuiteCase 'overlay' 'run_overlaytest.ps1'
  New-VinputSuiteCase 'recenterguard' 'run_recenterguardtest.ps1'
+ New-VinputSuiteCase 'cursor_guard' 'run_cursorguardtest.ps1'
+ New-VinputSuiteCase 'physical_readers' 'run_physicalreaderstest.ps1'
+ New-VinputSuiteCase 'character_translation' 'run_chartranslatetest.ps1'
+ New-VinputSuiteCase 'di_type_lifetime' 'run_ditypelifetimetest.ps1'
  New-VinputSuiteCase 'clickpoint' 'run_clickpointtest.ps1'
  New-VinputSuiteCase 'lease_invariants' 'run_locktest.ps1'
  New-VinputSuiteCase 'legacylock' 'run_legacylocktest.ps1' @{CliCheck=$true}
@@ -79,13 +84,25 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'vk_create_boundary' 'run_vkcreateboundarytest.ps1'
  New-VinputSuiteCase 'resize_cycle_contract' 'run_resizecyclecontracttest.ps1'
  New-VinputSuiteCase 'capture_output' 'run_captureoutputtest.ps1'
+ New-VinputSuiteCase 'capture_scope' 'run_capturescopetest.ps1'
+ New-VinputSuiteCase 'wndproc_retarget' 'run_wndprocretargettest.ps1'
+ New-VinputSuiteCase 'retarget_quiescence' 'run_retargetquiescencetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
+ New-VinputSuiteCase 'wndproc_aw' 'run_wndprocawtest.ps1'
+ New-VinputSuiteCase 'dialog_tokens' 'run_dialogtokentest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..')}
+ New-VinputSuiteCase 'capture_scope_compat' 'run_capturescopecompattest.ps1' @{CliDir=(Join-Path $PSScriptRoot '..\dist');DllDir=(Join-Path $PSScriptRoot '..\dist');RequireScopeSupport=$true}
  New-VinputSuiteCase 'image_encode' 'run_imageencodetest.ps1'
  New-VinputSuiteCase 'raw_registration' 'run_rawregistrationtest.ps1'
+ New-VinputSuiteCase 'self_raw' 'run_selfrawtest.ps1' @{Extended=$true}
+ New-VinputSuiteCase 'host_self_raw' 'run_hostselfrawtest.ps1'
  New-VinputSuiteCase 'relative_accounting' 'run_relativeaccounttest.ps1'
  New-VinputSuiteCase 'log_window' 'run_logwindowtest.ps1'
  New-VinputSuiteCase 'output_reuse' 'run_outputreusecontracttest.ps1'
  New-VinputSuiteCase 'steering_semantics' 'run_steeringsemanticstest.ps1'
  New-VinputSuiteCase 'input_jobs' 'run_inputjobstest.ps1'
+ New-VinputSuiteCase 'pad_phases' 'run_padphasetest.ps1'
+ New-VinputSuiteCase 'pad_triggers' 'run_padtriggerstest.ps1'
+ New-VinputSuiteCase 'key_sequence' 'run_keysequencetest.ps1'
+ New-VinputSuiteCase 'input_readiness' 'run_readinesstest.ps1'
  New-VinputSuiteCase 'hwnd_ownership' 'run_hwndownershiptest.ps1'
  New-VinputSuiteCase 'mouse_up_cleanup' 'run_capturemapcleanuptest.ps1'
  New-VinputSuiteCase 'multi' 'run_multitest.ps1'
@@ -162,9 +179,9 @@ function Invoke-VinputSuitePlan {
     $global:LASTEXITCODE=0
     & $shell @childArguments 2>&1 | Tee-Object -FilePath $record.log_path | Tee-Object -FilePath $console -Append
     $childExit=$LASTEXITCODE;$record.exit_code=$childExit
-    if($childExit-eq3-and$case.id-eq'legacy_focus'){
+    if($childExit-eq3-and$case.id-in@('legacy_focus','cursor_guard')){
      $receipt=Get-Content -LiteralPath (Join-Path $caseOut 'result.json') -Raw|ConvertFrom-Json
-     if($receipt.schema-eq1-and$receipt.status-eq'not_measured'-and$receipt.completed-and$receipt.failed_check_count-eq0-and$receipt.not_measured_check_count-gt0-and$receipt.positive_case_count-gt0){
+     if($receipt.schema-eq1-and$receipt.status-eq'not_measured'-and$receipt.completed-is[bool]-and$receipt.completed-eq$true-and$receipt.failed_check_count-eq0-and$receipt.not_measured_check_count-gt0-and$receipt.positive_case_count-gt0){
       $record.status='not_measured';$record.error='Native pre-injection control contaminated by physical activity or unavailable witness; positive controls completed.';$result.not_measured_suite_count++
       "NOT MEASURED $($case.id): native control inconclusive; remaining suites continue" | Tee-Object -FilePath $console -Append
       continue

@@ -105,7 +105,8 @@ try {
 
     # 6. unknown button names are an error, not a silent no-op
     $k = Cmd $p.Id @('pad', 'dpadup', '100')
-    Require (-not $k.ok -and $k.error -match 'unknown button') "$($c.n) unknown button name rejected: $($k.error)"
+    $unknownExit = $LASTEXITCODE
+    Require ($unknownExit -ne 0 -and -not $k.ok -and $k.error -is [string] -and $k.error -match "(?i)\bunknown\b.*\bbutton\b.*'dpadup'") "$($c.n) unknown button name rejected: $($k.error)"
 
     # 7. Guide: only through XInputGetStateEx, never through the documented XInputGetState
     if ($c.a -match '--ex') {

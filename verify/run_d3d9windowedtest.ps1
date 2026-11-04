@@ -28,7 +28,11 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_d3d9_windowed.cpp" /F
   $p=Start-Process "$d\fixture.exe" -ArgumentList "`"$log`" $api $policy" -WindowStyle Hidden -PassThru;Check (WaitLog $log 'READY_GUARDED') "$arch D3D$api $policy guarded target ready"
   $dll=Join-Path $DllDir $(if($arch-eq'x64'){'vinput64.dll'}else{'vinput32.dll'});$inj=&$cli --json inject --pid $p.Id --dll $dll|ConvertFrom-Json;Check $inj.ok "$arch D3D$api $policy inject"
   if($NativeContext){Vi $p.Id @('config','fakefocus=false')|Out-Null};if($policy-eq'refuse'){Vi $p.Id @('config','fullscreen=refuse')|Out-Null};$s=Vi $p.Id @('status');$h=[IntPtr]::new([Convert]::ToInt64($s.hwnd,16));[ViD9Test]::PostMessage($h,0x8001,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;Check (WaitLog $log '(?m)^EXIT \d+') "$arch D3D$api $policy bounded native result"
-  $text=Log $log;$s=Vi $p.Id @('status');if($policy-eq'refuse'){
+  $text=Log $log;$s=Vi $p.Id @('status')
+  $caseEvidence=@{arch=$arch;api=$api;policy=$policy;native_context=[bool]$NativeContext;target_pid=$p.Id;log_path=$log;dll=$dll;status=$s;target_log=$text;desktop_before=$desktop;desktop_after=$null;desktop_snapshot_error=$null;check_index_before_case_assertions=$checks.Count}
+  $evidence.Add($caseEvidence)
+  try{$caseEvidence.desktop_after=[ViD9Test]::Desktop()}catch{$caseEvidence.desktop_snapshot_error=$_.Exception.Message}
+  if($policy-eq'refuse'){
    Check ($text-match'EXIT 10'-and$text-match'NATIVE_BOUNDARY blocked=0 normal=0 bad_mode=0'-and$s.d3d9.refused-eq1-and$s.d3d9.blocked_before_first_present) "$arch D3D$api explicit refusal stops before native fullscreen"
    $capture=Vi $p.Id @('capture',"$d\refuse_$api.png",'--source','swapchain');Check (-not$capture.ok-and$capture.reason-eq'fullscreen_blocked_before_first_present') "$arch D3D$api refusal capture reports blocked negotiation"
   }else{
@@ -38,7 +42,8 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_d3d9_windowed.cpp" /F
    if($policy-eq'fullscreen'){Check ($s.d3d9.emulated-eq3-and$s.client_w-eq320-and$s.client_h-eq240) "$arch D3D$api each requested resolution becomes exact client and native PP"}
    else{Check ($s.d3d9.emulated-eq0-or$null-eq$s.d3d9) "$arch D3D$api native windowed positive requires no emulation"}
   }
-  Check (-not$s.really_foreground-and[ViD9Test]::Desktop()-eq$desktop) "$arch D3D$api $policy preserves background desktop";$evidence.Add(@{arch=$arch;api=$api;policy=$policy;status=$s;target_log=$text})
+  $caseEvidence.desktop_after_assert=[ViD9Test]::Desktop()
+  Check (-not$s.really_foreground-and$caseEvidence.desktop_after_assert-eq$desktop) "$arch D3D$api $policy preserves background desktop"
  }finally{if($p){$s=Vi $p.Id @('status');if($s.log_path-and(Test-Path $s.log_path)){Copy-Item $s.log_path "$log.vinput.log"};Stop-ViOwnedProcess $p}}}}
 }}finally{$checks|ConvertTo-Json -Depth 7|Set-Content "$Out\checks.json";$evidence|ConvertTo-Json -Depth 18|Set-Content "$Out\evidence.json"}
 $failed=@($checks|Where-Object{-not$_.pass}).Count;"$($checks.Count-$failed) PASS / $failed FAIL";if($failed){exit 1};exit 0

@@ -18,6 +18,7 @@ try{
    $watch=[Diagnostics.Stopwatch]::StartNew();$raw=& $V --json --pid $p.Id key insert 1 --expect-text 'OVERLAY PANEL' --expect-timeout-ms 1500;$exitCode=$LASTEXITCODE;$watch.Stop()
    $reply=$raw|ConvertFrom-Json;$caption=[Text.StringBuilder]::new(128);[ViTransportNative]::GetWindowText($h,$caption,128)|Out-Null
    $applied=@(Get-Content -LiteralPath $log|Where-Object{$_ -match ' KEY_APPLIED '}).Count
+   Check (@(Get-Content -LiteralPath $log|Where-Object {$_-match' MODELED_CURSOR_CAPABILITY '}).Count-eq1) "$label explicitly models armed-cursor readiness without OS input"
    Check (-not $reply.ok -and $exitCode -ne 0) "$label returns a failing process result"
    if($mode -eq 'drop-ack' -or $mode -eq 'server-error'){
     Check ($applied -eq 1 -and $caption.ToString() -match 'PANEL OPEN') "$label independent UI really applied exactly one INSERT"

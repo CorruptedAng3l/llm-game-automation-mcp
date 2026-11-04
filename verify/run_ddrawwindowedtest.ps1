@@ -43,7 +43,9 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_ddraw_windowed.cpp" /
    [ViDdTest]::PostMessage($h,0x8003,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;Check (WaitLog $log 'SURFACES_RELEASED') "$arch DD$api releases surface chain";Check ((Log $log)-match'BACK_RETAINS_FRONT_OK') "$arch DD$api backbuffer keeps front alive after last front release";Check (WaitLog $log 'NATIVE_BOUNDARY exclusive=0 mode=0 normal=[1-9]') "$arch DD$api no native exclusive or mode call"
    $s=Vi $p.Id @('status');Check ($s.ddraw.objects-eq0) "$arch DD$api COM proxies drain on release";$evidence.Add(@{arch=$arch;api=$api;released_status=$s})
   }
-  Check ([ViDdTest]::Desktop()-eq$desktop) "$arch DD$api desktop mode unchanged"
+  $desktopAfter=[ViDdTest]::Desktop()
+  $evidence.Add(@{kind='desktop_mode_exact_snapshot';check_index=$checks.Count;arch=$arch;factory=$factory;api=$api;pid=$p.Id;native_context=[bool]$NativeContext;log=$log;desktop_snapshot_format='220-byte EnumDisplaySettingsW DEVMODEW buffer, full hexadecimal bytes';desktop_before=$desktop;desktop_after=$desktopAfter;desktop_exact_equal=[bool]($desktopAfter-eq$desktop);really_foreground=$s.really_foreground;ddraw_status=$s.ddraw})
+  Check ($desktopAfter-eq$desktop) "$arch DD$api desktop mode unchanged"
  }finally{if($p){$s=Vi $p.Id @('status');if($s.log_path-and(Test-Path $s.log_path)){Copy-Item $s.log_path "$log.vinput.log"};Stop-ViOwnedProcess $p}}}}
  foreach($policy in @('refuse','native')){$p=$null;$log="$d\policy_$policy.log";$desktop=[ViDdTest]::Desktop();try{
   $p=Start-Process "$d\fixture.exe" -ArgumentList "`"$log`" 7 ex" -WindowStyle Hidden -PassThru;Check (WaitLog $log 'READY_GUARDED') "$arch $policy policy target guarded"
@@ -53,7 +55,10 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_ddraw_windowed.cpp" /
   $s=Vi $p.Id @('status');if($policy-eq'native'){Check ((Log $log)-match'NATIVE_BOUNDARY exclusive=1 mode=1 normal=1'-and$s.ddraw.objects-eq0) "$arch explicit native optout passes untouched interfaces only to the rejecting test guard"}
   else{Check ((Log $log)-match'NATIVE_BOUNDARY exclusive=0 mode=0 normal=1'-and$s.ddraw.refused-eq2-and$s.ddraw.blocked_before_first_present) "$arch explicit refusal reaches no native fullscreen boundary and reports blocked rendering"
    $capture=Vi $p.Id @('capture',"$d\refused.png",'--source','swapchain');Check (-not$capture.ok-and$capture.reason-eq'fullscreen_blocked_before_first_present') "$arch blocked DirectDraw capture fails before a doomed frame wait"
-  };Check (-not$s.really_foreground-and[ViDdTest]::Desktop()-eq$desktop) "$arch $policy policy preserves background desktop";$evidence.Add(@{arch=$arch;policy=$policy;status=$s})
+  }
+  $desktopAfter=[ViDdTest]::Desktop()
+  $evidence.Add(@{kind='desktop_mode_exact_snapshot';check_index=$checks.Count;arch=$arch;factory='ex';api=7;policy=$policy;pid=$p.Id;native_context=[bool]$NativeContext;log=$log;desktop_snapshot_format='220-byte EnumDisplaySettingsW DEVMODEW buffer, full hexadecimal bytes';desktop_before=$desktop;desktop_after=$desktopAfter;desktop_exact_equal=[bool]($desktopAfter-eq$desktop);really_foreground=$s.really_foreground;ddraw_status=$s.ddraw})
+  Check (-not$s.really_foreground-and$desktopAfter-eq$desktop) "$arch $policy policy preserves background desktop";$evidence.Add(@{arch=$arch;policy=$policy;status=$s})
  }finally{if($p){Stop-ViOwnedProcess $p}}}
  }
 }finally{$checks|ConvertTo-Json -Depth 6|Set-Content "$Out\checks.json";$evidence|ConvertTo-Json -Depth 20|Set-Content "$Out\evidence.json"}

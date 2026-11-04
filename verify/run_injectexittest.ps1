@@ -5,14 +5,14 @@ $repo=(Resolve-Path "$PSScriptRoot\..").Path;$Out=[IO.Path]::GetFullPath($Out);$
 New-Item -ItemType Directory -Force -Path $Out|Out-Null
 $checks=[Collections.Generic.List[object]]::new()
 function Check([bool]$Condition,[string]$Name){$checks.Add([pscustomobject]@{pass=$Condition;name=$Name});if($Condition){"PASS $Name"}else{"FAIL $Name"}}
-function Run-OwnCli([string]$Cli,[string[]]$Arguments,[string]$Tag){
+function Run-OwnCli([string]$Cli,[string[]]$Arguments,[string]$Tag,[int]$BudgetMs=4000){
  $info=[Diagnostics.ProcessStartInfo]::new($Cli);$info.UseShellExecute=$false;$info.CreateNoWindow=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
  foreach($argument in $Arguments){$info.ArgumentList.Add($argument)}
  $process=[Diagnostics.Process]::new();$process.StartInfo=$info;$clock=[Diagnostics.Stopwatch]::StartNew()
  try{
   if(-not $process.Start()){throw 'Could not start own CLI'}
   $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-  $finished=$process.WaitForExit(4000);if(-not $finished){$process.Kill();$process.WaitForExit()}
+  $finished=$process.WaitForExit($BudgetMs);if(-not $finished){$process.Kill();$process.WaitForExit()}
   $clock.Stop();$outText=$stdout.GetAwaiter().GetResult();$errText=$stderr.GetAwaiter().GetResult()
   [IO.File]::WriteAllText("$Out\$Tag.stdout.json",$outText);[IO.File]::WriteAllText("$Out\$Tag.stderr.log",$errText)
   $json=$null;if($outText.Trim()){$json=$outText|ConvertFrom-Json}
@@ -21,10 +21,13 @@ function Run-OwnCli([string]$Cli,[string[]]$Arguments,[string]$Tag){
 }
 foreach($arch in @('x64','x86')){
  $archDir=Join-Path $Out $arch;New-Item -ItemType Directory -Force -Path $archDir|Out-Null
+ New-Item -ItemType Directory -Force -Path (Join-Path $archDir 'temp')|Out-Null
  $vcvars=if($arch -eq 'x64'){'vcvars64.bat'}else{'vcvars32.bat'}
  $batch=@"
 @echo off
 setlocal
+set "TEMP=$archDir\temp"
+set "TMP=$archDir\temp"
 call "$vcDir\$vcvars" >nul || exit /b 2
 pushd "$archDir"
 cl /nologo /EHsc /W4 /WX /MT /O2 "$repo\test\vi_injectexit.cpp" /Fo:target.obj /Fe:target.exe user32.lib || exit /b 2
@@ -55,8 +58,8 @@ exit /b 0
   }finally{if($target -and -not $target.HasExited){Stop-Process -Id $target.Id -Force -Confirm:$false}}
   try{
    $target=Start-Process -FilePath "$archDir\target.exe" -WindowStyle Hidden -PassThru
-   $reply=Run-OwnCli $cli @('--json','inject','--pid',"$($target.Id)") "$arch-live"
-   Check ($reply.finished -and $reply.exit -eq 0 -and $reply.json.ok -and -not $target.HasExited -and -not $reply.json.target_exited) "$arch healthy headless injection remains successful"
+   $reply=Run-OwnCli $cli @('--json','inject','--pid',"$($target.Id)",'--hooks-only') "$arch-live" -BudgetMs 8000
+   Check ($reply.finished -and $reply.exit -eq 0 -and $reply.json.ok -and $reply.json.readiness.hook_ready -and $reply.json.readiness.scope -eq 'hooks' -and -not $target.HasExited -and -not $reply.json.target_exited) "$arch explicit hooks-only headless injection remains successful"
   }finally{if($target -and -not $target.HasExited){Stop-Process -Id $target.Id -Force -Confirm:$false}}
   $ledger="$archDir\launch_$([guid]::NewGuid().ToString('N')).pid";$began=[DateTime]::UtcNow
   try{

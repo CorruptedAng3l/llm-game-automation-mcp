@@ -32,7 +32,7 @@ try{
      $nativeWindows.Add([pscustomobject]@{case=$name;attempt=$attempt;status=$verdict;witness_source='uninjected_GetLastInputInfo_and_GetAsyncKeyState';physical=$witness;input_seen=$inputSeen;log_snapshot=$logWindow;log_window=$windowText})
      if($verdict-ne'not_measured'){break};Start-Sleep -Milliseconds 100
     }
-    if($verdict-eq'not_measured'){$notMeasured++;$checks.Add([pscustomobject]@{pass=$null;status='not_measured';name="$name no physical or virtual input before injection";reason='physical activity, unavailable witness, or invalid log contaminated all three bounded windows'});Write-Host "NOT MEASURED $name native no-input control: physical witness/log unavailable after3 bounded attempts"}
+    if($verdict-eq'not_measured'){$notMeasured++;$checks.Add([pscustomobject]@{pass=$null;status='not_measured';name="$name no physical or virtual input before injection";reason='observed/recent session input activity or unavailable/invalid witness/log prevented quiet control in all three bounded windows'});Write-Host "NOT MEASURED $name native no-input control: observed/recent session input activity or unavailable/invalid witness/log prevented quiet control after3 bounded attempts"}
     else{Require ($verdict-eq'passed') "$name no physical or virtual input in a measured quiet pre-injection window"}
     $inject=&$cli --json inject --pid $process.Id|ConvertFrom-Json;Require ($LASTEXITCODE-eq0-and$inject.ok) "$name inject succeeds"
     $zero='STATUS k_acq=[0-7][0-9A-F]{7} m_acq=[0-7][0-9A-F]{7} k_state=[0-7][0-9A-F]{7} m_state=[0-7][0-9A-F]{7} zero_k=1 zero_m=1'
