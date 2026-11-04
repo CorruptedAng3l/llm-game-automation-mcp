@@ -47,6 +47,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'ocr' 'run_ocrtest.ps1'
  New-VinputSuiteCase 'text' 'run_texttest.ps1'
  New-VinputSuiteCase 'ocr_robust' 'run_ocrrobusttest.ps1'
+ New-VinputSuiteCase 'ocr_map' 'run_ocrmaptest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'keyconfirm' 'run_keyconfirmtest.ps1'
  New-VinputSuiteCase 'keytransport' 'run_keytransporttest.ps1'
  New-VinputSuiteCase 'image' 'run_imagetest.ps1'
@@ -159,7 +160,12 @@ function Invoke-VinputSuitePlan {
   for ($index=0;$index -lt $Plan.cases.Count;$index++) {
    $case=$Plan.cases[$index];$record=$caseResults[$index];$childPath=Join-Path $ScriptRoot $case.script
    $caseRoot=Join-Path $Out $case.id
-   $caseOut=Join-Path $caseRoot ('run_'+$invocation);New-Item -ItemType Directory -Force -Path $caseOut | Out-Null
+   $caseOut=Join-Path $caseRoot ('run_'+$invocation)
+   if($case.id-eq'capture_diagnostics'){
+    # Exclusive fresh outer directory: all inner receipts belong to this call.
+    [void][IO.Directory]::CreateDirectory($caseRoot)
+    New-Item -ItemType Directory -Path $caseOut -ErrorAction Stop | Out-Null
+   }else{New-Item -ItemType Directory -Force -Path $caseOut | Out-Null}
    $record.out_dir=$caseOut
    $record.log_path=Join-Path $caseOut 'suite_console.log'
    $childArguments=@('-NoProfile','-File',$childPath,'-Out',$caseOut)
@@ -179,11 +185,21 @@ function Invoke-VinputSuitePlan {
     $global:LASTEXITCODE=0
     & $shell @childArguments 2>&1 | Tee-Object -FilePath $record.log_path | Tee-Object -FilePath $console -Append
     $childExit=$LASTEXITCODE;$record.exit_code=$childExit
-    if($childExit-eq3-and$case.id-in@('legacy_focus','cursor_guard')){
-     $receipt=Get-Content -LiteralPath (Join-Path $caseOut 'result.json') -Raw|ConvertFrom-Json
-     if($receipt.schema-eq1-and$receipt.status-eq'not_measured'-and$receipt.completed-is[bool]-and$receipt.completed-eq$true-and$receipt.failed_check_count-eq0-and$receipt.not_measured_check_count-gt0-and$receipt.positive_case_count-gt0){
-      $record.status='not_measured';$record.error='Native pre-injection control contaminated by physical activity or unavailable witness; positive controls completed.';$result.not_measured_suite_count++
-      "NOT MEASURED $($case.id): native control inconclusive; remaining suites continue" | Tee-Object -FilePath $console -Append
+    if($childExit-eq3-and$case.id-in@('legacy_focus','cursor_guard','capture_diagnostics')){
+     $receiptPath=Join-Path $caseOut 'result.json'
+     if($case.id-eq'capture_diagnostics'){
+      # The real runner owns exactly one direct run_<guid> directory. No latest,
+      # recursive search or flat fallback may substitute another receipt.
+      $inner=@(Get-ChildItem -LiteralPath $caseOut -Directory -Force|Where-Object {$_.Name-cmatch'^run_[0-9a-f]{32}$'})
+      if($inner.Count-ne1-or($inner[0].Attributes-band[IO.FileAttributes]::ReparsePoint)){throw 'capture_diagnostics requires exactly one direct non-reparse run_<guid> receipt directory'}
+      $receiptPath=Join-Path $inner[0].FullName 'result.json';$leaf=Get-Item -LiteralPath $receiptPath -Force -ErrorAction Stop
+      if($leaf.PSIsContainer-or($leaf.Attributes-band[IO.FileAttributes]::ReparsePoint)){throw 'capture_diagnostics requires an ordinary result.json in its one fresh inner directory'}
+     }
+     $receipt=Get-Content -LiteralPath $receiptPath -Raw|ConvertFrom-Json
+     $captureReason=$case.id-ne'capture_diagnostics'-or($receipt.not_measured_reason-eq'capture_enumeration_incomplete'-and($receipt.complete_candidate_positive_case_count-is[int]-or$receipt.complete_candidate_positive_case_count-is[long])-and$receipt.complete_candidate_positive_case_count-ge0)
+     if($captureReason-and$receipt.schema-eq1-and$receipt.status-eq'not_measured'-and$receipt.completed-is[bool]-and$receipt.completed-eq$true-and$receipt.failed_check_count-eq0-and$receipt.not_measured_check_count-gt0-and$receipt.positive_case_count-gt0){
+      $record.status='not_measured';$record.error=if($case.id-eq'capture_diagnostics'){'Bounded candidate enumeration left diagnostic coverage unmeasured; returned-candidate and image checks retained.'}else{'Native pre-injection control contaminated by physical activity or unavailable witness; positive controls completed.'};$result.not_measured_suite_count++
+      "NOT MEASURED $($case.id): control/coverage inconclusive; remaining suites continue" | Tee-Object -FilePath $console -Append
       continue
      }
     }

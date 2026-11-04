@@ -127,6 +127,15 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
 - Merged by hand into this tree (it carries the anti-cheat refusal and other public-only code); five conflicts resolved
   in `vinput_cli.cpp` / `vinput_core.cpp`. The dev-only fixtures (`vi_nativeclip`, `vi_wndquarantine`, `vi_launch_*`)
   are copied into `test/` but are not yet part of `build.bat` or `vi_suiteplan.ps1`.
+- Fixer batch aff3016..4296f19 (2026-11-04): Caps/Num/Scroll toggle bits kept when key state is masked; OCR / text
+  search no longer overwrites the saved screenshot map; MCP `launch` passes `args` starting with `--` intact;
+  `capture_after` falls back to PrintWindow only when status shows no Present stream; `capture_diagnostics` reports
+  not_measured (exit 3) instead of failing when window enumeration cannot be proven complete.
+  Gate on the merged tree: `build.bat` x64 + x86 OK; `mcp` `npm test` 21 files PASS; background plan (86 cases,
+  new `ocr_map`): 83 passed, 3 not_measured (`capture_diagnostics` by design; `cursor_guard` and one other where the
+  passive desktop changed during the run). Run 3 passed 77; `di_type_lifetime` missed a startup token under
+  parallel load and passed on rerun together with the 5 lane cases it blocked; `owner_input` failed once when the
+  real cursor moved during the run and passed 22 / 0 in the next. `run_actest.ps1` 26 PASS / 0 FAIL.
 
 ## Real games
 

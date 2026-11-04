@@ -318,9 +318,7 @@ anti-cheat that stays resident (for example Vanguard's `vgc` service) blocks vin
 - vinput stays loaded in a game until the game exits.
 - **Electron / Chromium games** (for example Phantom Rose) slow down or freeze their rendering when Chromium thinks
   the window is hidden. Launch them with Chromium's anti-throttling switches: `args`
-  `" --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=CalculateNativeWinOcclusion"`.
-  Keep the **leading space**: an `args` value that starts with `--` is currently lost on the way to the game (a known
-  bug, being fixed).
+  `"--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=CalculateNativeWinOcclusion"`.
 - Verified live on a set of commercial D3D11, D3D12 (UWP), OpenGL and Vulkan (with `launch --early`) games. See
   [TESTING.md](TESTING.md).
 

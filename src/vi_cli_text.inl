@@ -69,7 +69,7 @@ struct TextScan { std::string preprocessing = "none"; double scale = 1; unsigned
 // Ordinary OCR first, then bounded fallback passes. A successful pass is used on its own: alternate readings cannot
 // manufacture duplicate clickable hits. Miss diagnostics retain distinct actual OCR readings across the passes.
 static bool SearchText(DWORD pid, const Args& a, const TextQuery& q, Frame& f, std::vector<vi_text::Line>& lines, std::vector<vi_text::Hit>& hits, TextScan& scan, std::string& err) {
-    if (!Grab(pid, a, f, err)) return false;
+    if (!Grab(pid, a, f, err, true)) return false;
     std::string lang; bool analyzed = false; lines.clear(); hits.clear(); scan = TextScan{};
     struct Pass { double scale; std::string mode; bool tiles; };
     std::vector<Pass> plan;
@@ -173,7 +173,7 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
         ++polls;
         const DWORD elapsed = GetTickCount() - t0;
         std::string stats = "\"elapsed_ms\":" + std::to_string(elapsed) + ",\"polls\":" + std::to_string(polls) +
-            ",\"ocr_pass\":\"" + scan.preprocessing + "\",\"ocr_scale\":" + Num(scan.scale) + ",\"ocr_passes\":" + std::to_string(scan.passes);
+            ",\"ocr_pass\":\"" + scan.preprocessing + "\",\"ocr_scale\":" + Num(scan.scale) + ",\"ocr_passes\":" + std::to_string(scan.passes) + ",\"capture_space_updated\":false";
         if (mode == 0) {
             if (!hits.empty()) {
                 if (nth == 0 && hits.size() > 1)

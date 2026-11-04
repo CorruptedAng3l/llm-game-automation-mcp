@@ -58,7 +58,7 @@ function Stable-Peek($Device,$Name){
  Check ($Device.peek.hr-ge0-and$Device.peek_again.hr-ge0-and$Device.consume.hr-ge0-and$first-ceq$second-and$first-ceq$consumed) "$Name two PEEKs and consume preserve full event metadata"
 }
 function Masked($S,$Name){
- Check ($S.keys.async_b-eq0-and$S.keys.async_caps-eq0-and$S.keys.async_right-eq0-and$S.keys.state_b-eq0-and$S.keys.state_caps-eq0-and$S.keys.state_right-eq0-and$S.keys.keyboard_b-eq0-and$S.keys.keyboard_caps-eq0-and$S.keys.keyboard_right-eq0) "$Name native key/mouse-button high/toggle bits masked"
+ Check ($S.keys.async_b-eq0-and$S.keys.async_caps-eq0-and$S.keys.async_right-eq0-and$S.keys.state_b-eq0-and$S.keys.state_caps-eq1-and$S.keys.state_right-eq0-and$S.keys.keyboard_b-eq0-and$S.keys.keyboard_caps-eq1-and$S.keys.keyboard_right-eq0) "$Name native key/button highs and ordinary low bits masked; Caps toggle retained"
  Check ($S.raw.result-eq4294967295-and-not$S.raw.physical_bytes-and-not$S.raw.buffer_physical_bytes-and$S.raw.buffer_count-eq0) "$Name raw denied and no hidden native buffer payload"
  Check ($S.di_keyboard.b-eq0-and$S.di_mouse.dx-eq0-and$S.di_mouse.dy-eq0-and$S.di_mouse.wheel-eq0-and$S.di_mouse.right-eq0) "$Name native DirectInput state masked"
  foreach($device in @($S.di_keyboard,$S.di_mouse)){Check ($device.peek.count-eq0-and-not$device.peek.physical_bytes-and$device.consume.count-eq0-and-not$device.consume.physical_bytes-and$device.query_count-eq0) "$Name native DirectInput PEEK/consume/query masked"}

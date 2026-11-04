@@ -13,7 +13,7 @@ if(-not$RepoRoot){throw 'Pass -RepoRoot for tested prebuilt host_mh objects'}
 $RepoRoot=(Resolve-Path -LiteralPath $RepoRoot).Path;if(-not$CliDir){$CliDir=Join-Path $RepoRoot 'dist'};$CliDir=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath $CliDir).Path);$V=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath (Join-Path $CliDir 'vinput.exe')).Path)
 $source=(Resolve-Path -LiteralPath "$PSScriptRoot\..\test\vi_capture_diagnostics_surrogate.cpp").Path
 $run=Join-Path $Out ('run_'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Force -Path $run|Out-Null;$run=(Resolve-Path -LiteralPath $run).Path
-$checks=[Collections.Generic.List[object]]::new();$calls=[Collections.Generic.List[object]]::new();$evidence=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.List[object]]::new();$exception=$null
+$checks=[Collections.Generic.List[object]]::new();$calls=[Collections.Generic.List[object]]::new();$evidence=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.List[object]]::new();$exception=$null;$notMeasured=[Collections.Generic.List[object]]::new();$completeCandidatePositiveCount=0;$positiveCaseCount=0
 Add-Type -AssemblyName System.Drawing
 if(-not('ViCaptureDiagNative' -as [type])){Add-Type @'
 using System;using System.Runtime.InteropServices;
@@ -130,10 +130,32 @@ function Capture-VisibleReplacement($t,$replacement,[string]$name){
   if($enum.truncated-isnot[bool]-or-not$enum.truncated){break}
   if($n-lt2){$attempts[$attempts.Count-1].retry_reason='explicit_truncated_enumeration_missing_exact_live_visible_candidate';Start-Sleep -Milliseconds 10}
  }
- Require (-not($fresh.reply.capture_diagnostics.enumeration.truncated-is[bool]-and$fresh.reply.capture_diagnostics.enumeration.truncated-and$expected.Count-eq0)) "$name expected-candidate presence measured; otherwise truncated NOT MEASURED after max3 retained attempts"
+ # The caller classifies a final truncated result as NOT MEASURED; no added retry.
  return [pscustomobject]@{fresh=$fresh;attempts=@($attempts)}
 }
 
+function Not-Measured([string]$name,$enumeration=$null){
+ $notMeasured.Add([pscustomobject]@{name=$name;enumeration=$enumeration});Write-Host "NOT MEASURED $name"
+}
+function Measure-ProxyEnumeration($enumeration,[int]$expected,[uint32]$ownerPid,[uint64]$foreignHwnd,[string]$name){
+ Require ($null-ne$enumeration-and$enumeration.truncated-is[bool]-and$enumeration.candidates-is[array]-and$enumeration.stop_reason-is[string]-and$enumeration.stop_reason-and($enumeration.visited-is[int]-or$enumeration.visited-is[long])-and$enumeration.visited-ge0-and$enumeration.visited-le4096-and@($enumeration.candidates).Count-le16) "$name typed bounded enumeration metadata"
+ $candidates=@($enumeration.candidates);$proxies=@($candidates|Where-Object candidate_kind -eq d3d_proxy)
+ $returnedValid=@($candidates|Where-Object {$_.pid-ne$ownerPid-or(Same-Hwnd $_.hwnd $foreignHwnd)}).Count-eq0
+ Check $returnedValid "$name returned candidates exclude foreign PID and foreign lookalike"
+ if($enumeration.truncated){
+  # An incomplete subset can expose an error, but cannot establish exact count
+  # or absence. A missing candidate is not a failed product assertion.
+  Check ($proxies.Count-le$expected) "$name truncated subset has no unexpected extra proxy"
+  Not-Measured "$name exact candidate count/absence and dependent coverage" $enumeration
+  return
+ }
+ $matches=$proxies.Count-eq$expected
+ Check $matches "$name complete enumeration has the expected visible proxy count"
+ if($matches-and$returnedValid-and$expected-gt0){$script:completeCandidatePositiveCount++}
+}
+function Complete-EnumerationCoverage{
+ if(-not$completeCandidatePositiveCount){Not-Measured 'no independently complete positive proxy enumeration control'}
+}
 function Same-Hwnd($value,$number){return $value-and[Convert]::ToUInt64($value.Substring(2),16)-eq[uint64]$number}
 try{
  foreach($arch in @('x64','x86')){
@@ -164,7 +186,7 @@ exit /b %errorlevel%
    if($mode-eq'nonblack'){
     $expected=@(@(20,220,30),@(25,60,230),@(220,35,20),@(25,60,230),@(220,35,20));$known=$pixels.samples.Count-eq5
     for($n=0;$n-lt$pixels.samples.Count;$n++){if($n-ge5-or$pixels.samples[$n].r-ne$expected[$n][0]-or$pixels.samples[$n].g-ne$expected[$n][1]-or$pixels.samples[$n].b-ne$expected[$n][2]-or$pixels.samples[$n].a-ne255){$known=$false}}
-    Require $known "$name independently decoded PNG has exact green marker and red/blue checker tiles"
+    Require $known "$name independently decoded PNG has exact green marker and red/blue checker tiles";$positiveCaseCount++
    }
 
    $d=$capture.reply.capture_diagnostics;$has=$d-and$d.version-eq1-and$d.available;Check ([bool]$has) "$name capture source diagnostics available"
@@ -172,21 +194,26 @@ exit /b %errorlevel%
     $expectedClass=if($mode-eq'ansi'){'GNW95 ANSI Class'}else{'GNW95 Class'};$encoding=if($mode-eq'ansi'){'ansi_default_proc_acp_to_utf16'}else{'unicode_default_proc'}
     Check ((Same-Hwnd $d.input.hwnd $t.ready.hwnd)-and(Same-Hwnd $d.source.hwnd $t.ready.hwnd)-and$d.input.class-eq$expectedClass-and$d.input.title-eq'Synthetic GNW95 input'-and$d.input.title_available-and$d.input.title_encoding-eq$encoding-and$d.input.title_source-eq'default_window_caption_not_custom_wm_gettext'-and$d.input.pid-eq$t.process.Id-and$d.source.pid-eq$t.process.Id-and$d.input.lifetime_and_client_size_stable_at_reply-and$d.input_adoption_stable_at_reply) "$name exact input/source class title client and lifetime metadata"
     $candidates=@($d.enumeration.candidates);$proxies=@($candidates|Where-Object candidate_kind -eq d3d_proxy);$expected=if($mode-eq'two'){2}elseif($mode-eq'none'-or$mode-eq'hidden'){0}else{1}
-    if($expected-eq0){Require ($d.enumeration.truncated-is[bool]-and-not$d.enumeration.truncated) "$name candidate absence measured by complete enumeration; otherwise NOT MEASURED"}
-    Check (@($candidates|Where-Object {$_.pid-ne$t.process.Id-or(Same-Hwnd $_.hwnd $foreign.ready.proxy)}).Count-eq0-and$proxies.Count-eq$expected) "$name same-PID visible proxy candidates exclude foreign and hidden lookalikes"
+    Measure-ProxyEnumeration $d.enumeration $expected ([uint32]$t.process.Id) ([uint64]$foreign.ready.proxy) $name
     Check ($d.enumeration.visited-le4096-and$candidates.Count-le16-and$d.enumeration.PSObject.Properties['truncated']-and$d.enumeration.PSObject.Properties['stop_reason']) "$name bounded enumeration includes truncation state"
     Check ($d.observation.available-and$d.observation.all_black_rgb-eq$pixels.all_black-and$d.observation.uniform_rgb-eq$pixels.uniform-and$d.observation.space-eq'full_printwindow_client_image_before_region_and_output_transforms') "$name independent PNG RGB observation agrees without diagnosing cause"
     Check ($d.automatic_proxy_selection-is[bool]-and$d.automatic_proxy_selection-eq$false-and$d.candidate_pixels_probed-is[bool]-and$d.candidate_pixels_probed-eq$false-and$d.transform.input_target_changed-is[bool]-and$d.transform.input_target_changed-eq$false-and$d.transform.policy-eq'input_client_printwindow') "$name no candidate probing retarget or invented proxy transform"
     if($mode-eq'proxy'-and$proxies.Count-eq1){
      $old=$proxies[0];$destroy=Snapshot $t 102 1;Require ($destroy.proxy-eq0) "$name owned proxy destruction acknowledged"
      $gone=Vi $t @('capture',(Join-Path $run ($name+'.destroyed.png')),'--method','printwindow');$goneCandidates=@($gone.reply.capture_diagnostics.enumeration.candidates|Where-Object candidate_kind -eq d3d_proxy)
-     Require ($gone.reply.capture_diagnostics.enumeration.truncated-is[bool]-and-not$gone.reply.capture_diagnostics.enumeration.truncated) "$name destroyed-candidate absence measured by complete enumeration; otherwise NOT MEASURED"
-     Check ($gone.exit-eq0-and$gone.reply.ok-and$goneCandidates.Count-eq0) "$name destroyed candidate is absent without input retarget"
+     Require ($gone.exit-eq0-and$gone.reply.ok) "$name post-destruction capture succeeds"
+     Measure-ProxyEnumeration $gone.reply.capture_diagnostics.enumeration 0 ([uint32]$t.process.Id) ([uint64]$foreign.ready.proxy) "$name destroyed candidate"
      $replacement=Snapshot $t 103 2;Require ($replacement.proxy-ne0) "$name owned proxy replacement acknowledged"
      Require-VisibleReplacement $t $replacement "$name replacement"
      $constructor=@(Records $t.log|Where-Object kind -eq replacement_constructor);Require ($constructor.Count-eq1-and$constructor[0].admitted-eq$true-and$constructor[0].native_create_called-eq$true-and$constructor[0].fixed_rectangle_outside_virtual_screen-eq$true-and$constructor[0].noactivate_style-eq$true-and$constructor[0].fixture_explicit_native_show_or_activation_called-eq$false-and$constructor[0].hwnd-eq$replacement.proxy-and$constructor[0].call_count-eq1) "$name exactly one constrained native replacement construction with no explicit native show/activation"
      $replacementCaptures=Capture-VisibleReplacement $t $replacement $name;$fresh=$replacementCaptures.fresh;$freshCandidates=@($fresh.reply.capture_diagnostics.enumeration.candidates|Where-Object candidate_kind -eq d3d_proxy)
+     Require ($fresh.exit-eq0-and$fresh.reply.ok) "$name replacement capture succeeds"
+     Measure-ProxyEnumeration $fresh.reply.capture_diagnostics.enumeration 1 ([uint32]$t.process.Id) ([uint64]$foreign.ready.proxy) "$name replacement"
+     # Validate each returned positive even when the rest of enumeration is
+     # truncated. Do not turn an explicitly truncated miss into a false failure.
+     if($freshCandidates.Count-or-not$fresh.reply.capture_diagnostics.enumeration.truncated){
      Check ($fresh.exit-eq0-and$fresh.reply.ok-and$freshCandidates.Count-eq1-and(Same-Hwnd $freshCandidates[0].hwnd $replacement.proxy)-and$freshCandidates[0].lifetime_cookie-ne$old.lifetime_cookie-and$freshCandidates[0].lifetime_and_client_size_stable_at_reply-and(Same-Hwnd $fresh.reply.capture_diagnostics.input.hwnd $t.ready.hwnd)) "$name replacement has a fresh lifetime witness even if numeric HWND is reused"
+     }
      $evidence.Add([pscustomobject]@{name=($name+'.replacement');old=$old;destroy=$destroy;gone=$gone.reply;replacement=$replacement;fresh=$fresh.reply;replacement_capture_attempts=$replacementCaptures.attempts;numeric_hwnd_reused=(Same-Hwnd $old.hwnd $replacement.proxy);capture_transport='known_source_printwindow_api_surrogate';native_printwindow_compatibility_measured=$false})
     }
    }
@@ -209,7 +236,9 @@ exit /b %errorlevel%
  }
 }catch{$exception=$_.Exception.Message;Write-Host "ERROR $exception"}finally{
  foreach($t in $owned){try{Stop-Owned $t}catch{$checks.Add([pscustomobject]@{pass=$false;name="owned cleanup: $($_.Exception.Message)"})}}
- $failed=@($checks|Where-Object {-not$_.pass}).Count;$result=[ordered]@{completed=($null-eq$exception);passed=$checks.Count-$failed;failed=$failed;error=$exception;checks=$checks;owned_processes=@($owned|ForEach-Object{@{name=$_.name;pid=$_.pid;exe=$_.exe;creation_utc_ticks=$_.created;startup_identity=$_.startup_identity;cleanup=$_.stop}});native_fixture_process_run=$true;capture_transport='known_source_printwindow_api_surrogate';native_printwindow_compatibility_measured=$false;native_printwindow_compatibility='UNKNOWN; preserved original native baseline112 PASS/14 FAIL';source_sha256=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash;original_native_fixture_sha256='F3560591BC9D1A5D7D12415C8ACEAA0DDECE7C7CB1850D3B69BACC96F0E0CB4F';original_native_runner_sha256='2CDF43DCB210FE2153B3008CF1303CEC06CF48DCD5F370A66F7084FB5C378AA5';physical_input_generated=$false;foreground_activation_requested=$false;real_game_measured=$false}
+ $failed=@($checks|Where-Object {-not$_.pass}).Count;if(-not$exception-and-not$failed){Complete-EnumerationCoverage};$nmCount=$notMeasured.Count
+ $status=if($exception-or$failed){'failed'}elseif($nmCount){'not_measured'}else{'passed'}
+ $result=[ordered]@{schema=1;status=$status;failed_check_count=$failed;not_measured_check_count=$nmCount;positive_case_count=$positiveCaseCount;complete_candidate_positive_case_count=$completeCandidatePositiveCount;not_measured_reason=$(if($nmCount){'capture_enumeration_incomplete'}else{$null});not_measured_checks=@($notMeasured);completed=($null-eq$exception);passed=$checks.Count-$failed;failed=$failed;error=$exception;checks=$checks;owned_processes=@($owned|ForEach-Object{@{name=$_.name;pid=$_.pid;exe=$_.exe;creation_utc_ticks=$_.created;startup_identity=$_.startup_identity;cleanup=$_.stop}});native_fixture_process_run=$true;capture_transport='known_source_printwindow_api_surrogate';native_printwindow_compatibility_measured=$false;native_printwindow_compatibility='UNKNOWN; preserved original native baseline112 PASS/14 FAIL';source_sha256=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash;original_native_fixture_sha256='F3560591BC9D1A5D7D12415C8ACEAA0DDECE7C7CB1850D3B69BACC96F0E0CB4F';original_native_runner_sha256='2CDF43DCB210FE2153B3008CF1303CEC06CF48DCD5F370A66F7084FB5C378AA5';physical_input_generated=$false;foreground_activation_requested=$false;real_game_measured=$false}
  $result|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $run 'result.json');$calls|ConvertTo-Json -Depth 40|Set-Content -LiteralPath (Join-Path $run 'calls.json');$evidence|ConvertTo-Json -Depth 40|Set-Content -LiteralPath (Join-Path $run 'evidence.json');Write-Host "$($result.passed) PASS / $failed FAIL; $run"
 }
-if($exception-or$failed){exit 1};exit 0
+if($exception-or$failed){exit 1};if($nmCount){exit 3};exit 0

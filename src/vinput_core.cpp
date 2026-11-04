@@ -727,7 +727,10 @@ SHORT WINAPI h_GetAsyncKeyState(int vk) {
 }
 SHORT WINAPI h_GetKeyState(int vk) {
     C.gks++;
-    SHORT r = ReaderMask(ReaderKey) ? 0 : o_GetKeyState(vk);
+    const bool mask = ReaderMask(ReaderKey);
+    // Only these synchronous low bits are toggle state, not press history.
+    const bool toggle = vk == VK_CAPITAL || vk == VK_NUMLOCK || vk == VK_SCROLL;
+    SHORT r = mask ? (toggle ? (SHORT)(o_GetKeyState(vk) & 1) : 0) : o_GetKeyState(vk);
     if (vk > 0 && vk < 256 && g_vk[vk]) r |= (SHORT)0xFF80;
     if (vk > 0 && vk < 256) g_keyTrace[vk].gks.record((USHORT)r, (r & 0x8000) != 0);
     return r;
@@ -737,8 +740,10 @@ BOOL WINAPI h_GetKeyboardState(PBYTE ks) {
     const bool mask=ReaderMask(ReaderKeyboard);
     if(!ks)return o_GetKeyboardState(nullptr);
     if(!ReaderBufferWritable(ks,256)){SetLastError(ERROR_NOACCESS);return FALSE;}
-    BYTE state[256]{};BOOL r=mask?TRUE:o_GetKeyboardState(state);
+    BYTE state[256]{};BOOL r=o_GetKeyboardState(state);
     if(!r){memset(state,0,sizeof(state));r=TRUE;}
+    // Keep only Caps/Num/Scroll toggle state before merging virtual downs.
+    if(mask)for(int i=0;i<256;i++)state[i]=(BYTE)(state[i]&((i==VK_CAPITAL||i==VK_NUMLOCK||i==VK_SCROLL)?1:0));
     for(int i=0;i<256;i++)if(g_vk[i])state[i]|=0x80;
     if(!ReaderBufferStore(ks,state,sizeof(state))){SetLastError(ERROR_NOACCESS);return FALSE;}
     for(int i=0;i<256;i++)g_keyTrace[i].gkbs.record(state[i]);

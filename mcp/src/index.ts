@@ -100,8 +100,9 @@ const server = new McpServer(
       "background, so the game never needs focus and the user keeps the mouse and keyboard. Workflow: launch (or attach) -> " +
       "capture to look -> act (click_text / click / key / pad) -> verify with wait_text, capture or wait_change. " +
       "Coordinates are the game's client pixels, which equal the pixels of a full capture. ok:true on an input tool only " +
-      "means the input was delivered, not that the game reacted: always verify (capture_after on an action returns the next " +
-      "frame in the same call). Do not guess pixels from a big screenshot: capture with grid to read exact coordinates, or " +
+      "means the input was delivered, not that the game reacted: always verify. capture_after:true requests a following " +
+      "image; a zero-Present PrintWindow fallback does not prove a new rendered frame. Use capture_after:0 to look immediately. " +
+      "Do not guess pixels from a big screenshot: capture with grid to read exact coordinates, or " +
       "max_width / zoom and then click with coord_space:\"capture\". Run games windowed or borderless; if launch / capture " +
       "warns about fullscreen, fix the game's own settings. status shows warnings; log, trace and config diagnose input problems. Never use it on online / multiplayer games " +
       "or games with anti-cheat; vinput refuses targets with a known anti-cheat and that refusal cannot be overridden.",
@@ -117,6 +118,7 @@ function tool<S extends z.ZodRawShape>(name: string, title: string, description:
       try {
         if (p !== undefined) {
           watchTarget(p);
+          if (name === "attach" || name === "detach") advanceCaptureSession(p);
           const k = name === "attach" ? undefined : knownExit(p);   // attach may be a reused pid number
           if (k) return exitedReply(p, k.code);
         }
@@ -162,10 +164,10 @@ tool("launch", "Launch a game",
     }
     const argv = ["--owner", OWNER, "launch",
       ...opt("--exe", a.exe), ...opt("--aumid", a.aumid), ...opt("--steam", a.steam_appid), ...opt("--wait-exe", a.wait_exe),
-      ...opt("--args", a.args), ...opt("--cwd", cwd), ...opt("--early", a.early), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
+      ...(a.args === undefined ? [] : [`--args=${a.args}`]), ...opt("--cwd", cwd), ...opt("--early", a.early), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
       ...opt("--lock", a.lock)];
     const r = await runVinput(argv, ((a.timeout_s ?? 240) + (a.settle_s ?? 5) + 120) * 1000);
-    { const np = (r.json as { pid?: unknown }).pid; if (typeof np === "number" && np > 0) { forgetExit(np); watchTarget(np); } }
+    { const np = (r.json as { pid?: unknown }).pid; if (typeof np === "number" && np > 0) { advanceCaptureSession(np); forgetExit(np); watchTarget(np); } }
     const lp = r.ok ? (r.json as { pid?: number }).pid : undefined;
     const extra: Record<string, unknown> = {};
     if (lp && a.claim) { const c = await runVinput([...at(lp), "claim", "--ttl", "3600"], 15000); extra.claim = c.json; }
@@ -325,6 +327,9 @@ function validateFormat(a: { format?: "png" | "jpeg"; quality?: number; grid?: n
 
 /** Mapping of the last image returned per game (image_px = (client_px - offset) * scale), for coord_space:"capture". */
 const lastMapping = new Map<number, Mapping>();
+// Cooperative attachment epoch only; this is not OS process-creation identity.
+const captureSessionEpoch = new Map<number, number>();
+function advanceCaptureSession(pid: number) { captureSessionEpoch.set(pid, (captureSessionEpoch.get(pid) ?? 0) + 1); }
 
 /** One frame grab: runs vinput capture, attaches the PNG, and diagnoses "nothing presented / fullscreen refused" when the
  *  native path was not used. Shared by capture and the capture_after option of the action tools. */
@@ -425,23 +430,49 @@ async function grabFrame(pid: number, o: { path?: string; region?: z.infer<typeo
 }
 
 const captureAfterSchema = z.union([z.boolean(), z.number().int().min(0).max(3600)]).optional().describe(
-  "Look right after acting, in the same call: true = capture after 3 presented frames, a number = wait for that many frames " +
+  "Look right after acting: true waits for 3 presented frames, with one explicitly reported fresh PrintWindow fallback if that wait times out and status shows no target Present stream; a number strictly waits for that many frames " +
   "first (0 = capture immediately). The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
   "saving a capture round trip. Skipped when the action itself failed.");
 const DEFAULT_LOOK_FRAMES = 3;
 /** Act-then-look: append the post-action frame to an action's reply. */
 async function look(pid: number, out: ToolReply, ca: boolean | number | undefined): Promise<ToolReply> {
   if (ca === undefined || ca === false || out.isError) return out;
-  const g = await grabFrame(pid, { after_frames: ca === true ? DEFAULT_LOOK_FRAMES : ca });
+  const session = captureSessionEpoch.get(pid) ?? 0;
+  let g = await grabFrame(pid, { after_frames: ca === true ? DEFAULT_LOOK_FRAMES : ca });
+  let fallback: Record<string, unknown> | undefined;
+  // A number remains a strict Present request. Only the convenience boolean may
+  // recover from this exact timeout when fresh status proves no observed stream.
+  const initial = g.r.json as { error?: unknown } | undefined;
+  if (ca === true && (captureSessionEpoch.get(pid) ?? 0) === session && !g.r.ok && initial?.error === "not enough target Present calls before capture timeout") {
+    const status = await runVinput([...at(pid), "status"], 15000);
+    const s = status.ok && status.json && typeof status.json === "object" && !Array.isArray(status.json)
+      ? status.json as Record<string, unknown> : undefined;
+    const counters = s?.counters && typeof s.counters === "object" && !Array.isArray(s.counters)
+      ? s.counters as Record<string, unknown> : undefined;
+    const fullscreen = s?.fullscreen && typeof s.fullscreen === "object" && !Array.isArray(s.fullscreen)
+      ? s.fullscreen as Record<string, unknown> : undefined;
+    const blockedBackend = [s?.d3d9, s?.ddraw].some(value => value !== undefined &&
+      (!value || typeof value !== "object" || Array.isArray(value) ||
+        (value as Record<string, unknown>).blocked_before_first_present !== false));
+    if ((captureSessionEpoch.get(pid) ?? 0) === session && s?.frames === 0 && s.frame_api === "none" &&
+        fullscreen?.refused === 0 && fullscreen.failures === 0 && fullscreen.blocked_before_first_present === false && !blockedBackend &&
+        (s.counters === undefined || counters !== undefined) &&
+        (counters?.fs_refused === undefined || counters.fs_refused === 0) &&
+        (counters?.present_ours === undefined || counters.present_ours === 0)) {
+      fallback = { reason: "no_target_present_stream_observed", requested_present_frames: DEFAULT_LOOK_FRAMES,
+        present_wait_satisfied: false, method: "printwindow", scope: "fresh PrintWindow request; no render-frame or application-acceptance guarantee" };
+      g = await grabFrame(pid, { after_frames: 0, method: "printwindow" });
+    }
+  }
   let j: Record<string, unknown> = {};
   try { j = JSON.parse((out.content[0] as { text: string }).text); } catch { /* keep empty */ }
   if (g.summary && !g.out.isError) {
-    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after: g.summary }) };
+    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after: { ...g.summary, ...(fallback ? { fallback } : {}) } }) };
     for (const c of g.out.content) if (c.type === "image") out.content.push(c);
   } else {
     let e: unknown = "capture failed";
     try { e = (JSON.parse((g.out.content[0] as { text: string }).text) as { error?: string }).error ?? e; } catch { /* default */ }
-    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after_error: e }) };
+    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after_error: e, ...(fallback ? { capture_after_fallback: fallback } : {}) }) };
   }
   return out;
 }
@@ -531,7 +562,7 @@ tool("capture_burst", "Capture a contact sheet",
   "Watch something happen: capture frames tiles (default 8) interval_ms apart (default 250) into ONE contact sheet image, in " +
   "time order, left to right then top to bottom. Each tile is shrunk to max_width (default 320). Use it for animations, " +
   "loading progress or whether a held key moves the character, instead of many capture calls. Late frames are skipped, " +
-  "not bunched; tiles[] in the reply has each tile's actual time and rectangle. A sheet is NOT a single game image: do not " +
+  "not bunched; frames[] in the reply has each tile's actual time and rectangle. A sheet is NOT a single game image: do not " +
   "click coordinates read off it (capture once more first). Other tools keep working while it runs. Needs a vinput build " +
   "with capture output support in the game.",
   {

@@ -142,7 +142,7 @@ static const char* kNoConfidence = "\"ocr_confidence\":null,\"ocr_confidence_not
 static Reply CmdOcr(DWORD pid, const Args& a) {
     bool autoScale; std::string err; auto scales = ParseScales(GetOpt(a, "scale", "1"), autoScale, err);
     if (scales.empty()) return Fail(err);
-    Frame f; if (!Grab(pid, a, f, err)) return Fail(err);
+    Frame f; if (!Grab(pid, a, f, err, true)) return Fail(err);
     std::vector<vi_text::Line> lines; std::string lang;
     DWORD t0 = GetTickCount();
     if (!OcrOnce(f, scales[0], a, lines, lang, err)) {
@@ -151,7 +151,7 @@ static Reply CmdOcr(DWORD pid, const Args& a) {
     }
     if (HasOpt(a, "tiles") && !OcrTiles(f, scales[0], a, lines, lang, err)) return Fail(err);
     const bool words = !HasOpt(a, "lines-only");
-    std::string j = "{\"ok\":true,\"w\":" + std::to_string(f.img.w) + ",\"h\":" + std::to_string(f.img.h) + ",\"origin_x\":" + Num(f.ox) + ",\"origin_y\":" + Num(f.oy) +
+    std::string j = "{\"ok\":true,\"capture_space_updated\":false,\"w\":" + std::to_string(f.img.w) + ",\"h\":" + std::to_string(f.img.h) + ",\"origin_x\":" + Num(f.ox) + ",\"origin_y\":" + Num(f.oy) +
         ",\"client_w\":" + std::to_string(f.clientW) + ",\"client_h\":" + std::to_string(f.clientH) + ",\"method\":\"" + f.method + "\",\"lang\":\"" + JEsc(lang) +
         "\",\"scale\":" + Num(scales[0]) + ",\"preprocess\":\"" + JEsc(GetOpt(a, "preprocess", "none")) + "\",\"ocr_ms\":" + std::to_string(GetTickCount() - t0) + "," + kNoConfidence + ",\"line_count\":" + std::to_string(lines.size());
     std::wstring text; for (auto& l : lines) { if (!text.empty()) text += L"\n"; text += l.text; }
