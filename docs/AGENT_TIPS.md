@@ -85,6 +85,26 @@ are the MCP tools in [`mcp/README.md`](../mcp/README.md).
 - Each decision costs a round trip (a capture-view-decide loop took 5 s median on a real run, about 75 m of travel in a
   car). Prefer slow, safe moves in real-time games, and use `capture_after` to cut the loop.
 
+## Sequences, staggered pads and clicking from a screenshot
+
+- **A fixed key routine is one job, not many calls.** `key_sequence steps:[{action:"hold",key:"w+space",ms:1500},
+  {action:"wait",ms:100},{action:"key",key:"d",ms:300}]` returns a `job_id` at once; follow it with `job_status` (it shows the
+  current step) and stop it with `job_cancel`, which releases the active chord. Pressing a key a later step uses cancels the rest.
+- **Menus that need the stick first, then the button.** `pad_timeline` states are complete snapshots and take `buttons` and a
+  `phase` label; `stagger_ms: 60` makes a new button / trigger press wait until the movement stick has been published (and, with
+  frame pacing, a later frame). `lt` / `rt` also work inside `buttons` (`"a+lt"`). Check the result on screen: the receipt
+  says what vinput published, not what the game did.
+- **After `attach`, wait for the first action to show.** `ok:true` means the hooks, window and queue were ready, not that the
+  game or its menu is. The first key can still land before the game polls.
+- **Do not leave `isolate` off.** `config isolate:false` lets the user's real keyboard and mouse into a background game. If you
+  need it, bound it: `for_ms: 1000` restores isolation inside the game by itself.
+- **Capture-space coordinates go stale on a resize or retarget.** vinput refuses `capture_space:true` clicks then (the map belongs
+  to one window and one client size); `coord_space:"capture"` uses this server's remembered mapping and cannot notice. Either way,
+  take a fresh single-frame `capture` and read the coordinates again. A black capture next to a second window of the same
+  process (see `capture_diagnostics`) may mean the picture is drawn in that other window; the CLI's `config hwnd=0x...`
+  selects it (the MCP `config` tool does not expose `hwnd`).
+- **A retarget can be refused while input is held.** `release`, wait for the game's queue to progress (`attach`/`status`), retry.
+
 ## When the user is at the keyboard
 
 vinput keeps the user's real mouse and keyboard out of a background game. When the user activates the game window

@@ -34,6 +34,11 @@ other foreground-taking tools on your machine use, or they use `build\foreground
 | `run_doctortest.ps1`, `run_pipesecuritytest.ps1`, `run_hwndownershiptest.ps1`, `run_hostselecttest.ps1`, `run_sentinel*test.ps1`, `run_profiletest.ps1` and the other `vi_suiteplan.ps1` cases | read-only diagnostics, pipe ACLs, window ownership and host selection, focus sentinels, per-game profiles |
 | `run_clicktest.ps1`, `run_activatetest.ps1`, `run_keytest.ps1`, `run_tracetest.ps1`, `run_movetest.ps1` | hover-gated clicks, focus shims, key names / chords / mouse buttons, per-API key tracing, relative and raw mouse motion |
 | `run_ownerinputtest.ps1`, `run_chordtest.ps1` | the user's real mouse / keyboard in a game vinput drives: pass-through while the game is the real foreground (the foreground predicate is faked with `VINPUT_TEST_HOOKS=1` + `config test_realfg`; real input is a window message posted from outside vinput), the virtual cursor standing down until the next agent command, the foreground guard not handing focus away, background isolation unchanged; Ctrl / Shift chords arriving as `WM_CHAR` control / capital characters. **The true OS foreground check is not covered here** (needs a live check with a real click) |
+| `run_cursorguardtest.ps1`, `run_physicalreaderstest.ps1`, `run_chartranslatetest.ps1`, `run_ditypelifetimetest.ps1` | cursor guard (every hooked cursor API against lower spies that absorb the write; old-product red controls), physical keyboard / mouse / raw / DirectInput reader masking and the `isolate=false --for` deadline, legacy character translation from the posted-key snapshot, DirectInput device-type lifetime. `run_cursorguardtest.ps1` can end `not_measured` (physical activity contaminated its native control), which the suite plan reports as such |
+| `run_capturescopetest.ps1`, `run_capturescopecompattest.ps1`, `run_capturediagnosticssurrogatetest.ps1` | screenshot-coordinate binding to the adopted window lifetime and client geometry, the refusal of an older DLL, and the `capture_diagnostics` fields against known-source surrogate fixtures |
+| `run_wndprocretargettest.ps1`, `run_wndprocawtest.ps1`, `run_retargetquiescencetest.ps1`, `run_dialogtokentest.ps1` | per-window WndProc binding across retargets, A/W window-procedure forwarding, refusal of retargets while owned input has not drained, dialog / window-class tokens |
+| `run_selfrawtest.ps1`, `run_hostselfrawtest.ps1` | raw messages an in-process payload posts to its own window (private envelope, backpressure, expiry) and a host-side consumer. They show what the synthetic consumers received, not that a real game accepts such packets |
+| `run_padphasetest.ps1`, `run_padtriggerstest.ps1`, `run_keysequencetest.ps1`, `run_readinesstest.ps1` | pad-timeline phases and `--stagger-ms`, `lt` / `rt` aliases, async key sequences (`seq`), the `readiness` handshake and `inject --hooks-only` |
 | `run_overlaycapturetest.ps1` | capture of a DDraw-wrapper style game (game window black or stale, picture in a separate `...PresentationWindow`), x64 and x86 |
 | `run_capturetest.ps1`, `run_nativecapture.ps1` | capture regions and frame waits; native D3D12 / OpenGL / Vulkan capture (BGRA, RGBA, R10G10B10A2, RGBA16F; x64 / x86; AppContainer), pixel-exact pattern decode, 50 resizes per API, late-injection refusal for Vulkan |
 | `run_xinputtest.ps1` | XInput pad 0: buttons, sticks, triggers, durations, hold, off, Guide via `XInputGetStateEx` |
@@ -87,6 +92,22 @@ Fix pass after the Cities: Skylines field test (owner input, chords, placement f
 | NOT MEASURED | the true OS foreground check for owner input (the test fakes the predicate; needs a real click by the user); Unity text-field chords beyond the one field above |
 
 The foreground suites (`run_foreground_suite.ps1`) were not run for this snapshot.
+
+## Status of the sync with the reviewed core (not a result)
+
+This branch merges the vinput core reviewed up to dev commit bceb8b4 (cursor guard and physical-input isolation, screenshot
+coordinate binding, per-window WndProc binding, retarget input drain, readiness, pad stagger and trigger aliases, async key
+sequences, capture diagnostics) into the public tree. What was measured on the merged tree: `build.bat` x64 + x86 completed with 0
+warnings and 0 errors; every new fixture source compiles with `/W4 /WX` (x64); the MCP server builds and its offline tests pass
+(`npm test`). **No native fixture, suite plan, gate or live game has been run on the merged tree**, so none of the suites in the
+rows above has a result for it, and `run_ownerinputtest.ps1` and `run_chordtest.ps1` have not been re-run against the merged
+foreground logic (the Ctrl / Shift chord case is now served by the core's snapshot-based character translation). Run
+`verifyun_selftest.ps1` before relying on any of it.
+
+Open items carried from the dev review, not fixed here: a payload's posted `WM_INPUT` can be served to a game that still ignores
+it (not reproduced or fixed in a real game); a game's window procedure falls back to `DefWindowProc` if its binding witness is lost
+(repair pending); `ClipCursor` is virtual even while you play the game; Fallout-style resize / freeze after a human alt-tab is
+unmeasured. See the README's *Cursor guard and physical input*.
 
 ## Real games
 

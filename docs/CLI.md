@@ -8,7 +8,7 @@ JSON). Refusals by the anti-cheat check exit with code 4 and carry `"anticheat_r
 ## Reference
 
 ```
-vinput inject --pid N [--dll PATH]
+vinput inject --pid N [--dll PATH] [--hooks-only[=true|false]]
 vinput launch (--exe PATH | --steam APPID --wait-exe NAME.exe | --aumid PFN!AppId) [--args "..."] [--wait-exe NAME.exe]
               [--lock FILE] [--lock-retry 60] [--lock-max-wait S] [--timeout 240] [--settle 5] [--fg-guard 5] [--early] [--cwd DIR]
               [--dll PATH] [--no-inject] [--owner NAME] [--claim-ttl 300]
@@ -19,28 +19,31 @@ vinput --owner NAME --pid N claim [--ttl 300] | unclaim
 vinput --pid N status | ping | log | activate | release | restore
 vinput doctor --pid N [--key KEY]               read-only diagnostics; one JSON object
 vinput --pid N waitexit [--timeout MS]          block until the process exits; reply has exit_code (any pid, injected or not)
+vinput --pid N readiness [--wait-ms 1000] [--hooks-only[=true|false]]    read-only: hook_ready / window_ready / queue_ready
 vinput --pid N key <combo> [ms] [--count N] [--gap ms]     combo: a, enter, esc, space, up, f1, ctrl+s, 0x2D, vk45 ...
 vinput --pid N down <combo> | up <combo> | hold <combo> <ms>
               timed key / hold / pad / pulse / pad-ramp / pad-timeline accept [--async] [--replace]
 vinput --pid N jobs | job-status ID | job-cancel ID
+vinput --pid N seq <file> [--replace=true|false]          keyboard sequence (alias: sequence) as one background job
 vinput --pid N pulse <combo> <ms> [--duty 50] [--period-ms 100]
 vinput --pid N hold-while <combo> --until-text TEXT [--timeout-ms 5000] [--region R] [--exact] [--fuzzy N]
 vinput --pid N pad-hold-while <buttons> [--lx N ...] --until-text TEXT [--timeout-ms 5000]
 vinput --pid N pad-ramp <lx|ly|rx|ry|lt|rt> <from> <to> <ms> [--lx N ...] [--buttons B] [--pacing frames|time] [--end-hold-ms N]
-vinput --pid N pad-timeline <states.json> [--ms N] [--pacing frames|time] [--strict-frames] [--end-hold-ms N]
+vinput --pid N pad-timeline <states.json> [--ms N] [--pacing frames|time] [--strict-frames] [--end-hold-ms N] [--stagger-ms 0..1000]
 vinput --pid N type "text" [--delay ms] [--keys]           WM_CHAR text; --keys = real key presses per character
 vinput --pid N mouse <x> <y> [--norm] [--capture-space] [--steps N]
 vinput --pid N move <dx> <dy> [--steps N] [--raw]          relative (raw / DirectInput deltas, mouse-look)
 vinput --pid N click [left|right|middle|x1|x2] [<x> <y>] [--norm] [--capture-space] [--count N] [--ms 60]
               [--di-poll-timeout-ms N] [--di-release-timeout-ms N]
 vinput --pid N wheel <delta>
-vinput --pid N pad <a+b+x+y+lb+rb+start+back+up+down+left+right+ls+rs+guide|none> [ms] [--lx N --ly N --rx N --ry N --lt N --rt N] [--hold]
+vinput --pid N pad <a+b+x+y+lb+rb+lt+rt+start+back+up+down+left+right+ls+rs+guide|none> [ms] [--lx N --ly N --rx N --ry N --lt N --rt N] [--hold]
 vinput --pid N pad off                          stop overriding pad 0
 vinput --pid N capture <out.png> [--method auto|native|swapchain|printwindow] [--after-frames N] [--region x,y,w,h]
               [--scale 0.05..1 | --max-width N] [--format png|jpeg] [--quality 1..100]
 vinput --pid N capture-burst <sheet.png> [--frames 8] [--interval-ms 250] [--columns 4] [--max-width 320] [--format png|jpeg]
 vinput --pid N wait-change [--region x,y,w,h] [--timeout S]
 vinput --pid N trace key <key>
+vinput --pid N config isolate=false --for 1000                  physical input passes for 1..120000 ms, then isolation is restored
 vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true nofullscreen=true keepvisible=true vk=on|off
                       cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off hwnd=0x...
                       edge_margin=8 fullscreen=borderless|refuse
@@ -55,7 +58,7 @@ vinput --pid N scroll N [X Y] [--horizontal]
 vinput --pid N drag x1 y1 x2 y2 [--ms 300] [--button B]
 vinput --pid N placement-drag x1 y1 x2 y2 [--steps 15] [--ms 300] [--hold-ms 60] [--dwell-ms 200] [--poll-timeout-ms 1000] [--button B] [--async]
 vinput --pid N script <file> [--continue]
-vinput --pid N foreground                       hand-off only: really bring the game to the front
+vinput --pid N foreground [--lease-ms 30000]    hand-off only: really bring the game to the front and grant a foreground lease (1..300000 ms)
 vinput sysinput <vk>                            test only: one OS-level SendInput key (the shared keyboard)
 ```
 
@@ -77,8 +80,77 @@ available; fields it cannot read are `null`, never guessed. `doctor --pid N --ke
 game acted; check a capture or `wait-change`.
 
 Counters are cumulative since injection: compare snapshots taken around an action.
-A program's own **target-side `SendInput` remains real OS input**: vinput's fake focus and virtual keys do not redirect it into the game, and
-`sysinput` has the same shared-input restriction, so use those only while nobody else is using the machine.
+`sysinput` is a CLI-side, real OS-level `SendInput` into the shared keyboard: it is not redirected into the game and is not
+covered by the cursor guard, so use it only while nobody else is using the machine. A program running *inside* the game that calls
+`SendInput`, `mouse_event`, `SetCursorPos` or `ClipCursor` is handled by the cursor guard (below), not forwarded blindly.
+
+## Readiness
+
+`inject` waits up to five seconds for the keyboard / focus hooks, an adopted window and a message queue that is making
+progress, and returns a `readiness` object: `hook_ready`, `window_ready`, `queue_ready`, `readiness_version` and the reason
+for a failure. `inject` on an already injected PID repeats the check. `vinput --pid N readiness [--wait-ms 0..10000]`
+(default 1000) is the read-only form. `--hooks-only` (`--hooks-only=true`) checks only the hooks and does not wait for a
+window: for suspended or window-less setup (`launch --early` uses it before resuming its child, then checks full
+readiness); `--hooks-only=false` keeps the full handshake; the flag takes exactly `true` or `false`, with `=`.
+`ping` keeps its meaning (the pipe answers). Neither command shows that the game, or a program inside it, has finished
+starting or accepted an action: `application_ready` is always `null`. Verify the first action on screen.
+
+The first key / `type` or mouse-press command arms each adopted window by observing its queue before any input is
+injected; a queue that is stopped fails arming without a press. Later commands keep their normal hover, render and polling
+deadlines, and changing the adopted window arms again. Gamepad jobs and release / up cleanup skip the arming check. A first
+`seq` can spend up to five seconds before admission; an armed one returns its job ID immediately.
+
+## Cursor guard and physical input
+
+**Cursor guard.** Once its hooks are armed, vinput hooks `SetCursorPos`, `SetPhysicalCursorPos`, `ClipCursor`, `GetClipCursor`,
+`SendInput`, `mouse_event`, `GetCursorPos` and `GetPhysicalCursorPos` in the game. A position write or injected input from
+the game reaches the real desktop only when the game owns the real foreground (two independent foreground queries must agree)
+**and** either fresh hardware input arrived in its window within the last 300 ms or a foreground lease is active
+(`vinput --pid N foreground`, which really takes the foreground; the lease expires after `--lease-ms`, default 30000). `config cursor=virtual` forces the
+virtual cursor even then. Otherwise the call is virtualised (the game sees its own virtual position) or refused, and counted.
+A newer accepted cursor command from the agent (`mouse`, `move`, `click`, `mousedown`, `placement-drag`) re-arms the virtual
+position after a human takeover; read-only and rejected commands do not.
+
+`ClipCursor` is **always virtual**, also when you are playing the game in front: your real cursor is not confined to its
+window, and `GetClipCursor` reports the game's virtual clip. A clip left on the desktop before vinput was injected is never
+cleared. `status.cursor_guard` reports hook readiness and the live entry coverage, the foreground witnesses, why the last write
+was allowed or not, and per-API blocked / virtualised / forwarded counters; `real_cursor_writes_leaked` is `null`
+(desktop attribution is not measured) and zero counters do not cover a pre-hook call, a direct syscall or a PID that was not
+injected. `keybd_event` is not hooked. Input commands refuse a DLL without the cursor guard or with unarmed hooks.
+
+**Physical input isolation.** While `isolate` is on (default), `GetAsyncKeyState` / `GetKeyState` / `GetKeyboardState`,
+`GetRawInputData` / `GetRawInputBuffer` and DirectInput readers return nothing from your physical devices unless this process
+owns the verified real foreground; caller buffers are filled from private storage and every out pointer is validated. Virtual
+input and packets the game posts to itself stay separate. Window messages from your real keyboard and mouse are dropped in the
+game's window procedure while isolating. `config isolate=false` passes physical keyboard and mouse input even in the
+background and also stops zeroing the physical gamepad state while the game is in the background (`status.physical_input.warning`
+is set for as long as it holds).
+
+```
+vinput --pid N config isolate=false --for 1000    # JSON: {"cmd":"config","isolate":false,"for_ms":1000}
+```
+
+`--for MS` (alias `--for-ms`, 1..120000, only with `isolate=false`) makes the opt-out bounded: the deadline is kept inside the
+game on a monotonic clock, evaluated by every reader, `status` and the monitor thread, and restores `isolate=true` even if
+the CLI exits. `status.physical_input` shows `remaining_ms`, `expired_count`, the time spent in pass-through and the age of the
+last explicit setting. `isolate=true` cancels a lease; `isolate=false` without `--for` is indefinite. A duplicate or
+contradictory request changes nothing. The CLI first asks the target for `isolation_deadline_version`: an older DLL, which would
+ignore the deadline and turn it into an indefinite opt-out, is refused and nothing is sent.
+
+**Raw input from inside the game.** `status.self_raw` and `status.posted_input` report target-origin raw-message support and
+bounded backpressure. A `PostMessageA/W(WM_INPUT)` the game or an in-process payload posts to itself is admitted through a private
+envelope that is unwrapped inside an ordinary `DispatchMessageA/W` while outside input stays isolated; at most 1024 envelopes
+stay pending for up to 10 seconds, and `self_raw.expired`, `capacity_rejected` and `post_failed` count what was not delivered.
+`SendMessage`, direct raw-queue consumers, filters that exclude the envelope message and decoding a handle after its dispatch
+returned are outside this route. Served packets do not show that a game acted on them: a game can read the packet and still
+ignore it, and that case is not fixed.
+
+**Legacy messages and characters.** Posted keyboard / mouse messages go through a bounded ring (512 entries) that refuses
+admission when full instead of replacing live entries; a refusal never sends an unmarked message and `type` stops at the first
+failed publication, returning requested / accepted UTF-16 units and `post_error`. While isolating, the game's `TranslateMessage`
+builds characters from the key state captured when each key was published (Windows 10 1607 or newer, ordinary
+`TranslateMessage` then `DispatchMessageA/W` pump), so `ctrl+a` and `shift+a` arrive as the chord they are. Dead keys, IME and
+Alt+numpad are not guaranteed: use Unicode `type` for exact text.
 
 ## Launching
 
@@ -151,6 +223,11 @@ A command with no owner is refused by a claimed game too. `status` and `list` ar
   polling increase shows the game's polling code did not read the key. Counters prove API delivery, not that the game
   performed an action.
 - `activate` enables the virtual focus shims only; it does not request the real foreground.
+- **Window binding.** Each adopted window keeps its own original window procedure and A/W encoding. `config hwnd=...` refuses to
+  re-adopt a window whose old hook chain it cannot verify (`adoption_refused:true` and a reason), keeping the current target and
+  settings. A target change is also refused while held virtual input, queued legacy messages or owned translation still need the
+  old window; `status.retarget_quiescence` says which. For the same PID run `release`, then `readiness --wait-ms 2000`, then repeat
+  `config hwnd=...`. `status` reports `wndproc_binding_ready`, adoption refusals and unbound callbacks.
 - `config fakefocus=false` stops the focus API overrides and deactivation-message suppression; `isolate` separately
   controls hiding real background input; `keepvisible=false` stops vinput restoring a minimised background game.
 - A game whose window procedure has never seen `WM_ACTIVATEAPP(TRUE)` (started in the background) is sent the activation
@@ -193,6 +270,23 @@ blocks other commands: another client can capture or press an unrelated key duri
   `[{"at_ms":0,"ly":20000},{"at_ms":200,"lx":16000,"ly":20000},{"at_ms":500}]` (axes not given are 0; at most 256 states,
   `at_ms` from 0, strictly increasing). Overdue states are coalesced and reported (`skipped_states`,
   `max_lateness_ms`); `--strict-frames` fails instead. `--ms N` runs past the last state.
+- `seq flight.vin` (alias `sequence`) validates the whole file, then returns a background job ID at once. Lines are `hold CHORD MS`,
+  `key CHORD MS`, `wait MS` or `sleep MS`; `#` starts a comment, and a file with `hold w+space 1500`, `wait 100`, `key d 300` holds
+  W and Space together, releases them, waits and presses D. `job-status` reports the current zero-based step and its source line;
+  `job-cancel` releases the active chord in reverse press order. The keys of all later steps are reserved too, so pressing one by
+  hand cancels the rest. A conflict with other work fails before any input; `--replace=true` replaces it, `--replace=false`
+  (default) keeps it. Limits: 32768 source bytes, 1024 steps, 4096 transitions, 118000 ms of declared timing; the 120-second
+  accepted lifetime cap still applies. After a lost reply the result is uncertain (`delivery_unknown`): inspect `jobs` instead of
+  resubmitting.
+- `pad a+lt 300` presses A and fully presses LT (255) for 300 ms. `lt` and `rt` are case-insensitive button-list aliases for the
+  trigger axes (also in `pad-ramp --buttons` and a timeline `"buttons"` field) and add no XInput button bits; a partial trigger is
+  `pad a 300 --lt 128`. An alias together with an explicit value for the same trigger is rejected, in either field order.
+- `pad-timeline` states are complete snapshots (omitted axes and buttons are off) and may carry `buttons` and a `phase` label
+  (1..32 letters, digits, `_ . -`). `--stagger-ms N` (0..1000, `pad-timeline` only) publishes a movement-stick change first, waits
+  at least N ms and (when native Present checkpoints are observed) a later checkpoint, and only then publishes a newly pressed
+  button or trigger; releases happen immediately. Guard waits shift later deadlines to keep the following dwell; the 120-second cap
+  remains. `--pacing time` on a target without frames staggers by time only. The job receipt reports `phase_publications` and
+  `last_published_pad`: what was published, not that the game used it. An older DLL is refused before any input.
 - `hold-while w --until-text "VILLAGE"` (or `pad-hold-while`) holds, watches the screen with OCR, and cancels the hold on
   success, timeout or error. The text appearing is an observation, not proof the hold caused it.
 
@@ -211,6 +305,19 @@ writes a JPEG; the format flag decides the container, not the file extension. Re
 `--capture-space` coordinates use that saved image's mapping. `hash` stays the hash of the unscaled source pixels. A game
 injected with an older DLL is refused these options (`status.capture_output_version` < 1) instead of silently ignoring
 them.
+
+**Screenshot coordinates.** `--capture-space` coordinates are bound to the adopted window lifetime and client geometry that
+produced the saved capture. After a resize or retarget they are refused (`capture_scope_reason`, `capture_space_valid:false`):
+save a fresh single-frame capture. Hashes and `capture-burst` do not refresh the map. Coordinate input needs
+`capture_scope_version:1` in the loaded DLL (older ones are refused; a positioned `mouseup` still attempts coordinate-free cleanup,
+so check its cleanup receipt). `--norm` wins when both coordinate modes are given. The guard compares the current client size and
+observed resize / lifecycle events; a resize away and back that an outer window hook hid is not detected.
+
+**Capture diagnostics.** A `PrintWindow` reply includes `capture_diagnostics`: the input and source HWND, class and default caption,
+client size and a bounded list of other same-process windows, plus whether the full client image (before any crop or scaling) is
+black or one flat colour. Native renderer captures report the source window as unavailable. A black frame beside another
+proxy-class window is an observation; candidate metadata alone does not show a usable renderer source, and vinput does not change
+its capture or input target on its own (`config hwnd=0x...`).
 
 `capture-burst sheet.png --frames 8 --interval-ms 250 --columns 4 --max-width 320` saves up to 16 captures taken
 `interval-ms` apart as one contact sheet, in time order. Late slots are skipped, not bunched; `tiles[]` reports each
