@@ -118,6 +118,12 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
 - **84eea6a** a lost window-binding witness no longer drops the game's window procedure to `DefWindowProc`: GUI messages
   still reach it, and input to that window is quarantined. Dev evidence: 12-case matrix 126 FAIL occurrences -> 0;
   retarget quiescence 814 / 0. Only targeted suites ran on dev for this commit.
+- Gate on the merged tree (08d4fdf, 2026-11-04): `build.bat` x64 + x86 0 warnings; background plan via
+  `verify\run_selftest_parallel.ps1`: all 85 cases passed (70 in the first parallel run, the rest in reruns after the
+  fixes in that commit; `run_actest.ps1` 26 PASS / 0 FAIL; `run_capturediagnosticssurrogatetest.ps1` 466 PASS / 0 FAIL
+  when run alone). `capture_diagnostics` failed twice in a parallel lane on a complete-window-enumeration check, on a
+  different check each time, while other windows were being created and destroyed. Run it alone or in the serial lane.
+  `mcp`: `npm test` 19 files PASS. Foreground suites not run.
 - Merged by hand into this tree (it carries the anti-cheat refusal and other public-only code); five conflicts resolved
   in `vinput_cli.cpp` / `vinput_core.cpp`. The dev-only fixtures (`vi_nativeclip`, `vi_wndquarantine`, `vi_launch_*`)
   are copied into `test/` but are not yet part of `build.bat` or `vi_suiteplan.ps1`.
