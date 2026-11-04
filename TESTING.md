@@ -151,6 +151,10 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   `run_ocrmaptest.ps1` 10 / 0 and `-UpscaleOnly` 36 / 0; `run_unitymousetest.ps1` 24 / 0; background plan (87 cases):
   84 passed, 3 not_measured (same three as before). `owner_input` failed once with the real cursor moving and passed on
   the serial-lane rerun; it needs an idle desk.
+- Batch fe867d2..7ab27ff (2026-11-04, MCP only, native binaries unchanged from 0.2.1): sized controller action
+  images, trigger/stick ranges in tool fields, `launch` `arm_pad` + `claim_ttl_s` and a `claim` tool, pad returns in
+  compact `status`, bounded previews for oversized bursts, and a read-only `doctor` tool. Gate: `mcp` `npm test`
+  34 files PASS; `doctor` against a real, uninjected process returned `status_available:false` and did not inject.
 
 ## Real games
 

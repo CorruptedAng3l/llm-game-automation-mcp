@@ -18,7 +18,7 @@ function crc32(buf: Buffer, start = 0, end = buf.length): number {
 
 export class PngError extends Error {}
 
-export function decodePng(buf: Buffer): Image {
+export function decodePng(buf: Buffer, limits?: { maxPixels: number; maxDimension: number }): Image {
   if (buf.length < 33 || !buf.subarray(0, 8).equals(SIG)) throw new PngError("not a PNG file (bad signature)");
   let pos = 8, width = 0, height = 0, bitDepth = 0, colorType = -1, interlace = 0, sawEnd = false;
   const idat: Buffer[] = [];
@@ -40,8 +40,11 @@ export function decodePng(buf: Buffer): Image {
   const channels = ({ 0: 1, 2: 3, 4: 2, 6: 4 } as Record<number, number>)[colorType];
   if (!channels) throw new PngError(`unsupported PNG: color type ${colorType} (only grayscale, gray+alpha, RGB and RGBA are supported)`);
   if (!sawEnd || !idat.length) throw new PngError("truncated PNG (no image data / IEND)");
-  if (!width || !height || width * height > 64_000_000) throw new PngError(`unsupported PNG size ${width}x${height}`);
-  const raw = inflateSync(Buffer.concat(idat));
+  if (limits && (!Number.isSafeInteger(limits.maxPixels) || limits.maxPixels < 1 || limits.maxPixels > 64_000_000 ||
+      !Number.isSafeInteger(limits.maxDimension) || limits.maxDimension < 1)) throw new PngError("invalid PNG decode limits");
+  if (!width || !height || width * height > (limits?.maxPixels ?? 64_000_000) ||
+      (limits && (width > limits.maxDimension || height > limits.maxDimension))) throw new PngError(`unsupported PNG size ${width}x${height}`);
+  const raw = inflateSync(Buffer.concat(idat), limits ? { maxOutputLength: (width * channels + 1) * height } : undefined);
   const stride = width * channels;
   if (raw.length < (stride + 1) * height) throw new PngError("corrupt PNG (image data shorter than the header says)");
   const out = Buffer.alloc(width * height * 4);

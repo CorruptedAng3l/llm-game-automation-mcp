@@ -73,6 +73,27 @@ export function diagnoseFrames(s: Obj): FrameDiag {
   return d;
 }
 
+/** Completed virtual XInput returns, not key-trace reads or game acceptance. */
+function padReturns(s: Obj): Obj | undefined {
+  const p = s.virtual_pad;
+  if (s.pad_readiness_version !== 1 || !p || typeof p !== "object" || Array.isArray(p)) return;
+  const v = p as Obj;
+  const counts = ["publication", "virtual_returns", "standard_returns", "extended_returns", "native_calls_bypassed", "last_return_publication"];
+  const uint64 = (n: unknown) => typeof n === "string" && /^(0|[1-9][0-9]{0,19})$/.test(n) &&
+    (n.length < 20 || n <= "18446744073709551615");
+  if (!counts.every((k) => uint64(v[k])) || typeof v.active !== "boolean" ||
+      typeof v.capabilities_virtualized !== "boolean" || typeof v.device_arrival_announced !== "boolean" ||
+      v.application_ready !== null) return;
+  if (v.virtual_returns === "0") {
+    if (v.last_return_age_ms !== null || v.last_return_neutral !== null) return;
+  } else if (typeof v.last_return_age_ms !== "number" || !Number.isSafeInteger(v.last_return_age_ms) ||
+      v.last_return_age_ms < 0 || typeof v.last_return_neutral !== "boolean") return;
+  const out: Obj = { active: v.active };
+  for (const k of counts) out[k] = v[k];
+  for (const k of ["last_return_age_ms", "last_return_neutral", "capabilities_virtualized", "device_arrival_announced", "application_ready"]) out[k] = v[k];
+  return out;
+}
+
 /** The essentials of a status reply (about 0.5 KB instead of 3 KB) plus warnings; `verbose` on the tool gives the raw reply. */
 export function compactStatus(s: Obj): Obj {
   const c = (s.counters ?? {}) as Record<string, unknown>;
@@ -101,6 +122,8 @@ export function compactStatus(s: Obj): Obj {
   // Native published VK state, including mouse-button VKs; absent/malformed is unknown.
   if (Array.isArray(s.virtual_down) && s.virtual_down.every((v) => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 255))
     out.virtual_down = [...s.virtual_down];
+  const pad = padReturns(s);
+  if (pad) out.virtual_pad = pad;
   if (claim?.active) out.claimed_by = claim.owner;
   // the owner (human) is using the game window: real input passes through and the virtual cursor stands down until the next agent command
   if (typeof s.cursor_effective === "string") out.cursor_effective = s.cursor_effective;
