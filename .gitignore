@@ -22,3 +22,4 @@ _scratch*/
 .vs/
 .vscode/
 *.user
+verify/_out/

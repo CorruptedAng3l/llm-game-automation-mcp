@@ -136,6 +136,15 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   passive desktop changed during the run). Run 3 passed 77; `di_type_lifetime` missed a startup token under
   parallel load and passed on rerun together with the 5 lane cases it blocked; `owner_input` failed once when the
   real cursor moved during the run and passed 22 / 0 in the next. `run_actest.ps1` 26 PASS / 0 FAIL.
+- Controller batch a2eea77..b60a66d + ce8bb4f (2026-11-04): MCP `pad_move` (named directions, walk/run speeds,
+  screen-rotation compensation, optional smoothing, image after a settle delay), `pad_look` (caller-calibrated degree
+  turns), `pad_rotate` (stick circles/arcs for rotate prompts), `attach arm_pad` (neutral virtual pad before the first
+  press), a cold-XInput bypass while isolated, and completed-job replies without the misleading `accepted:false`.
+  Gate on the merged tree: `build.bat` x64 + x86 OK; `mcp` `npm test` 26 files PASS; `run_padreadinessnativetest.ps1`
+  20 PASS / 0 FAIL; `run_controllernativetest.ps1` 282 PASS / 0 FAIL; background plan (87 cases, new `pad_readiness`):
+  84 passed, 3 not_measured (`capture_diagnostics` by design; `cursor_guard`, `legacy_focus` with the desk in use).
+  `owner_input` failed once when the real cursor moved and passed on the serial-lane rerun.
+  These checks use synthetic XInput fixtures; behaviour in real games is a separate field test.
 
 ## Real games
 

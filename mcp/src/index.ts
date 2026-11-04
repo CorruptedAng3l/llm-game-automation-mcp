@@ -3,6 +3,7 @@
 // through vinput. Every tool runs the vinput CLI and returns its JSON reply verbatim, with "ok" surfaced as isError.
 // Offline games only: vinput injects a DLL and refuses targets with a known anti-cheat (see DISCLAIMER.md).
 import { sizeMismatchWarning } from "./launchsize.js";
+import { MOVE_DIRECTIONS, moveVector, smoothMoveStates, calibratedLook, rotateStick } from "./controller.js";
 import { closeSync, fstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,8 +15,9 @@ import { decodePng, encodePng } from "./png.js";
 import { compactStatus, configView, diagnoseFrames, tailLog } from "./status.js";
 import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
+import { completedJobView, isCompletedJobOutcome } from "./completedjob.js";
 
-const VERSION = "0.1.1";
+const VERSION = "0.2.0";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -25,6 +27,7 @@ type ToolReply = { content: Content[]; isError?: boolean };
 function reply(r: CliResult, extra?: Record<string, unknown>): ToolReply {
   let json = r.json;
   if (extra && json && typeof json === "object" && !Array.isArray(json)) json = { ...(json as object), ...extra };
+  json = completedJobView(json, r.ok);
   const content: Content[] = [{ type: "text", text: JSON.stringify(json) }];
   if (!r.ok && r.stderr) content.push({ type: "text", text: `vinput stderr:\n${r.stderr.slice(-4000)}` });
   return { content, isError: !r.ok };
@@ -178,16 +181,32 @@ tool("launch", "Launch a game",
 tool("attach", "Attach to a running game",
   "Inject vinput into an already running game by process id (32- and 64-bit). Returns the game's status. Refused with " +
   "anticheat_refused:true if the game or the machine has a known anti-cheat. Use list_targets to see games that already have vinput.",
-  { pid, claim: z.boolean().optional().describe("Claim the game for this MCP server (default false).") },
+  { pid, claim: z.boolean().optional().describe("Claim the game for this MCP server (default false)."),
+    arm_pad: z.boolean().optional().describe("Opt in to a neutral virtual XInput user0 contribution. Preserves existing holds/jobs by refusing busy state; this is not hotplug or glyph/application readiness. Default false."),
+    pad_wait_ms: z.number().int().min(0).max(2000).optional().describe("Only with arm_pad:true: bounded wait for an actual completed user0 virtual GetState/Ex return, default500ms. No game reaction is implied.") },
   async (a) => {
+    if (a.pad_wait_ms !== undefined && !a.arm_pad) return fail("pad_wait_ms requires arm_pad:true; nothing was sent");
     forgetExit(a.pid);
     const r = await runVinput(["inject", "--pid", String(a.pid)], 60000);
     if (!r.ok) return reply(r);
     if (a.claim) await runVinput([...at(a.pid), "claim", "--ttl", "3600"], 15000);
+    let padArm: unknown;
+    if (a.arm_pad) {
+      const p = await runVinput([...at(a.pid), "json", JSON.stringify({ cmd: "pad-arm", wait_ms: a.pad_wait_ms ?? 500 })], 10000);
+      if (!p.ok) return reply(p, { injected: true, pad_arm: p.json });
+      const j = p.json as { pad_readiness_version?: unknown; arm_accepted?: unknown; pad_armed?: unknown;
+        poll_observed?: unknown; neutral_return_observed?: unknown; superseded?: unknown } | null;
+      if (!j || j.pad_readiness_version !== 1 || j.arm_accepted !== true || typeof j.pad_armed !== "boolean" ||
+          typeof j.poll_observed !== "boolean" || typeof j.superseded !== "boolean" || j.pad_armed === j.superseded ||
+          (j.poll_observed ? typeof j.neutral_return_observed !== "boolean" : j.neutral_return_observed !== null) ||
+          (j.poll_observed && (!j.pad_armed || j.superseded)))
+        return fail("Injected target did not acknowledge neutral pad arming; use matching vinput DLL. No controller readiness is claimed.");
+      padArm = p.json;
+    }
     for (let i = 0; i < 50; i++) {
       const s = await runVinput([...at(a.pid), "status"], 15000);
       const hwnd = (s.json as { hwnd?: string }).hwnd;
-      if (!s.ok || (hwnd && hwnd !== "0x0") || i === 49) return statusReply(s, false, { injected: true });
+      if (!s.ok || (hwnd && hwnd !== "0x0") || i === 49) return statusReply(s, false, { injected: true, ...(padArm === undefined ? {} : { pad_arm: padArm }) });
       await new Promise((res) => setTimeout(res, 200));
     }
     return fail("unreachable");
@@ -434,10 +453,28 @@ const captureAfterSchema = z.union([z.boolean(), z.number().int().min(0).max(360
   "first (0 = capture immediately). The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
   "saving a capture round trip. Skipped when the action itself failed.");
 const DEFAULT_LOOK_FRAMES = 3;
+type PostActionObservation = { settle_ms_requested: number; attachment_epoch: number; action_state: string };
 /** Act-then-look: append the post-action frame to an action's reply. */
-async function look(pid: number, out: ToolReply, ca: boolean | number | undefined): Promise<ToolReply> {
+async function look(pid: number, out: ToolReply, ca: boolean | number | undefined, observe?: PostActionObservation): Promise<ToolReply> {
   if (ca === undefined || ca === false || out.isError) return out;
-  const session = captureSessionEpoch.get(pid) ?? 0;
+  const session = observe?.attachment_epoch ?? (captureSessionEpoch.get(pid) ?? 0);
+  const observation = observe ? { ...observe, settle_ms_elapsed: 0,
+    scope: "after successful CLI reply; ongoing jobs/holds may still be active; no application or rendered-frame guarantee" } : undefined;
+  const changed = () => (captureSessionEpoch.get(pid) ?? 0) !== session;
+  const attachmentChanged = () => {
+    let j: Record<string, unknown> = {};
+    try { j = JSON.parse((out.content[0] as { text: string }).text); } catch { /* keep original outcome if not JSON */ }
+    out.content[0] = { type: "text", text: JSON.stringify({ ...j,
+      capture_after_error: "target attachment changed before post-action capture", capture_after_observation: observation }) };
+    return out;
+  };
+  if (observation) {
+    if (changed()) return attachmentChanged();
+    const start = performance.now();
+    if (observation.settle_ms_requested) await new Promise<void>((res) => setTimeout(res, observation.settle_ms_requested));
+    observation.settle_ms_elapsed = Math.round(performance.now() - start);
+    if (changed()) return attachmentChanged();
+  }
   let g = await grabFrame(pid, { after_frames: ca === true ? DEFAULT_LOOK_FRAMES : ca });
   let fallback: Record<string, unknown> | undefined;
   // A number remains a strict Present request. Only the convenience boolean may
@@ -467,12 +504,12 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
   let j: Record<string, unknown> = {};
   try { j = JSON.parse((out.content[0] as { text: string }).text); } catch { /* keep empty */ }
   if (g.summary && !g.out.isError) {
-    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after: { ...g.summary, ...(fallback ? { fallback } : {}) } }) };
+    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after: { ...g.summary, ...(fallback ? { fallback } : {}), ...(observation ? { observation } : {}) } }) };
     for (const c of g.out.content) if (c.type === "image") out.content.push(c);
   } else {
     let e: unknown = "capture failed";
     try { e = (JSON.parse((g.out.content[0] as { text: string }).text) as { error?: string }).error ?? e; } catch { /* default */ }
-    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after_error: e, ...(fallback ? { capture_after_fallback: fallback } : {}) }) };
+    out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after_error: e, ...(fallback ? { capture_after_fallback: fallback } : {}), ...(observation ? { capture_after_observation: observation } : {}) }) };
   }
   return out;
 }
@@ -820,6 +857,7 @@ const asyncArg = z.boolean().optional().describe(
 const replaceArg = z.boolean().optional().describe("async: replace an overlapping job / held key instead of being refused.");
 /** Hint added to an accepted async reply. */
 function jobExtra(r: CliResult): Record<string, unknown> | undefined {
+  if (r.ok && isCompletedJobOutcome(r.json)) return undefined;
   const id = (r.json as { job_id?: unknown })?.job_id;
   return r.ok && typeof id === "string" ? { note: `running in the background as job ${id}: job_status to follow it, job_cancel to stop it` } : undefined;
 }
@@ -854,6 +892,18 @@ tool("type_text", "Type text",
     return reply(await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], (a.delay_ms ?? 30) * a.text.length + 60000));
   });
 
+const padCaptureArgs = {
+  capture_after: captureAfterSchema,
+  capture_settle_ms: z.number().int().min(0).max(5000).optional().describe(
+    "Extra timer delay after a successful CLI reply, before capture_after (default 0). Requires capture_after. Async jobs may still run and hold:true remains held; this does not wait for their completion."),
+};
+const captureSettleInvalid = (a: { capture_after?: boolean | number; capture_settle_ms?: number }) =>
+  a.capture_settle_ms !== undefined && (a.capture_after === undefined || a.capture_after === false);
+const padObservation = (a: { pid: number; capture_settle_ms?: number; async?: boolean; hold?: boolean }): PostActionObservation => ({
+  settle_ms_requested: a.capture_settle_ms ?? 0, attachment_epoch: captureSessionEpoch.get(a.pid) ?? 0,
+  action_state: a.async ? "async_job_may_be_running" : a.hold ? "held_until_changed" : "action_reply",
+});
+
 tool("pad", "Gamepad (XInput)",
   "Drive virtual XInput pad 0. buttons: '+'-joined names from a b x y lb rb start back up down left right ls rs guide, " +
   "or 'none'. Sticks -32768..32767, triggers 0..255. Held for ms (default 100), or until changed with hold:true. off:true " +
@@ -863,14 +913,16 @@ tool("pad", "Gamepad (XInput)",
     lx: z.number().int().min(-32768).max(32767).optional(), ly: z.number().int().min(-32768).max(32767).optional(),
     rx: z.number().int().min(-32768).max(32767).optional(), ry: z.number().int().min(-32768).max(32767).optional(),
     lt: z.number().int().min(0).max(255).optional(), rt: z.number().int().min(0).max(255).optional(),
-    hold: z.boolean().optional(), off: z.boolean().optional(), async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
+    hold: z.boolean().optional(), off: z.boolean().optional(), async: asyncArg, replace: replaceArg, ...padCaptureArgs },
   async (a) => {
-    if (a.off) return look(a.pid, reply(await runVinput([...at(a.pid), "pad", "off"], 30000)), a.capture_after);
+    if (captureSettleInvalid(a)) return fail("capture_settle_ms requires capture_after");
+    const observation = padObservation(a);
+    if (a.off) return look(a.pid, reply(await runVinput([...at(a.pid), "pad", "off"], 30000)), a.capture_after, { ...observation, action_state: "pad_override_off_reply" });
     if (a.async && (a.hold || !a.ms)) return fail("async needs ms (a bounded duration) and cannot be combined with hold");
     const r = await runVinput([...at(a.pid), "pad", a.buttons ?? "none", ...(a.ms ? [String(a.ms)] : []),
       ...opt("--lx", a.lx), ...opt("--ly", a.ly), ...opt("--rx", a.rx), ...opt("--ry", a.ry), ...opt("--lt", a.lt), ...opt("--rt", a.rt),
       ...opt("--hold", a.hold), ...opt("--async", a.async), ...opt("--replace", a.replace)], a.async ? 60000 : (a.ms ?? 0) + 60000);
-    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after, observation);
   });
 
 const axis = z.enum(["lx", "ly", "rx", "ry", "lt", "rt"]);
@@ -891,8 +943,10 @@ tool("pad_ramp", "Ramp a pad axis",
     ms: z.number().int().min(1).max(118000).describe("Ramp duration."),
     ...padConst, buttons: z.string().optional().describe("Buttons held during the ramp, e.g. 'a' or 'a+rb'."),
     end_hold_ms: z.number().int().min(0).max(10000).optional().describe("Hold the final value this long before releasing (default 0)."),
-    pacing: pacingArg, async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
+    pacing: pacingArg, async: asyncArg, replace: replaceArg, ...padCaptureArgs },
   async (a) => {
+    if (captureSettleInvalid(a)) return fail("capture_settle_ms requires capture_after");
+    const observation = padObservation(a);
     if ((a.axis === "lt" || a.axis === "rt") && (a.from < 0 || a.from > 255 || a.to < 0 || a.to > 255)) return fail("trigger ramps run 0..255");
     if (a[a.axis] !== undefined) return fail(`${a.axis} is the ramped axis; give it only as from / to`);
     const cmd: Record<string, unknown> = { cmd: "pad-ramp", axis: a.axis, from: a.from, to: a.to, ms: a.ms };
@@ -903,7 +957,7 @@ tool("pad_ramp", "Ramp a pad axis",
     if (a.async) cmd.async = true;
     if (a.replace) cmd.replace = true;
     const r = await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], a.async ? 60000 : a.ms + (a.end_hold_ms ?? 0) + 60000);
-    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after, observation);
   });
 
 const timelineState = z.object({
@@ -922,8 +976,10 @@ tool("pad_timeline", "Timed pad script",
   { pid, states: z.array(timelineState).min(1).max(256),
     ms: z.number().int().min(0).max(120000).optional(), end_hold_ms: z.number().int().min(0).max(10000).optional(),
     stagger_ms: z.number().int().min(0).max(1000).optional().describe("Wait at least this long after a stick change before a new button / trigger press (needs a vinput DLL with pad-timeline stagger)."),
-    pacing: pacingArg, strict_frames: z.boolean().optional(), async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
+    pacing: pacingArg, strict_frames: z.boolean().optional(), async: asyncArg, replace: replaceArg, ...padCaptureArgs },
   async (a) => {
+    if (captureSettleInvalid(a)) return fail("capture_settle_ms requires capture_after");
+    const observation = padObservation(a);
     if (a.states[0].at_ms !== 0) return fail("the first state must have at_ms 0");
     for (let i = 1; i < a.states.length; i++) if (a.states[i].at_ms <= a.states[i - 1].at_ms) return fail("at_ms must increase strictly from state to state");
     if (a.strict_frames && a.pacing === "time") return fail("strict_frames needs frame pacing");
@@ -937,7 +993,100 @@ tool("pad_timeline", "Timed pad script",
     if (a.replace) cmd.replace = true;
     const total = Math.max(a.ms ?? 0, a.states[a.states.length - 1].at_ms) + (a.end_hold_ms ?? 0);
     const r = await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], a.async ? 60000 : total + 60000);
-    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after, observation);
+  });
+
+
+tool("pad_move", "Move with the left stick",
+  "Move for ms using a named stick direction and walk 20000/run 32767 magnitude. Up=+LY and right=+LX; diagonals are normalized. " +
+  "Use screen_rotation_deg to compensate a calibrated camera mapping (+90 maps up to stick-right); camera changes require rechecking. " +
+  "These are screen-intent labels, not verified screen motion. Verify and calibrate with captures. " +
+  "Other pad controls are neutral; the finite action releases to neutral. smooth:true uses one time-paced ease-in/out timeline (ms >= 80); " +
+  "default false keeps a rectangular move. Native skipped-state/job receipts remain authoritative; smoothing cannot overcome a game's deadzone.",
+  { pid, direction: z.enum(MOVE_DIRECTIONS), ms: z.number().int().min(1).max(60000),
+    speed: z.enum(["walk", "run"]).optional().describe("walk=20000 (default); run=32767. These are stick magnitudes, not measured character speeds."),
+    screen_rotation_deg: z.number().min(-360).max(360).optional().describe("Clockwise rotation from intended screen direction to stick axes (default 0). +90 maps up to stick-right; 180 compensates inversion. Calibrate per camera view; no auto-detection."),
+    smooth: z.boolean().optional(), async: asyncArg, replace: replaceArg, ...padCaptureArgs,
+    capture_after: captureAfterSchema.default(0).describe("Default 0: return an image after the action reply and optional settle, without a Present wait. false disables it; true/numeric use the usual capture_after semantics."),
+    capture_settle_ms: padCaptureArgs.capture_settle_ms.describe("Extra nonblocking delay after the CLI reply before capture (default 100 ms for pad_move). Requires an enabled capture_after; async capture does not prove completion."), },
+  async (a) => {
+    if (captureSettleInvalid(a)) return fail("capture_settle_ms requires capture_after");
+    if (a.smooth && a.ms < 80) return fail("smooth moves need ms >= 80; use an unsmoothed short pulse or a longer move");
+    const observation = padObservation({ ...a, capture_settle_ms: a.capture_settle_ms ?? 100 }), speed = a.speed ?? "walk", vector = moveVector(a.direction, speed, a.screen_rotation_deg ?? 0);
+    let argv: string[], curve: Record<string, unknown>;
+    if (a.smooth) {
+      const { states, rampMs } = smoothMoveStates(vector, a.ms);
+      const cmd: Record<string, unknown> = { cmd: "pad-timeline", states_json: JSON.stringify(states), ms: a.ms, pacing: "time" };
+      if (a.async) cmd.async = true;
+      if (a.replace) cmd.replace = true;
+      argv = [...at(a.pid), "json", JSON.stringify(cmd)];
+      curve = { kind: "ease_in_out_samples", ramp_ms: rampMs, requested_states: states.length, pacing: "time" };
+    } else {
+      argv = [...at(a.pid), "pad", "none", String(a.ms), "--lx", String(vector.lx), "--ly", String(vector.ly),
+        "--rx", "0", "--ry", "0", "--lt", "0", "--rt", "0", ...opt("--async", a.async), ...opt("--replace", a.replace)];
+      curve = { kind: "rectangular" };
+    }
+    const r = await runVinput(argv, a.async ? 60000 : a.ms + 60000);
+    return look(a.pid, reply(r, { ...(a.async ? jobExtra(r) : {}), pad_move: {
+      direction: a.direction, speed, screen_rotation_deg: a.screen_rotation_deg ?? 0, magnitude: vector.magnitude, lx: vector.lx, ly: vector.ly, duration_ms: a.ms, curve,
+      screen_motion_verified: false, scope: "requested XInput left-stick convention; game movement depends on camera/control mapping" } }), a.capture_after, observation);
+  });
+
+tool("pad_look", "Turn using an angular calibration",
+  "Predict a horizontal camera turn from an explicit caller-measured angular calibration. calibration.rx is the signed stick value " +
+  "that produced positive/rightward rotation at degrees_per_second; negative degrees uses its opposite and assumes symmetric response. " +
+  "Requires real angular measurement, not pixels. Uses one finite right-stick action, all other controls neutral, then optional capture. " +
+  "Returns predicted angle with angle_verified:false; no auto calibration or guaranteed game rotation.",
+  { pid, degrees: z.number().finite().min(-360).max(360).refine((v) => v !== 0, "degrees must be nonzero"),
+    calibration: z.object({
+      rx: z.number().int().min(-32768).max(32767).refine((v) => v !== 0, "calibration rx must be nonzero"),
+      degrees_per_second: z.number().positive().finite().describe("Measured positive/rightward angular rate at exactly calibration.rx, in degrees per second; never pass pixels here."),
+    }).strict(),
+    async: asyncArg, replace: replaceArg, ...padCaptureArgs,
+    capture_after: captureAfterSchema.default(0).describe("Default 0: return a backend image after the reply/settle without a Present wait. false disables it; true/numeric keep usual semantics."),
+    capture_settle_ms: padCaptureArgs.capture_settle_ms.describe("Post-reply image delay, default 100ms for pad_look. Async image is an observation, not job completion."), },
+  async (a) => {
+    if (captureSettleInvalid(a)) return fail("capture_settle_ms requires capture_after");
+    const turn = calibratedLook(a.degrees, a.calibration);
+    if (turn.error !== undefined) return fail(turn.error);
+    const observation = padObservation({ ...a, capture_settle_ms: a.capture_settle_ms ?? 100 });
+    const r = await runVinput([...at(a.pid), "pad", "none", String(turn.ms), "--lx", "0", "--ly", "0", "--rx", String(turn.rx),
+      "--ry", "0", "--lt", "0", "--rt", "0", ...opt("--async", a.async), ...opt("--replace", a.replace)], a.async ? 60000 : turn.ms + 60000);
+    return look(a.pid, reply(r, { ...(a.async ? jobExtra(r) : {}), pad_look: {
+      requested_degrees: a.degrees, predicted_degrees: turn.predicted_degrees, angle_verified: false,
+      calibration: a.calibration, applied_rx: turn.rx, duration_ms: turn.ms, unrounded_duration_ms: turn.raw_ms,
+      opposite_rate_assumed: a.degrees < 0, scope: "caller angular rate times quantized duration; calibration and game response are unverified" } }), a.capture_after, observation);
+  });
+
+tool("pad_rotate", "Rotate a stick for a prompt",
+  "Rotate one stick using a single time-paced timeline: 0 deg=up, 90 deg=right; clockwise increases the angle. About 24 segments per turn " +
+  "(25 points for a full circle), constant normalized radius, all other controls neutral. ms is rotation time; end_dwell_ms holds the " +
+  "final point before finite native cleanup. Inspect skipped states/lateness; requested dwell is not proof a game polled or accepted the prompt.",
+  { pid, stick: z.enum(["left", "right"]), start_deg: z.number().finite().min(-360).max(360), direction: z.enum(["clockwise", "counterclockwise"]),
+    turns: z.number().finite().min(0.125).max(4).describe("Fractional turns supported, 1/8..4; a full turn uses 24 segments."),
+    ms: z.number().int().min(1).max(60000).describe("Rotation duration only, excluding final dwell. Must allow strictly increasing integer point times."),
+    radius: z.number().int().min(1).max(32767).optional().describe("Stick-vector magnitude, default 32767; not separate full-strength X/Y corners."),
+    end_dwell_ms: z.number().int().min(1).max(1000).optional().describe("Requested hold of the final non-neutral point, default 50 ms, then native cleanup to neutral."),
+    async: asyncArg, replace: replaceArg, ...padCaptureArgs,
+    capture_after: captureAfterSchema.default(0).describe("Default 0: backend image after action reply/settle without a Present wait. false disables it; true/numeric keep normal semantics."),
+    capture_settle_ms: padCaptureArgs.capture_settle_ms.describe("Post-reply image delay, default 100 ms for pad_rotate. Async capture is an observation, not job completion."), },
+  async (a) => {
+    if (captureSettleInvalid(a)) return fail("capture_settle_ms requires capture_after");
+    const radius = a.radius ?? 32767, dwell = a.end_dwell_ms ?? 50;
+    const rotation = rotateStick(a.stick, a.start_deg, a.direction, a.turns, a.ms, radius, dwell);
+    if (rotation.error !== undefined) return fail(rotation.error);
+    const cmd: Record<string, unknown> = { cmd: "pad-timeline", states_json: JSON.stringify(rotation.states), ms: a.ms, end_hold_ms: dwell, pacing: "time" };
+    if (a.async) cmd.async = true;
+    if (a.replace) cmd.replace = true;
+    const request = JSON.stringify(cmd);
+    if (Buffer.byteLength(request, "utf8") > 60000) return fail("rotation request exceeds bounded JSON budget; nothing was sent");
+    const observation = padObservation({ ...a, capture_settle_ms: a.capture_settle_ms ?? 100 });
+    const r = await runVinput([...at(a.pid), "json", request], a.async ? 60000 : rotation.total_ms + 60000);
+    return look(a.pid, reply(r, { ...(a.async ? jobExtra(r) : {}), pad_rotate: {
+      stick: a.stick, start_deg: a.start_deg, direction: a.direction, turns: a.turns, radius,
+      rotation_ms: a.ms, end_dwell_ms: dwell, total_ms: rotation.total_ms, requested_points: rotation.states.length,
+      end_deg_unwrapped: rotation.end_deg_unwrapped, game_prompt_verified: false,
+      scope: "requested time-paced stick trajectory; native readback and game recognition are not implied" } }), a.capture_after, observation);
   });
 
 const seqStep = z.object({

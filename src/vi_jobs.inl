@@ -34,7 +34,7 @@ thread_local std::shared_ptr<InputJob> g_waitJob;
 HANDLE g_jobWake=nullptr;bool g_jobWorker=false;
 int JobResource(int vk){return vk==VK_SHIFT||vk==VK_LSHIFT||vk==VK_RSHIFT?VK_SHIFT:vk==VK_CONTROL||vk==VK_LCONTROL||vk==VK_RCONTROL?VK_CONTROL:vk==VK_MENU||vk==VK_LMENU||vk==VK_RMENU?VK_MENU:vk;}
 struct JobMutation {bool prior;JobMutation():prior(g_jobApplying){g_jobApplying=true;}~JobMutation(){g_jobApplying=prior;}};
-void JobPadPublish(WORD buttons,int mask,const int* values,bool active=true){std::lock_guard<std::mutex> lock(g_padStateMx);g_padLT=values[0];g_padRT=values[1];g_padLX=values[2];g_padLY=values[3];g_padRX=values[4];g_padRY=values[5];g_padButtons=buttons;g_padSetMask=mask;g_padActive=active;g_padPacket++;}
+void JobPadPublish(WORD buttons,int mask,const int* values,bool active=true){std::lock_guard<std::mutex> lock(g_padStateMx);g_padLT=values[0];g_padRT=values[1];g_padLX=values[2];g_padLY=values[3];g_padRX=values[4];g_padRY=values[5];g_padButtons=buttons;g_padSetMask=mask;g_padActive=active;g_padPacket++;PadPublicationChangedLocked();}
 bool JobOwns(const InputJob& job,int resource){return g_resourceOwner[resource]==job.id&&g_resourceGeneration[resource]==job.generation[resource];}
 // Pure preview of JobFinish's exact keyboard/mouse release effects. Caller
 // holds g_inputMx. A reserved future Sequence key or pad resource proves nothing.

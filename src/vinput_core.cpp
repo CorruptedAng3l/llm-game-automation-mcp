@@ -1167,20 +1167,25 @@ const wchar_t* kXinputDlls[4] = {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1
 // axes the last pad command set explicitly (bit 0 lt,1 rt,2 lx,3 ly,4 rx,5 ry): a set axis overrides the real pad even
 // when the value is 0 (centres a drifting stick); an unset axis passes the real pad through
 std::atomic<int> g_padSetMask{0};
+#include "vi_pad_readiness_state.inl"
 DWORD XGSCommon(int i, DWORD user, XST* s) {
     C.xinput++;
-    DWORD r = o_XGS[i](user, s);
-    if (user != 0 || !s) return r;
+    // This branch previously discarded every native result field. Do not enter
+    // a cold device-enumeration call while an isolated virtual press is active.
+    if(user==0&&s){
+        std::lock_guard<std::mutex> stateLock(g_padStateMx);
+        if(g_padActive&&Isolating()){
+            XST result{};PadMergeLocked(i,result);
+            if(!ReaderBufferStore(s,&result,sizeof(result)))return ERROR_BAD_ARGUMENTS;
+            PadRecordReturnLocked(i,result,true);return ERROR_SUCCESS;
+        }
+    }
+    DWORD r=o_XGS[i](user,s);
+    if(user!=0||!s)return r;
     std::lock_guard<std::mutex> stateLock(g_padStateMx);if(!g_padActive)return r;
-    if (r != ERROR_SUCCESS) { memset(s, 0, sizeof(*s)); r = ERROR_SUCCESS; }
-    if (Isolating()) memset(&s->gp, 0, sizeof(s->gp));
-    int m = g_padSetMask;
-    s->gp.b |= (WORD)(i < 4 ? (g_padButtons & ~0x400) : g_padButtons);   // the documented API never reports Guide
-    if (m & 1) s->gp.lt = (BYTE)g_padLT; if (m & 2) s->gp.rt = (BYTE)g_padRT;
-    if (m & 4) s->gp.lx = (SHORT)g_padLX; if (m & 8) s->gp.ly = (SHORT)g_padLY;
-    if (m & 16) s->gp.rx = (SHORT)g_padRX; if (m & 32) s->gp.ry = (SHORT)g_padRY;
-    s->pkt = g_padPacket;
-    return r;
+    if(r!=ERROR_SUCCESS){memset(s,0,sizeof(*s));r=ERROR_SUCCESS;}
+    if(Isolating())memset(&s->gp,0,sizeof(s->gp));
+    PadMergeLocked(i,*s);PadRecordReturnLocked(i,*s,false);return r;
 }
 template <int I> DWORD WINAPI h_XGS(DWORD user, XST* s) { return XGSCommon(I, user, s); }
 void* kXgsDetours[8] = {(void*)&h_XGS<0>, (void*)&h_XGS<1>, (void*)&h_XGS<2>, (void*)&h_XGS<3>,
@@ -1806,7 +1811,7 @@ bool ScanOwnModulesForAntiCheat() {
 void ReleaseAll() {
     std::lock_guard<std::recursive_mutex> lock(g_inputMx);JobsCancelAll("release_all");
     for (int vk = 1; vk < 256; vk++) if (g_vk[vk]) KeyEvent(vk, false);
-    std::lock_guard<std::mutex> padLock(g_padStateMx);g_padButtons = 0; g_padSetMask = 0; g_padLT = g_padRT = g_padLX = g_padLY = g_padRX = g_padRY = 0; g_padPacket++;
+    std::lock_guard<std::mutex> padLock(g_padStateMx);g_padButtons = 0; g_padSetMask = 0; g_padLT = g_padRT = g_padLX = g_padLY = g_padRX = g_padRY = 0; g_padPacket++;PadPublicationChangedLocked();
 }
 std::string ErrJ(const std::string& e) { JOut o; o.bol("ok", false); o.str("error", e); return o.done(); }
 std::string WndAdoptionRefused(HWND requested,const std::string& reason) {
@@ -1924,6 +1929,7 @@ std::string ClaimGate(const std::string& cmd, const JObj& j) {
 
 bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_jobs.inl"
+#include "vi_pad_readiness.inl"
 #include "vi_readiness.inl"
 #include "vi_cursor_status.inl"
 #include "vi_wndproc_status.inl"
@@ -1932,7 +1938,7 @@ std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
     o.num("key_sequence_version",1);
     o.num("cursor_guard_version",1);o.raw("cursor_guard",CursorGuardStatus());
-    o.num("pad_timeline_version",2);
+    o.num("pad_timeline_version",2);o.num("pad_readiness_version",1);o.raw("virtual_pad",PadReadinessStatusJson());
 #ifdef _WIN64
     o.num("bits", 64);
 #else
@@ -2178,7 +2184,7 @@ std::string Exec(const std::string& line) {
     if (!ParseJson(line, j, &duplicate)) return ErrJ("bad json");
     std::string cmd = JStr(j, "cmd");
     CursorCommandScope cursorCommandScope(cmd);
-    if (duplicate && (cmd == "pad" || cmd == "pad-ramp" || cmd == "pad-timeline")) return ErrJ("pad request has duplicate fields; no input was injected");
+    if (duplicate && (cmd == "pad" || cmd == "pad-ramp" || cmd == "pad-timeline" || cmd == "pad-arm")) return ErrJ("pad request has duplicate fields; no input was injected");
     if(JHas(j,"for_ms")&&cmd!="config")return ErrJ("for_ms applies only to config isolate=false; no input or configuration changed");
     if(JHas(j,"stagger_ms")&&cmd!="pad-timeline")return ErrJ("stagger_ms is only implemented for pad-timeline; no input was injected");
     if(line.size()>65536&&(cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="seq"||cmd=="sequence"||cmd=="pad"||cmd=="pad-ramp"||cmd=="pad-timeline"))return ErrJ("input job request exceeds64KiB; no input was injected");
@@ -2551,6 +2557,7 @@ std::string Exec(const std::string& line) {
         o.str("delivery", "injected; application response is not implied"); return o.done();
     }
     if (cmd == "wheel") { MouseWheel((int)JNum(j, "delta", 120), JBool(j, "horizontal", false)); return OkJ(); }
+    if(cmd=="pad-arm")return PadArmCommand(j);
     if(cmd=="pad-ramp"||cmd=="pad-timeline")return SchedulePadSteering(j,cmd=="pad-timeline");
     if (cmd == "pad") {
         for (const auto& field : j) {
@@ -2567,7 +2574,7 @@ std::string Exec(const std::string& line) {
         if (JHas(j, "buttons") && j.find("buttons")->second.t != 1) return ErrJ("pad buttons must be a string; no input was injected");
         std::string names = JStr(j, "buttons");
         if (PadIsOff(names)) {   // stop overriding: pad 0 is the real pad again (or "not connected" when there is none)
-            std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);JobsOverridePad();std::lock_guard<std::mutex> stateLock(g_padStateMx);g_padActive = false; g_padButtons = 0; g_padSetMask = 0; g_padPacket++;
+            std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);JobsOverridePad();std::lock_guard<std::mutex> stateLock(g_padStateMx);g_padActive = false; g_padButtons = 0; g_padSetMask = 0; g_padPacket++;PadPublicationChangedLocked();
             JOut o; o.bol("ok", true); o.bol("pad_active", false); return o.done();
         }
         std::string bad; unsigned aliases = 0;

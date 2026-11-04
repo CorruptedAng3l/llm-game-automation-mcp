@@ -43,6 +43,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'capture_timing' 'run_capturetimingtest.ps1'
  New-VinputSuiteCase 'capture_diagnostics' 'run_capturediagnosticssurrogatetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'xinput' 'run_xinputtest.ps1'
+ New-VinputSuiteCase 'pad_readiness' 'run_padreadinessnativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'unit' 'run_unittests.ps1'
  New-VinputSuiteCase 'ocr' 'run_ocrtest.ps1'
  New-VinputSuiteCase 'text' 'run_texttest.ps1'
