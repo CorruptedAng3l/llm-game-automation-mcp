@@ -6,7 +6,7 @@ $ErrorActionPreference='Stop'
 $root=(Resolve-Path "$PSScriptRoot\..").Path
 $V=if($Vinput){(Resolve-Path $Vinput).Path}else{(Resolve-Path "$root\dist\vinput.exe").Path}
 $Out=[IO.Path]::GetFullPath($Out)
-if(-not$Out.StartsWith("$root\",[StringComparison]::OrdinalIgnoreCase)-or-not$Out.StartsWith('E:\',[StringComparison]::OrdinalIgnoreCase)){throw 'Pad trigger output must stay inside this vinput copy on E:'}
+if(-not$Out.StartsWith("$root\",[StringComparison]::OrdinalIgnoreCase)){throw 'Pad trigger output must stay inside this checkout'}
 New-Item -ItemType Directory -Force $Out|Out-Null
 $run=[guid]::NewGuid().ToString('N');$tools="$Out\tools_$run";New-Item -ItemType Directory -Force "$tools\temp","$Out\calls"|Out-Null
 $checks=[Collections.Generic.List[object]]::new();$cases=[Collections.Generic.List[object]]::new();$failures=0;$complete=$false;$owned=$null;$callNo=0;$errorDetail=$null

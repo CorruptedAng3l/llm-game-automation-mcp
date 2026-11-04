@@ -5,7 +5,7 @@ param([string]$Out="$PSScriptRoot\..\build\test\physical_readers",[string]$Vinpu
 $ErrorActionPreference='Stop';$root=(Resolve-Path "$PSScriptRoot\..").Path
 $V=if($Vinput){(Resolve-Path $Vinput).Path}else{(Resolve-Path "$root\dist\vinput.exe").Path}
 $Out=[IO.Path]::GetFullPath($Out)
-if(-not$Out.StartsWith("$root\",[StringComparison]::OrdinalIgnoreCase)-or-not$Out.StartsWith('E:\',[StringComparison]::OrdinalIgnoreCase)){throw 'Reader output must stay inside this private repository on E:'}
+if(-not$Out.StartsWith("$root\",[StringComparison]::OrdinalIgnoreCase)){throw 'Reader output must stay inside this checkout'}
 $run=Join-Path $Out ('run_'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Force $run|Out-Null
 $checks=[Collections.Generic.List[object]]::new();$evidence=[Collections.Generic.List[object]]::new();$owned=$null;$token=0;$call=0;$errorDetail=$null;$complete=$false
 function Check($Good,$Name){$checks.Add(@{pass=[bool]$Good;name=$Name});Write-Host "$(if($Good){'PASS'}else{'FAIL'}) $Name";if(-not$Good-and-not$KeepGoing){throw $Name}}
