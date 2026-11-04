@@ -1,6 +1,7 @@
 // vinput_core.cpp - per-process virtual input, fake focus and swapchain capture.
 // See vinput.h / README.md. Offline / single-player games only: see DISCLAIMER.md.
 #define WIN32_LEAN_AND_MEAN
+#define _CRT_RAND_S
 #define NOMINMAX
 #define DIRECTINPUT_VERSION 0x0800
 #include <windows.h>
@@ -28,6 +29,7 @@
 #include <vector>
 #include <deque>
 #include <memory>
+#include <new>
 #include <cmath>
 #include <limits>
 #include <cstdio>
@@ -36,6 +38,9 @@
 #include "MinHook.h"
 #include "vinput.h"
 #include "vi_keys.h"
+#include "vi_cursor_guard.h"
+#include "vi_pad_buttons.h"
+#include "vi_key_sequence.h"
 #include "vi_trace.h"
 #include "vi_vision.h"
 #include "vi_image_encode.h"
@@ -109,6 +114,13 @@ void NoteOwnerInput(bool deliberate) {
     if (deliberate) { g_ownerHoldAt = GetTickCount64(); g_ownerHolding = true; }
 }
 std::atomic<bool> g_adoptionActivationSafe{false};
+// Infrastructure readiness excludes host/application startup readiness.
+std::atomic<bool> g_inputHooksReady{false},g_inputHookInstallFinished{false};
+UINT g_inputReadyMessage=0;ULONG_PTR g_inputReadyCookie=0;
+std::atomic<ULONG_PTR> g_inputReadySequence{0},g_inputReadyAck{0};
+std::atomic<unsigned long long> g_inputReadyGeneration{0};
+std::atomic<unsigned long long> g_captureGeometryEpoch{1};
+const wchar_t kCaptureLifetimeProperty[]=L"vinput.capture_scope.lifetime.v1";
 UINT g_adoptionActivationMessage=0;
 std::atomic<ULONG_PTR> g_adoptionActivationSequence{0};
 const ULONG_PTR kAdoptionActivationCookie=(ULONG_PTR)&g_adoptionActivationSequence ^ 0x56494143;
@@ -121,6 +133,7 @@ void JobsOverrideKey(int);void JobsOverridePad();void JobsOverrideCursor(const c
 extern std::atomic<unsigned long long> g_jobClaimEpoch;extern std::atomic<ULONGLONG> g_jobClaimExpiry;
 extern thread_local unsigned long long g_admittedJobEpoch;extern thread_local bool g_admittedJobClaimed;
 ULONGLONG g_jobIdentity=0;std::atomic<unsigned> g_jobRetargetDepth{0};
+std::atomic<unsigned> g_wndConfigCommitDepth{0};
 // Interrupt time is monotonic, includes system sleep, and is independent of QPC/tick scaling.
 using InterruptClock=void(WINAPI*)(PULONGLONG);
 InterruptClock RealInterruptClock(){static InterruptClock clock=(InterruptClock)GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),"QueryInterruptTime");return clock;}
@@ -226,6 +239,8 @@ PFN_GKBS o_GetKeyboardState = nullptr;
 PFN_GCP o_GetCursorPos = nullptr, o_GetPhysicalCursorPos = nullptr;
 PFN_SCP o_SetCursorPos = nullptr, o_SetPhysicalCursorPos = nullptr;
 PFN_Clip o_ClipCursor = nullptr;
+using PFN_GetClip=BOOL(WINAPI*)(LPRECT);using PFN_Send=UINT(WINAPI*)(UINT,LPINPUT,int);using PFN_MouseEvent=void(WINAPI*)(DWORD,DWORD,DWORD,DWORD,ULONG_PTR);
+PFN_GetClip o_GetClipCursor=nullptr;PFN_Send o_SendInput=nullptr;PFN_MouseEvent o_mouse_event=nullptr;
 PFN_GRID o_GetRawInputData = nullptr;
 PFN_GRIB o_GetRawInputBuffer = nullptr;
 PFN_RRID o_RegisterRawInputDevices = nullptr;
@@ -253,19 +268,20 @@ bool ForegroundBelongsToTarget(HWND window) {
 // The single "is the game the real foreground" predicate. The test hook (VINPUT_TEST_HOOKS=1 in the target's
 // environment plus config test_realfg) replaces only the answer, never the OS state.
 bool TestRealFgOverride(bool actual) { int t = g_testRealFg.load(); return t >= 0 && TestHooksEnabled() ? t == 1 : actual; }
+bool TestRealFgForcedOn() { return g_testRealFg.load() == 1 && TestHooksEnabled(); }
 bool ComputeRealFg() { return TestRealFgOverride(ForegroundBelongsToTarget(RealForeground())); }
+#include "vi_cursor_guard.inl"
 inline bool RealFg() { return g_realFg.load(std::memory_order_relaxed); }
+// Preserve the existing XInput policy separately; this repair scopes physical kb/mouse.
+#include "vi_isolation_lease.inl"
 // The owner is using the game: it is the real foreground and real (non-injected) input arrived after the agent's last
 // injected input. Until the agent's next command the virtual cursor must not override GetCursorPos / raw input.
 inline bool OwnerCursorActive() { return RealFg() && g_ownerSeq.load() > g_agentSeq.load(); }
 inline bool Isolating() { return g_cfg.isolate && !RealFg(); }
-inline bool Faking() { return g_cfg.fakefocus && !RealFg(); }
-bool UseVirtualCursor() {
-    if (!g_hwnd) return false;
-    if (OwnerCursorActive()) return false;
-    int c = g_cfg.cursor; if (c == 1) return true; if (c == 2) return false;
-    return !RealFg();
-}
+// TestRealFgForcedOn is the owner-input test hook only (VINPUT_TEST_HOOKS=1); it never weakens the cursor or reader hooks.
+inline bool MouseKeyboardIsolating() { return IsolationEnabled() && !PhysicalForegroundOwned() && !TestRealFgForcedOn(); }
+inline bool Faking() { return g_cfg.fakefocus && !PhysicalForegroundOwned(); }
+bool UseVirtualCursor() {if(OwnerCursorActive())return false;return vi_cursor_guard::VirtualPositionReads(CursorOwnerSnapshot());}
 bool IsOurWindow(HWND h) { if (!h) return false; DWORD p = 0; GetWindowThreadProcessId(h, &p); return p == g_pid; }
 // Both the command worker and watchdog may relinquish a hosted CoreWindow whose
 // actual foreground queue belongs to an external host. Initialize our queue before
@@ -303,49 +319,8 @@ WNDPROC CurrentWindowProcedure(HWND h) {
     // The opposite A/W getter can return a call-proc thunk even in our own process.
     return (WNDPROC)(IsWindowUnicode(h) ? GetWindowLongPtrW(h, GWLP_WNDPROC) : GetWindowLongPtrA(h, GWLP_WNDPROC));
 }
-struct PostedMsg { UINT m; WPARAM w; LPARAM l; DWORD t; };
-SRWLOCK g_ringLock = SRWLOCK_INIT;
-PostedMsg g_ring[512];
-int g_ringPos = 0;
-int RingAdd(UINT m, WPARAM w, LPARAM l) {
-    AcquireSRWLockExclusive(&g_ringLock);
-    int slot = g_ringPos;
-    g_ring[g_ringPos] = {m, w, l, GetTickCount()}; g_ringPos = (g_ringPos + 1) % 512;
-    ReleaseSRWLockExclusive(&g_ringLock);
-    return slot;
-}
-bool RingConsume(UINT m, WPARAM w, LPARAM l) {
-    bool hit = false;
-    AcquireSRWLockExclusive(&g_ringLock);
-    for (int i = 0; i < 512; i++) if (g_ring[i].m == m && g_ring[i].w == w && g_ring[i].l == l && g_ring[i].t) { g_ring[i].t = 0; g_ring[i].m = 0; hit = true; break; }
-    ReleaseSRWLockExclusive(&g_ringLock);
-    return hit;
-}
-int MessageKey(UINT m, WPARAM w, bool& down) {
-    down = m == WM_KEYDOWN || m == WM_SYSKEYDOWN || m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN || m == WM_XBUTTONDOWN;
-    if (m == WM_KEYDOWN || m == WM_SYSKEYDOWN || m == WM_KEYUP || m == WM_SYSKEYUP) return w > 0 && w < 256 ? (int)w : 0;
-    if (m == WM_LBUTTONDOWN || m == WM_LBUTTONUP) return VK_LBUTTON;
-    if (m == WM_RBUTTONDOWN || m == WM_RBUTTONUP) return VK_RBUTTON;
-    if (m == WM_MBUTTONDOWN || m == WM_MBUTTONUP) return VK_MBUTTON;
-    if (m == WM_XBUTTONDOWN || m == WM_XBUTTONUP) return HIWORD(w) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2;
-    return 0;
-}
-bool PostOurs(HWND h, UINT m, WPARAM w, LPARAM l) {
-    // A missing window is not an attempted (and certainly not an accepted) post.
-    DWORD targetOwner=0;if(!h||!GetWindowThreadProcessId(h,&targetOwner)||targetOwner!=g_pid){DWORD error=targetOwner?ERROR_ACCESS_DENIED:ERROR_INVALID_WINDOW_HANDLE;++C.post_target_rejected;C.last_post_target_error=error;SetLastError(error);return false;}
-    bool down = false; int vk = MessageKey(m, w, down);
-    if (vk) g_keyTrace[vk].posting(down);
-    int slot = -1;
-    if ((m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) || (m >= WM_KEYFIRST && m <= WM_KEYLAST)) slot = RingAdd(m, w, l);
-    BOOL accepted = PostMessageW(h, m, w, l); DWORD error = accepted ? 0 : GetLastError(); C.posted++;
-    if (vk) g_keyTrace[vk].post_result(down, accepted != FALSE, error);
-    if (!accepted && slot >= 0) {
-        AcquireSRWLockExclusive(&g_ringLock);
-        if (g_ring[slot].m == m && g_ring[slot].w == w && g_ring[slot].l == l) g_ring[slot] = {};
-        ReleaseSRWLockExclusive(&g_ringLock);
-    }
-    return accepted != FALSE;
-}
+#include "vi_posted_input.inl"
+#include "vi_window_scope.inl"
 
 // Posted after coordinate hover, acknowledged only if it traverses the existing WndProc chain.
 // A sent WM_NULL would jump ahead of queued mouse messages and cannot establish queue progress.
@@ -357,13 +332,16 @@ std::atomic<ULONG_PTR> g_hoverBarrierSequence{0}, g_hoverBarrierExpected{0}, g_h
 // raw input synthesis
 // ----------------------------------------------------------------------------------------------
 const ULONG_PTR kMagicBase = 0x56490000;  // fake HRAWINPUT values: 0x5649xxxx
-RAWINPUT g_rawRing[4096];
-std::atomic<bool> g_rawRingUnread[4096]{};std::mutex g_rawRingMx;std::atomic<unsigned long long> g_rawRingOverwrites{0};
+// Legacy overwrite field remains zero: immutable post packets refuse backpressure instead.
+std::atomic<unsigned long long> g_rawRingOverwrites{0};
 std::atomic<unsigned> g_rawRingPos{0};
 std::mutex g_rawQMx;
 std::deque<RAWINPUT> g_rawQ;          // for GetRawInputBuffer consumers
 std::atomic<DWORD> g_lastRIB{0};      // tick of last GetRawInputBuffer call
-inline bool IsMagic(HRAWINPUT h) { ULONG_PTR v = (ULONG_PTR)h; return (v & ~(ULONG_PTR)0xFFF) == kMagicBase; }
+bool SelfRawTrusted(HWND,HRAWINPUT);
+bool SelfRawTrustedRead(HRAWINPUT);
+bool SelfRawReadInternal(HRAWINPUT,UINT,LPVOID,PUINT,UINT,UINT&);
+BOOL SelfRawPostRecord(HWND,const RAWINPUT&,LPARAM);
 
 std::atomic<unsigned long long> g_rawLastRegistrationResult{0}; // observed/success/error, one coherent snapshot
 std::atomic<int> g_rawLastBackend{0}; // none/post/buffer/off/rejected/post_failed/queue_full
@@ -402,6 +380,7 @@ void FindRawDevices() {
     }
 }
 int EmitRaw(const RAWINPUT& ri,HWND target,bool* overwritten=nullptr){
+    if(overwritten)*overwritten=false;
     int mode=g_cfg.rawmode;if(mode==3){g_rawLastBackend=3;return 3;}
 #ifdef _WIN64
     bool useBuffer=mode==2||(mode==0&&g_lastRIB&&GetTickCount()-g_lastRIB<3000);
@@ -413,9 +392,10 @@ int EmitRaw(const RAWINPUT& ri,HWND target,bool* overwritten=nullptr){
     // A fake HRAWINPUT is meaningful only in this process, where the decoder is hooked.
     if(!RawOwnTarget(destination)){C.raw_target_rejected++;g_rawLastBackend=4;return 4;}
     unsigned index=(g_rawRingPos++)&0xFFF;
-    {std::lock_guard<std::mutex> lock(g_rawRingMx);bool lost=g_rawRingUnread[index].exchange(true);if(lost){++g_rawRingOverwrites;if(overwritten)*overwritten=true;}g_rawRing[index]=ri;}
-    if(PostMessageW(destination,WM_INPUT,RIM_INPUT,(LPARAM)(kMagicBase|index))){C.raw_posted++;g_rawLastBackend=1;return 1;}
-    g_rawRingUnread[index]=false;C.raw_post_failed++;g_rawLastBackend=5;return 5;
+    // The compatibility marker identifies no storage. Each accepted envelope owns
+    // its immutable RAWINPUT snapshot; rejected attempts cannot corrupt earlier posts.
+    if(SelfRawPostRecord(destination,ri,(LPARAM)(kMagicBase|index))){C.raw_posted++;g_rawLastBackend=1;return 1;}
+    C.raw_post_failed++;g_rawLastBackend=5;return 5;
 }
 void RawKey(int vk, bool down, UINT sc, bool ext, HWND target) {
     RAWINPUT ri = {};
@@ -446,14 +426,14 @@ int RawMouse(LONG dx, LONG dy, USHORT btnFlags, SHORT wheel, HWND target,bool* o
 // DirectInput synthesis
 // ----------------------------------------------------------------------------------------------
 std::mutex g_diMx;
-struct DiQueuedEvent { DWORD first,second;unsigned long long generation=0; };
+struct DiQueuedEvent { DWORD first,second;unsigned long long generation=0;DWORD timestamp=0,sequence=0; };
 std::deque<DiQueuedEvent> g_diKbdQ, g_diMouseQ;  // (ofs, data, mouse-button press generation)
 std::atomic<DWORD> g_diSeq{1};
 int DiPush(bool kbd, DWORD ofs, DWORD data,unsigned long long generation=0) {
     if (kbd ? C.di_data_kbd == 0 : C.di_data_mouse == 0) return 0;  // nobody reads buffered data
     std::lock_guard<std::mutex> lk(g_diMx);
     auto& q = kbd ? g_diKbdQ : g_diMouseQ;
-    if (q.size() < 512) {q.push_back({ofs, data,generation});return 1;}return -1;
+    if (q.size() < 512) {q.push_back({ofs,data,generation,GetTickCount(),g_diSeq++});return 1;}return -1;
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -508,31 +488,37 @@ bool RawWanted(bool kbd, const RawReg& rr) {
 
 void MouseButton(int vk, bool down);
 
-void KeyEvent(int vk, bool down) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);NoteAgentInput();if(!g_jobApplying)JobsOverrideKey(vk);
-    if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2) { MouseButton(vk, down); return; }
+bool KeyEvent(int vk, bool down, bool suppressTranslation=false,const PostedMsg* expected=nullptr,unsigned long long* pressGeneration=nullptr) {
+    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);if(pressGeneration)*pressGeneration=0;if(expected&&!PostedTargetCurrent(*expected)){SetLastError(ERROR_RETRY);return false;}NoteAgentInput();if(!g_jobApplying)JobsOverrideKey(vk);
+    if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2) { MouseButton(vk, down); return true; }
     SetVkState(vk, down);
+    if(pressGeneration&&down)*pressGeneration=g_resourceGeneration[JobResource(vk)];
     UINT sc = ScanOf(vk); bool ext = IsExtendedVk(vk);
     DiPush(true, sc | (ext ? 0x80 : 0), down ? 0x80 : 0);
     RawReg rr = QueryRawReg();
     if (RawWanted(true, rr)) RawKey(vk, down, sc, ext, rr.kbdTarget);
-    if (MsgsWanted(true, rr) && g_hwnd) {
+    if (MsgsWanted(true, rr)) {
+        if(!g_hwnd){SetLastError(ERROR_INVALID_WINDOW_HANDLE);return false;}
         bool sys = g_vk[VK_MENU] && vk != VK_MENU ? true : (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_F10);
         UINT msg = down ? (sys ? WM_SYSKEYDOWN : WM_KEYDOWN) : (sys ? WM_SYSKEYUP : WM_KEYUP);
         LPARAM lp = 1 | ((LPARAM)sc << 16) | (ext ? (1 << 24) : 0) | (g_vk[VK_MENU] ? (1 << 29) : 0);
         if (!down) lp |= (1u << 30) | (1u << 31);
-        PostOurs(g_hwnd, msg, (WPARAM)vk, lp);
+        return expected?PostPublication(g_hwnd,msg,(WPARAM)vk,lp,suppressTranslation,expected):PostOurs(g_hwnd,msg,(WPARAM)vk,lp,suppressTranslation);
     }
+    return true;
 }
 
 // Snapshot and validate the cursor before exposing a button-down to any channel.
 // Reuse this position for the posted message rather than rereading a game-written
 // cursor after setting the key state. Concurrent application reads remain unconfirmed.
-bool MouseButtonChecked(int vk, bool down, const POINT* expected, POINT* used) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);NoteAgentInput();
+bool MouseButtonChecked(int vk, bool down, const POINT* expected, POINT* used,const CaptureScope* scope=nullptr) {
+    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
+    if(down&&scope&&!CaptureScopeCurrent(*scope)){SetLastError(ERROR_RETRY);return false;}
+    NoteAgentInput();
     POINT position{g_vcurX,g_vcurY};
     if(used)*used=position;
     if(down && expected && (position.x!=expected->x || position.y!=expected->y))return false;
+    if(down&&!g_jobApplying)CursorAdmitCommand();
     if(!g_jobApplying)JobsOverrideKey(vk);
     SetVkState(vk, down);
     RawReg rr = QueryRawReg();
@@ -558,13 +544,13 @@ void ClampToClient(LONG& x, LONG& y) {
     if (x > rc.right - 1) x = rc.right - 1; if (y > rc.bottom - 1) y = rc.bottom - 1;
 }
 struct PointerPath {
-    HWND window=nullptr; LONG width=0,height=0,mx=0,my=0;unsigned allowed=0;
+    CaptureScope scope;HWND window=nullptr; LONG width=0,height=0,mx=0,my=0;unsigned allowed=0;
     bool changed=false,bypassed=false;
     unsigned Contact(LONG x,LONG y)const{return (mx&&x<mx?1u:0u)|(mx&&x>=width-mx?2u:0u)|(my&&y<my?4u:0u)|(my&&y>=height-my?8u:0u);}
-    bool Init(LONG x,LONG y,bool bypass=false){RECT r{};DWORD pid=0;window=g_hwnd;GetWindowThreadProcessId(window,&pid);if(pid!=g_pid||!GetClientRect(window,&r)||r.right<1||r.bottom<1)return false;
-        width=r.right;height=r.bottom;mx=(std::min)((LONG)g_cfg.edgeMargin.load(),(width-1)/2);my=(std::min)((LONG)g_cfg.edgeMargin.load(),(height-1)/2);bypassed=bypass;
+    bool Init(LONG x,LONG y,bool bypass=false){if(!CaptureScopeTake(scope))return false;window=scope.window;
+        width=scope.width;height=scope.height;mx=(std::min)((LONG)g_cfg.edgeMargin.load(),(width-1)/2);my=(std::min)((LONG)g_cfg.edgeMargin.load(),(height-1)/2);bypassed=bypass;
         x=(std::max)(0L,(std::min)(width-1,x));y=(std::max)(0L,(std::min)(height-1,y));allowed=Contact(x,y);return true;}
-    bool Valid()const{RECT r{};DWORD pid=0;GetWindowThreadProcessId(window,&pid);return window==g_hwnd&&pid==g_pid&&GetClientRect(window,&r)&&r.right==width&&r.bottom==height;}
+    bool Valid()const{return CaptureScopeCurrent(scope);}
     void Guard(LONG& x,LONG& y){if(bypassed)return;LONG ox=x,oy=y;if(!(allowed&1))x=(std::max)(mx,x);if(!(allowed&2))x=(std::min)(width-1-mx,x);if(!(allowed&4))y=(std::max)(my,y);if(!(allowed&8))y=(std::min)(height-1-my,y);changed=changed||x!=ox||y!=oy;}
 };
 struct MotionAccounting {
@@ -575,8 +561,8 @@ struct MotionAccounting {
 };
 struct AppliedMouse { long long dx=0, dy=0; bool message_attempted=false, message_accepted=false;MotionAccounting accounting; };
 AppliedMouse MouseMoveTo(LONG x, LONG y, bool relativeOrigin, LONG rdx, LONG rdy, bool unbounded=false,PointerPath* path=nullptr,const POINT* pathPoint=nullptr) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);NoteAgentInput();
-    if(!g_jobApplying)JobsOverrideCursor("manual_cursor_override");
+    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
+    NoteAgentInput();if(!g_jobApplying){CursorAdmitCommand(true);JobsOverrideCursor("manual_cursor_override");}
     LONG ox = g_vcurX, oy = g_vcurY;
     long long dx = relativeOrigin ? rdx : (long long)x-ox, dy = relativeOrigin ? rdy : (long long)y-oy;
     long long wideX = relativeOrigin ? (long long)ox + rdx : x, wideY = relativeOrigin ? (long long)oy + rdy : y;
@@ -729,7 +715,7 @@ BOOL WINAPI h_AllowSetForegroundWindow(DWORD pid) {
 }
 SHORT WINAPI h_GetAsyncKeyState(int vk) {
     C.gaks++;
-    SHORT r = Isolating() ? 0 : o_GetAsyncKeyState(vk);
+    SHORT r = ReaderMask(ReaderAsyncKey) ? 0 : o_GetAsyncKeyState(vk);
     if (vk > 0 && vk < 256) {
         if (g_vk[vk]) r |= (SHORT)0x8000;
         if (g_vkPressed[vk].exchange(0)) r |= 1;
@@ -739,69 +725,37 @@ SHORT WINAPI h_GetAsyncKeyState(int vk) {
 }
 SHORT WINAPI h_GetKeyState(int vk) {
     C.gks++;
-    SHORT r = o_GetKeyState(vk);
-    if (Isolating()) r &= 1;  // keep toggle bit only
+    SHORT r = ReaderMask(ReaderKey) ? 0 : o_GetKeyState(vk);
     if (vk > 0 && vk < 256 && g_vk[vk]) r |= (SHORT)0xFF80;
     if (vk > 0 && vk < 256) g_keyTrace[vk].gks.record((USHORT)r, (r & 0x8000) != 0);
     return r;
 }
 BOOL WINAPI h_GetKeyboardState(PBYTE ks) {
     C.gkbs++;
-    BOOL r = o_GetKeyboardState(ks);
-    if (ks) {
-        if (!r) { memset(ks, 0, 256); r = TRUE; }
-        bool iso = Isolating();
-        for (int i = 0; i < 256; i++) { if (iso) ks[i] &= 1; if (g_vk[i]) ks[i] |= 0x80; g_keyTrace[i].gkbs.record(ks[i]); }
-    }
+    const bool mask=ReaderMask(ReaderKeyboard);
+    if(!ks)return o_GetKeyboardState(nullptr);
+    if(!ReaderBufferWritable(ks,256)){SetLastError(ERROR_NOACCESS);return FALSE;}
+    BYTE state[256]{};BOOL r=mask?TRUE:o_GetKeyboardState(state);
+    if(!r){memset(state,0,sizeof(state));r=TRUE;}
+    for(int i=0;i<256;i++)if(g_vk[i])state[i]|=0x80;
+    if(!ReaderBufferStore(ks,state,sizeof(state))){SetLastError(ERROR_NOACCESS);return FALSE;}
+    for(int i=0;i<256;i++)g_keyTrace[i].gkbs.record(state[i]);
     return r;
 }
-using PFN_TM = BOOL(WINAPI*)(const MSG*);
-PFN_TM o_TranslateMessage = nullptr;
-// TranslateMessage derives WM_CHAR from the thread's REAL keyboard state, which a posted key message never changes. With a
-// virtual Ctrl or Shift held, a posted WM_KEYDOWN for 'a' therefore became a plain 'a' character, not the Ctrl+A code
-// (measured: key ctrl+a typed an "a" into a text field). Translate those messages from vinput's own key state instead.
-BOOL WINAPI h_TranslateMessage(const MSG* msg) {
-    if (!msg || !g_hwnd || msg->hwnd != g_hwnd || (msg->message != WM_KEYDOWN && msg->message != WM_SYSKEYDOWN) ||
-        !(g_vk[VK_CONTROL] || g_vk[VK_SHIFT]) || msg->wParam == 0 || msg->wParam > 255)
-        return o_TranslateMessage(msg);
-    BYTE state[256] = {};
-    for (int i = 1; i < 256; i++) if (g_vk[i]) state[i] = 0x80;
-    state[VK_CAPITAL] = (BYTE)((o_GetKeyState ? o_GetKeyState(VK_CAPITAL) : GetKeyState(VK_CAPITAL)) & 1);
-    wchar_t buf[8] = {};
-    HKL layout = GetKeyboardLayout(GetWindowThreadProcessId(msg->hwnd, nullptr));
-    int n = ToUnicodeEx((UINT)msg->wParam, (UINT)((msg->lParam >> 16) & 0xFF), state, buf, 8, 4, layout);
-    const bool sys = msg->message == WM_SYSKEYDOWN;
-    if (n < 0) { PostMessageW(msg->hwnd, sys ? WM_SYSDEADCHAR : WM_DEADCHAR, (WPARAM)buf[0], msg->lParam); return TRUE; }
-    for (int i = 0; i < n; i++) PostMessageW(msg->hwnd, sys ? WM_SYSCHAR : WM_CHAR, (WPARAM)buf[i], msg->lParam);
-    return n > 0 ? TRUE : FALSE;
-}
+// TranslateMessage (Ctrl/Shift chords from virtual modifier state): h_TranslateMessage lives in vi_posted_input.inl, which
+// snapshots the virtual key state when each message is posted and translates from that snapshot.
 BOOL WINAPI h_GetCursorPos(LPPOINT p) {
     C.gcur++;
     std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
-    if (p && UseVirtualCursor()) { POINT c{g_vcurX, g_vcurY}; if(!ClientToScreen(g_hwnd, &c))return FALSE;*p = c;g_pointerSeen=g_pointerIssued.load();g_pointerReader=1;return TRUE; }
+    if(UseVirtualCursor())return CursorVirtualGet(p,1)?TRUE:FALSE;
     return o_GetCursorPos(p);
 }
 BOOL WINAPI h_GetPhysicalCursorPos(LPPOINT p) {
     std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
-    if (p && UseVirtualCursor()) { POINT c{g_vcurX, g_vcurY}; if(!ClientToScreen(g_hwnd, &c))return FALSE;*p = c;g_pointerSeen=g_pointerIssued.load();g_pointerReader=2;return TRUE; }
+    if(UseVirtualCursor())return CursorVirtualGet(p,2)?TRUE:FALSE;
     return o_GetPhysicalCursorPos(p);
 }
-BOOL WINAPI h_SetCursorPos(int x, int y) {
-    C.scur++;
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
-    if (UseVirtualCursor()) { POINT p{x, y};if(!ScreenToClient(g_hwnd, &p))return FALSE;if(p.x!=g_vcurX||p.y!=g_vcurY){JobsOverrideCursor("game_cursor_drift");g_vcurX=p.x;g_vcurY=p.y;++g_pointerIssued;}return TRUE; }
-    return o_SetCursorPos(x, y);
-}
-BOOL WINAPI h_SetPhysicalCursorPos(int x, int y) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
-    if (UseVirtualCursor()) { POINT p{x, y};if(!ScreenToClient(g_hwnd, &p))return FALSE;if(p.x!=g_vcurX||p.y!=g_vcurY){JobsOverrideCursor("game_cursor_drift");g_vcurX=p.x;g_vcurY=p.y;++g_pointerIssued;}return TRUE; }
-    return o_SetPhysicalCursorPos(x, y);
-}
-BOOL WINAPI h_ClipCursor(const RECT* r) {
-    C.clip++;
-    if (r && !RealFg()) return TRUE;  // a background game must never trap the real cursor
-    return o_ClipCursor(r);
-}
+#include "vi_cursor_write_hooks.inl"
 HWND WINAPI h_WindowFromPoint(POINT pt) {
     if (UseVirtualCursor()) {
         POINT c{g_vcurX, g_vcurY}; ClientToScreen(g_hwnd, &c);
@@ -811,21 +765,11 @@ HWND WINAPI h_WindowFromPoint(POINT pt) {
 }
 UINT WINAPI h_GetRawInputData(HRAWINPUT h, UINT cmd, LPVOID data, PUINT pcb, UINT hdr) {
     C.rid++;
-    if (IsMagic(h)) {
-        C.rid_magic++;
-        std::lock_guard<std::mutex> ringLock(g_rawRingMx);
-        const RAWINPUT& r = g_rawRing[(ULONG_PTR)h & 0xFFF];
-        UINT need = (cmd == RID_HEADER) ? (UINT)sizeof(RAWINPUTHEADER) : r.header.dwSize;
-        if (!pcb) return (UINT)-1;
-        if (!data) { *pcb = need; return 0; }
-        if (*pcb < need) { *pcb = need; SetLastError(ERROR_INSUFFICIENT_BUFFER); return (UINT)-1; }
-        memcpy(data, &r, need);
-        if(cmd==RID_INPUT)g_rawRingUnread[(ULONG_PTR)h&0xFFF]=false;
-        if (cmd == RID_INPUT && r.header.dwType == RIM_TYPEKEYBOARD && r.data.keyboard.VKey < 256)
-            g_keyTrace[r.data.keyboard.VKey].raw_data.record(r.data.keyboard.Flags, !(r.data.keyboard.Flags & RI_KEY_BREAK));
-        return need;
-    }
-    if(Isolating()){C.raw_real_denied++;SetLastError(ERROR_ACCESS_DENIED);return (UINT)-1;}
+    UINT internal=0;
+    if(SelfRawReadInternal(h,cmd,data,pcb,hdr,internal)){C.rid_magic++;return internal;}
+    if(ReaderMask(ReaderRawData)&&!SelfRawTrustedRead(h)){C.raw_real_denied++;SetLastError(ERROR_ACCESS_DENIED);return (UINT)-1;}
+    // A trusted target-self handle, including a vinput-looking prefix, belongs
+    // to its original host decoder. Prefix values confer no payload authority.
     UINT result = o_GetRawInputData(h, cmd, data, pcb, hdr);
     if (result != (UINT)-1 && cmd == RID_INPUT && data && result >= sizeof(RAWINPUTHEADER) + sizeof(RAWKEYBOARD)) {
         const RAWINPUT& r = *(const RAWINPUT*)data;
@@ -835,13 +779,24 @@ UINT WINAPI h_GetRawInputData(HRAWINPUT h, UINT cmd, LPVOID data, PUINT pcb, UIN
     return result;
 }
 UINT WINAPI h_GetRawInputBuffer(PRAWINPUT data,PUINT pcb,UINT hdr){
-    C.rib++;UINT capacity=pcb?*pcb:0;
-    UINT count=o_GetRawInputBuffer(data,pcb,hdr);DWORD nativeError=GetLastError();
-    if(count!=(UINT)-1&&Isolating())count=0; // same visible-count isolation policy on both architectures
+    C.rib++;UINT capacity=0;const bool mask=ReaderMask(ReaderRawBuffer);
+    if(pcb&&(!ReaderBufferWritable(pcb,sizeof(*pcb))||!ReaderBufferLoad(pcb,&capacity,sizeof(capacity)))){SetLastError(ERROR_NOACCESS);return (UINT)-1;}
+    // Native APIs can write bytes even when their returned visible count is later hidden.
+    // Drain into bounded private storage, leaving the caller's buffer exclusively synthetic.
+    std::unique_ptr<BYTE[]> nativeStorage;PRAWINPUT nativeData=data;
+    if(mask&&data&&pcb&&hdr==sizeof(RAWINPUTHEADER)){
+        if(capacity>kReaderScratchLimit){SetLastError(ERROR_NOT_ENOUGH_MEMORY);return (UINT)-1;}
+        if(!ReaderBufferWritable(data,capacity)){SetLastError(ERROR_NOACCESS);return (UINT)-1;}
+        nativeStorage.reset(new(std::nothrow) BYTE[(std::max)(capacity,1u)]);
+        if(!nativeStorage){SetLastError(ERROR_NOT_ENOUGH_MEMORY);return (UINT)-1;}
+        nativeData=(PRAWINPUT)nativeStorage.get();
+    }
+    UINT count=o_GetRawInputBuffer(nativeData,pcb,hdr);DWORD nativeError=GetLastError();
+    if(count!=(UINT)-1&&mask){count=0;const UINT empty=0;if(pcb&&!ReaderBufferStore(pcb,&empty,sizeof(empty))){SetLastError(ERROR_NOACCESS);return (UINT)-1;}}
 #ifdef _WIN64
     if(count!=(UINT)-1)g_lastRIB=GetTickCount();
     UINT pendingNeed=0;{std::lock_guard<std::mutex> lock(g_rawQMx);if(!g_rawQ.empty())pendingNeed=g_rawQ.front().header.dwSize;}
-    if(!data){if(count!=(UINT)-1&&pcb&&pendingNeed&&*pcb<pendingNeed)*pcb=pendingNeed;SetLastError(nativeError);return count;}
+    if(!data){if(count!=(UINT)-1&&pcb&&pendingNeed){UINT reported=0;if(!ReaderBufferLoad(pcb,&reported,sizeof(reported))||(reported<pendingNeed&&!ReaderBufferStore(pcb,&pendingNeed,sizeof(pendingNeed)))){SetLastError(ERROR_NOACCESS);return (UINT)-1;}}SetLastError(nativeError);return count;}
     if(count==(UINT)-1){SetLastError(nativeError);return count;} // never turn invalid arguments/native failure into success
     if(!pendingNeed||!pcb){SetLastError(nativeError);return count;}
     BYTE* base=(BYTE*)data;size_t used=0;
@@ -859,8 +814,8 @@ UINT WINAPI h_GetRawInputBuffer(PRAWINPUT data,PUINT pcb,UINT hdr){
     while(!g_rawQ.empty()){
         const RAWINPUT& input=g_rawQ.front();UINT bytes=input.header.dwSize;
         if(bytes<sizeof(RAWINPUTHEADER)||bytes>sizeof(input)){SetLastError(ERROR_INVALID_DATA);return (UINT)-1;}
-        if(bytes>capacity-used){if(!count){*pcb=bytes;SetLastError(ERROR_INSUFFICIENT_BUFFER);return (UINT)-1;}break;}
-        memcpy(base+used,&input,bytes);size_t span=((size_t)bytes+7)&~(size_t)7;used+=span<=capacity-used?span:capacity-used;
+        if(bytes>capacity-used){if(!count){if(!ReaderBufferStore(pcb,&bytes,sizeof(bytes))){SetLastError(ERROR_NOACCESS);return (UINT)-1;}SetLastError(ERROR_INSUFFICIENT_BUFFER);return (UINT)-1;}break;}
+        if(!ReaderBufferStore(base+used,&input,bytes)){SetLastError(ERROR_NOACCESS);return (UINT)-1;}size_t span=((size_t)bytes+7)&~(size_t)7;used+=span<=capacity-used?span:capacity-used;
         g_rawQ.pop_front();count++;C.rib_injected++;
     }
     size_t offset=0;
@@ -885,8 +840,9 @@ BOOL WINAPI h_RegisterRawInputDevices(PCRAWINPUTDEVICE devices,UINT count,UINT s
 // ----------------------------------------------------------------------------------------------
 // window subclass: fake focus + isolation of real mouse/raw input in the background
 // ----------------------------------------------------------------------------------------------
+#include "vi_wndproc_binding.inl"
 LRESULT CallOrig(HWND h, UINT m, WPARAM w, LPARAM l) {
-    return g_hwndUnicode ? CallWindowProcW(g_origWndProc, h, m, w, l) : CallWindowProcA(g_origWndProc, h, m, w, l);
+    return WndBindingOriginal(h,m,w,l);
 }
 bool AdoptionHumanSelectionPending() {
     return g_userIntent.Active() || g_userIntent.Provisional() || g_userIntent.EvaluatingAltTab();
@@ -917,7 +873,7 @@ struct ScopedAdoptionActivationBarrier {
     }
 };
 bool CanRefreshAdoptedWindow(HWND h) {
-    return g_adoptionActivationSafe && g_cfg.autoactivate && g_cfg.blockfocus && !ForegroundLeased() &&
+    return g_jobRetargetDepth.load()==0 && g_wndConfigCommitDepth.load()==0 && g_adoptionActivationSafe && g_cfg.autoactivate && g_cfg.blockfocus && !ForegroundLeased() &&
         g_cfg.fakefocus && !AdoptionHumanSelectionPending() && h==g_hwnd && IsOurWindow(h) && IsWindow(h) && GetAncestor(h,GA_ROOT)==h && !ComputeRealFg();
 }
 void MaybeSynthActivate() {
@@ -933,6 +889,14 @@ void MaybeSynthActivate() {
     }else{++C.act_refresh_failed;Log("guarded application-active refresh post failed hwnd=%p error=%lu",h,GetLastError());}
 }
 LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    WndBindingCallback callback(h,m);
+    if(!WndBindingLive(callback.binding)){++g_wndBindingMissing;return WndBindingDefault(h,m,w,l);}
+    if(h==g_hwnd&&(m==WM_SIZE||m==WM_DPICHANGED||m==WM_NCDESTROY))++g_captureGeometryEpoch;
+    if(m==WM_NCDESTROY)RemovePropW(h,kCaptureLifetimeProperty);
+    if(m==g_inputReadyMessage && g_inputReadyMessage && h==g_hwnd && WndBindingReady(h) && (ULONG_PTR)l==g_inputReadyCookie) {
+        ULONG_PTR prior=g_inputReadyAck.load();while(prior<(ULONG_PTR)w&&!g_inputReadyAck.compare_exchange_weak(prior,(ULONG_PTR)w)){}
+        return 0;
+    }
     if(m==g_adoptionActivationMessage && (ULONG_PTR)l==kAdoptionActivationCookie) {
         if(w!=g_adoptionActivationSequence || !CanRefreshAdoptedWindow(h) || !g_origWndProc) {
             ++C.act_refresh_cancelled;Log("virtual activation adoption refresh cancelled hwnd=%p",h);return 0;
@@ -941,9 +905,9 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         // request is never a synchronous worker SendMessage and expires on retarget,
         // config changes, a lease, or actual foreground. Preserve the original proc
         // snapshot in case application activation code creates another main window.
-        WNDPROC original=g_origWndProc,chain=CurrentWindowProcedure(h);bool unicode=g_hwndUnicode;
+        auto binding=callback.binding;WNDPROC original=binding->original,chain=CurrentWindowProcedure(h);bool unicode=binding->unicode;
         auto current=[&]() {return chain && w==g_adoptionActivationSequence && CanRefreshAdoptedWindow(h) &&
-            GetWindowThreadProcessId(h,nullptr)==GetCurrentThreadId() && original==g_origWndProc &&
+            GetWindowThreadProcessId(h,nullptr)==GetCurrentThreadId() && WndBindingLive(binding) && binding==WndBindingFind(h) && original==g_origWndProc &&
             unicode==g_hwndUnicode && (IsWindowUnicode(h)!=FALSE)==unicode && CurrentWindowProcedure(h)==chain;};
         ScopedAdoptionActivationBarrier barrier;
         if(!barrier.hook || !current()){++C.act_refresh_cancelled;return 0;}
@@ -983,32 +947,31 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_SIZE && w == SIZE_MINIMIZED) Log("window minimised (WM_SIZE SIZE_MINIMIZED, fg=%d)", (int)fg);
     if ((m >= WM_KEYFIRST && m <= WM_KEYLAST)) {
         if (m == WM_CHAR || m == WM_SYSCHAR) C.wm_char++; else C.wm_key++;
-        bool ours = RingConsume(m, w, l);
+        bool ours = RingConsume(h, m, w, l);
+        if(!ours&&MouseKeyboardIsolating()){++g_readerMessageKeyDropped;return 0;}
         // Not WM_CHAR: the type command posts characters outside the ring, and TranslateMessage derives them from keys.
         if (!ours && fg && m != WM_CHAR && m != WM_SYSCHAR) NoteOwnerInput(true);
         if (ours && w > 0 && w < 256 && (m == WM_KEYDOWN || m == WM_SYSKEYDOWN || m == WM_KEYUP || m == WM_SYSKEYUP))
             g_keyTrace[w].delivery(m == WM_KEYDOWN || m == WM_SYSKEYDOWN);
+        if(!ours)CursorObserveHardwareActivity();
     }
     if (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) {
         C.wm_mouse++;
-        bool ours = RingConsume(m, w, l);
-        if (!ours && g_cfg.isolate && !fg) { C.wm_mouse_dropped++; return 0; }
+        bool ours = RingConsume(h, m, w, l);
+        if (!ours && MouseKeyboardIsolating()) { C.wm_mouse_dropped++; return 0; }
         if (!ours && fg) NoteOwnerInput(m != WM_MOUSEMOVE);
         if (ours && m == WM_MOUSEMOVE) g_mouseMovesDelivered++;
         bool down = false; int vk = MessageKey(m, w, down);
         if (ours && vk) g_keyTrace[vk].delivery(down);
+        if(!ours)CursorObserveHardwareActivity();
     }
     if (m == WM_INPUT) {
         C.wm_input++;
-        if (!IsMagic((HRAWINPUT)l) && fg) NoteOwnerInput(false);
-        if (!IsMagic((HRAWINPUT)l) && g_cfg.isolate && !fg) {
+        if(!SelfRawTrusted(h,(HRAWINPUT)l)&&fg)NoteOwnerInput(false);
+        if(!SelfRawTrusted(h,(HRAWINPUT)l))CursorObserveHardwareActivity();
+        if (!SelfRawTrusted(h,(HRAWINPUT)l) && MouseKeyboardIsolating()) {
             C.wm_input_dropped++;
-            return g_hwndUnicode ? DefWindowProcW(h, m, w, l) : DefWindowProcA(h, m, w, l);
-        }
-        if (IsMagic((HRAWINPUT)l)) {
-            // let the game read it; DefWindowProc on a fake handle is harmless but skip it anyway
-            LRESULT r = CallOrig(h, m, w, l);
-            return r;
+            return WndBindingDefault(h,m,w,l);
         }
     }
     // Count only deactivation actually observed and forwarded by this subclass.
@@ -1033,20 +996,16 @@ PFN_DIGDS o_DILGetDeviceState[kDiLegacySets] = {};
 PFN_DIGDD o_DILGetDeviceData[kDiLegacySets] = {};
 PFN_DIACQ o_DILAcquire[kDiLegacySets] = {};
 bool g_diHooked = false;
-SRWLOCK g_devLock = SRWLOCK_INIT;
-std::map<void*, int> g_devType;  // 1 kbd, 2 mouse, 0 other
 int DevType(void* self) {
-    AcquireSRWLockShared(&g_devLock);
-    auto it = g_devType.find(self); int t = it == g_devType.end() ? -1 : it->second;
-    ReleaseSRWLockShared(&g_devLock);
-    if (t >= 0) return t;
+    // COM addresses can be recycled after Release. Query the current object's
+    // metadata instead of reusing a type belonging to an earlier lifetime.
     DIDEVCAPS caps = {}; caps.dwSize = sizeof(caps);
     PFN_DICAPS gc = (PFN_DICAPS)(*(void***)self)[3];
-    t = 0;
+    int t = 0;
     HRESULT chr = gc(self, &caps);
     if (FAILED(chr)) { caps = {}; caps.dwSize = 24; chr = gc(self, &caps); } // DX3 DIDEVCAPS
     if (SUCCEEDED(chr)) { BYTE dt = GET_DIDEVICE_TYPE(caps.dwDevType); t = (dt == DI8DEVTYPE_KEYBOARD || dt == 3) ? 1 : (dt == DI8DEVTYPE_MOUSE || dt == 2) ? 2 : 0; }
-    AcquireSRWLockExclusive(&g_devLock); g_devType[self] = t; ReleaseSRWLockExclusive(&g_devLock);
+    if(FAILED(chr))return -1; // unknown is not a proven other device, and must be retried
     return t;
 }
 HRESULT DIAcquireImpl(PFN_DIACQ orig, void* self) {
@@ -1074,12 +1033,24 @@ const BYTE* DiScanMap() {
     return cache.scan;
 }
 HRESULT DIGetDeviceStateImpl(PFN_DIGDS orig, void* self, DWORD cb, LPVOID data) {
-    HRESULT hr = orig(self, cb, data);
-    if (!data) return hr;
-    bool kbd = cb == 256, mouse = cb == sizeof(DIMOUSESTATE) || cb == sizeof(DIMOUSESTATE2);
-    if (!kbd && !mouse) return hr;
-    if (FAILED(hr)) { if (!Faking()) return hr; memset(data, 0, cb); hr = DI_OK; C.di_fake++; }
-    else if (Isolating()) memset(data, 0, cb);
+    const bool mask=ReaderMask(ReaderDiState);const int type=DevType(self);
+    if(type==0)return orig(self,cb,data); // proven other devices keep their native state format/policy
+    const bool kbd=cb==256,mouse=cb==sizeof(DIMOUSESTATE)||cb==sizeof(DIMOUSESTATE2);
+    const bool kbMouse=type==1||type==2||kbd||mouse;
+    if(type<0&&mask&&data&&!kbd&&!mouse){++g_readerDiUnknownDenied;return DIERR_NOTINITIALIZED;}
+    LPVOID output=data;BYTE localState[256]{};std::unique_ptr<BYTE[]> nativeStorage;LPVOID nativeData=data;
+    const bool privateOutput=kbMouse&&data;
+    if(privateOutput){
+        if(cb>kReaderScratchLimit||!ReaderBufferWritable(output,cb))return DIERR_INVALIDPARAM;
+        if(cb<=sizeof(localState))nativeData=localState;
+        else{nativeStorage.reset(new(std::nothrow) BYTE[cb]);if(!nativeStorage)return DIERR_OUTOFMEMORY;nativeData=nativeStorage.get();}
+        data=nativeData;
+    }
+    HRESULT hr=orig(self,cb,nativeData);
+    if(!data)return hr;
+    if(mask&&kbMouse&&SUCCEEDED(hr))memset(data,0,cb);
+    if(!kbd&&!mouse){if(privateOutput&&SUCCEEDED(hr)&&!ReaderBufferStore(output,data,cb))return DIERR_INVALIDPARAM;return hr;}
+    if(FAILED(hr)){if(hr==DIERR_INVALIDPARAM||!Faking())return hr;memset(data,0,cb);hr=DI_OK;C.di_fake++;}
     if (kbd) {
         C.di_kbd++;
         BYTE* k = (BYTE*)data;
@@ -1106,43 +1077,58 @@ HRESULT DIGetDeviceStateImpl(PFN_DIGDS orig, void* self, DWORD cb, LPVOID data) 
                 else if(!virtualDown&&!(m->rgbButtons[button]&0x80))ObserveDiMouseUp(button,released,false);}
         }
     }
+    if(privateOutput&&SUCCEEDED(hr)&&!ReaderBufferStore(output,data,cb))return DIERR_INVALIDPARAM;
     return hr;
 }
-HRESULT DIGetDeviceDataImpl(PFN_DIGDD orig, void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rg, LPDWORD inout, DWORD flags) {
-    DWORD req = inout ? *inout : 0;  // caller's capacity (the real call overwrites it with the count)
-    HRESULT hr = orig(self, cbObj, rg, inout, flags);
-    int t = DevType(self);
-    if (t == 0 || !inout) return hr;
-    if (t == 1) C.di_data_kbd++; else C.di_data_mouse++;
-    if (FAILED(hr)) { if (!Faking()) return hr; hr = DI_OK; *inout = 0; C.di_fake++; }
-    if (!rg || (flags & DIGDD_PEEK) || cbObj < 16) return hr;
-    DWORD have = *inout;
-    if (Isolating()) have = 0;
-    if(t==2 && req)g_diMouseBufferPollAt=GetTickCount64();
-    if(t==2)for(DWORD i=0;i<have && i<req;i++) {
-        auto* event=(DIDEVICEOBJECTDATA*)((BYTE*)rg+(size_t)i*cbObj);
-        if(event->dwOfs>=DIMOFS_BUTTON0 && event->dwOfs<=DIMOFS_BUTTON4)g_keyTrace[kDiMouseVk[event->dwOfs-DIMOFS_BUTTON0]].di_buffer.record((int)event->dwData);
+HRESULT DIGetDeviceDataImpl(PFN_DIGDD orig,void* self,DWORD cbObj,LPDIDEVICEOBJECTDATA rg,LPDWORD inout,DWORD flags){
+    const int type=DevType(self);const bool mask=ReaderMask(ReaderDiBuffer);
+    if(type==0||!inout)return orig(self,cbObj,rg,inout,flags);
+    if(type==1)C.di_data_kbd++;else if(type==2)C.di_data_mouse++;
+    DWORD req=0;
+    if(!ReaderBufferWritable(inout,sizeof(*inout))||!ReaderBufferLoad(inout,&req,sizeof(req)))return DIERR_INVALIDPARAM;
+    // Invalid native requests must retain their native errors, including under fake focus.
+    if((cbObj!=16&&cbObj!=sizeof(DIDEVICEOBJECTDATA))||(flags&~DIGDD_PEEK))return orig(self,cbObj,rg,inout,flags);
+    if(type<0){if(!mask)return orig(self,cbObj,rg,inout,flags);++g_readerDiUnknownDenied;const DWORD empty=0;if(!ReaderBufferStore(inout,&empty,sizeof(empty)))return DIERR_INVALIDPARAM;return DIERR_NOTINITIALIZED;}
+    std::unique_ptr<BYTE[]> nativeStorage;LPDIDEVICEOBJECTDATA nativeData=rg;
+    if(mask&&rg){
+        if(req>kReaderScratchLimit/cbObj)return DIERR_INVALIDPARAM;
+        const size_t bytes=(size_t)req*cbObj;if(!ReaderBufferWritable(rg,bytes))return DIERR_INVALIDPARAM;nativeStorage.reset(new(std::nothrow) BYTE[(std::max)(bytes,(size_t)1)]);
+        if(!nativeStorage)return DIERR_OUTOFMEMORY;nativeData=(LPDIDEVICEOBJECTDATA)nativeStorage.get();
     }
-    std::lock_guard<std::mutex> lk(g_diMx);
-    auto& q = t == 1 ? g_diKbdQ : g_diMouseQ;
-    while (!q.empty() && have < req) {
-        BYTE* slot = (BYTE*)rg + (size_t)have * cbObj;
-        memset(slot, 0, cbObj);
-        DIDEVICEOBJECTDATA* d = (DIDEVICEOBJECTDATA*)slot;
-        d->dwOfs = q.front().first; d->dwData = q.front().second; d->dwTimeStamp = GetTickCount(); d->dwSequence = g_diSeq++;
-        if (t == 1) {
-            UINT scan = (d->dwOfs & 0x7f) | ((d->dwOfs & 0x80) ? 0xe000 : 0);
-            UINT vk = MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX);
-            if (vk > 0 && vk < 256) g_keyTrace[vk].di_buffer.record((int)d->dwData);
-        } else if(d->dwOfs>=DIMOFS_BUTTON0 && d->dwOfs<=DIMOFS_BUTTON4) {
-            const int button=(int)(d->dwOfs-DIMOFS_BUTTON0);g_keyTrace[kDiMouseVk[button]].di_buffer.record((int)d->dwData);
-            if(d->dwData&0x80)ObserveDiMouseDown(button,q.front().generation,true);
-            else ObserveDiMouseUp(button,q.front().generation,true);
-        }
-        q.pop_front(); have++;
+    HRESULT hr=orig(self,cbObj,nativeData,inout,flags);
+    if(FAILED(hr)){if(hr==DIERR_INVALIDPARAM||!Faking())return hr;hr=DI_OK;DWORD empty=0;if(!ReaderBufferStore(inout,&empty,sizeof(empty)))return DIERR_INVALIDPARAM;C.di_fake++;}
+    DWORD nativeCount=0;if(!ReaderBufferLoad(inout,&nativeCount,sizeof(nativeCount)))return DIERR_INVALIDPARAM;
+    DWORD have=mask?0:nativeCount;
+    std::lock_guard<std::mutex> lock(g_diMx);auto& queue=type==1?g_diKbdQ:g_diMouseQ;
+    const bool peek=(flags&DIGDD_PEEK)!=0;
+    if(!rg){
+        const DWORD nativeVisible=mask?0:nativeCount;
+        const DWORD room=nativeVisible<req?req-nativeVisible:0;
+        const DWORD available=(DWORD)(std::min)(queue.size(),(size_t)room);
+        const DWORD reported=nativeVisible+available;
+        if(!ReaderBufferStore(inout,&reported,sizeof(reported)))return DIERR_INVALIDPARAM;
+        if(!peek)for(DWORD n=0;n<available;n++)queue.pop_front();
+        return hr;
     }
-    *inout = have;
-    return hr;
+    if(type==2&&req&&!peek)g_diMouseBufferPollAt=GetTickCount64();
+    if(type==2)for(DWORD n=0;n<have&&n<req;n++){
+        auto* event=(DIDEVICEOBJECTDATA*)((BYTE*)rg+(size_t)n*cbObj);
+        if(event->dwOfs>=DIMOFS_BUTTON0&&event->dwOfs<=DIMOFS_BUTTON4)g_keyTrace[kDiMouseVk[event->dwOfs-DIMOFS_BUTTON0]].di_buffer.record((int)event->dwData);
+    }
+    size_t index=0;
+    while(index<queue.size()&&have<req){
+        const auto event=queue[index];BYTE* slot=(BYTE*)rg+(size_t)have*cbObj;
+        DIDEVICEOBJECTDATA local{};auto* value=&local;value->dwOfs=event.first;value->dwData=event.second;
+        value->dwTimeStamp=event.timestamp;value->dwSequence=event.sequence;
+        if(!ReaderBufferStore(slot,value,cbObj))return DIERR_INVALIDPARAM;
+        if(!peek){
+            if(type==1){UINT scan=(value->dwOfs&0x7f)|((value->dwOfs&0x80)?0xe000:0);UINT vk=MapVirtualKeyW(scan,MAPVK_VSC_TO_VK_EX);if(vk>0&&vk<256)g_keyTrace[vk].di_buffer.record((int)value->dwData);}
+            else if(value->dwOfs>=DIMOFS_BUTTON0&&value->dwOfs<=DIMOFS_BUTTON4){const int button=(int)(value->dwOfs-DIMOFS_BUTTON0);g_keyTrace[kDiMouseVk[button]].di_buffer.record((int)value->dwData);if(value->dwData&0x80)ObserveDiMouseDown(button,event.generation,true);else ObserveDiMouseUp(button,event.generation,true);}
+            queue.pop_front();
+        }else ++index;
+        ++have;
+    }
+    if(!ReaderBufferStore(inout,&have,sizeof(have)))return DIERR_INVALIDPARAM;return hr;
 }
 
 HRESULT STDMETHODCALLTYPE h_DIAcquire(void* self) { return DIAcquireImpl(o_DIAcquire, self); }
@@ -1197,8 +1183,7 @@ std::atomic<LONG> g_capReq{0};  // 0 idle, 1 requested, 2 in progress
 HANDLE g_capEvent = nullptr;
 std::vector<BYTE> g_capPix; UINT g_capW = 0, g_capH = 0; std::string g_capErr; DXGI_FORMAT g_capFmt = DXGI_FORMAT_UNKNOWN;
 // Backend scratch is never the coordinate map. Only a successfully encoded single image commits this snapshot.
-struct SavedCaptureMap { bool valid=false;UINT w=0,h=0;double ox=0,oy=0,cw=0,ch=0; };
-SavedCaptureMap g_savedCaptureMap; // read/written only by commands under execMx
+#include "vi_capture_scope.inl"
 std::atomic<UINT> g_capturePixelLimit{0}; // optional transforms/bursts; zero preserves legacy PNG limits
 bool CaptureDimensionsAllowed(std::uint64_t w,std::uint64_t h) {
     UINT limit=g_capturePixelLimit;
@@ -1393,6 +1378,7 @@ HRESULT STDMETHODCALLTYPE h_ResizeBuffers1(IDXGISwapChain3* sc, UINT n, UINT w, 
     return o_ResizeBuffers1(sc, n, w, h, f, fl, mask, q);
 }
 
+#include "vi_capture_diagnostics.inl"
 #include "vi_overlaycapture.h"
 bool SavePng(const std::wstring& path, const std::vector<BYTE>& px, UINT w, UINT h, std::string& err) {
     if (!vi_paths::CaptureParent(path, err)) return false;
@@ -1440,6 +1426,8 @@ template <class T> bool HookApi(const wchar_t* mod, const char* name, T det, T* 
     void* p = h ? (void*)GetProcAddress(h, name) : nullptr;
     return HookAddr(name, p, (void*)det, (void**)orig);
 }
+#include "vi_self_raw.inl"
+#include "vi_cursor_install.inl"
 void InstallUser32Hooks() {
     const wchar_t* u = L"user32.dll";
     bool focusSafe=true;
@@ -1459,19 +1447,22 @@ void InstallUser32Hooks() {
     focusSafe=HookApi(u,"CreateWindowExA",&h_CreateWindowExA,&o_CreateWindowExA) && focusSafe;
     g_adoptionActivationMessage=focusSafe?RegisterWindowMessageW(L"vinput.virtual.activation.adoption.v1"):0;
     g_adoptionActivationSafe=focusSafe && g_adoptionActivationMessage!=0;
-    HookApi(u, "GetAsyncKeyState", &h_GetAsyncKeyState, &o_GetAsyncKeyState);
-    HookApi(u, "GetKeyState", &h_GetKeyState, &o_GetKeyState);
-    HookApi(u, "GetKeyboardState", &h_GetKeyboardState, &o_GetKeyboardState);
-    HookApi(u, "TranslateMessage", &h_TranslateMessage, &o_TranslateMessage);
-    HookApi(u, "GetCursorPos", &h_GetCursorPos, &o_GetCursorPos);
-    HookApi(u, "GetPhysicalCursorPos", &h_GetPhysicalCursorPos, &o_GetPhysicalCursorPos);
-    HookApi(u, "SetCursorPos", &h_SetCursorPos, &o_SetCursorPos);
-    HookApi(u, "SetPhysicalCursorPos", &h_SetPhysicalCursorPos, &o_SetPhysicalCursorPos);
-    HookApi(u, "ClipCursor", &h_ClipCursor, &o_ClipCursor);
+    bool keyboardSafe=HookApi(u, "GetAsyncKeyState", &h_GetAsyncKeyState, &o_GetAsyncKeyState);
+    keyboardSafe=HookApi(u, "GetKeyState", &h_GetKeyState, &o_GetKeyState)&&keyboardSafe;
+    keyboardSafe=HookApi(u, "GetKeyboardState", &h_GetKeyboardState, &o_GetKeyboardState)&&keyboardSafe;
+    g_translationNoState=TranslationNoStateRuntime();
+    g_translationInstalled=HookApi(u,"TranslateMessage",&h_TranslateMessage,&o_TranslateMessage);
+    keyboardSafe=g_translationInstalled.load()&&keyboardSafe;
+    InstallCursorHooks();
     HookApi(u, "WindowFromPoint", &h_WindowFromPoint, &o_WindowFromPoint);
     HookApi(u, "GetRawInputData", &h_GetRawInputData, &o_GetRawInputData);
     HookApi(u, "GetRawInputBuffer", &h_GetRawInputBuffer, &o_GetRawInputBuffer);
     HookApi(u, "RegisterRawInputDevices", &h_RegisterRawInputDevices, &o_RegisterRawInputDevices);
+    InstallSelfRawHooks(); // raw envelope remains optional; posted Dispatch scope is required
+    keyboardSafe=g_postedDispatchReady.load()&&keyboardSafe;
+    // Optional graphics/raw/device APIs may fail without disarming keyboard readiness.
+    g_inputHooksReady=keyboardSafe&&focusSafe&&CursorProtectionReady()&&g_inputReadyMessage!=0;
+    g_inputHookInstallFinished=true;
 }
 
 LRESULT CALLBACK DummyProc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
@@ -1617,23 +1608,63 @@ HWND FindMainWindow() {
     FindCtx u{nullptr, 0}; EnumWindows(EnumFrames, (LPARAM)&u);
     return u.area >= 200 * 150 ? u.best : nullptr;
 }
-void Retarget(HWND h) {
-    if (h == g_hwnd || !h) return;
-    struct AdoptionScope{AdoptionScope(){++g_jobRetargetDepth;}~AdoptionScope(){--g_jobRetargetDepth;}} adoptionScope;
-    JobsCancelAll("target_changed");
-    if (g_hwnd && IsWindow(g_hwnd) && g_origWndProc && CurrentWindowProcedure(g_hwnd) == h_WndProc) {
-        if (g_hwndUnicode) SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
-        else SetWindowLongPtrA(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
+#include "vi_retarget_quiescence.inl"
+struct WndAdoptionTransition {
+    bool active;
+    explicit WndAdoptionTransition(bool enabled=true):active(enabled){if(active)++g_jobRetargetDepth;}
+    void Finish(){if(active){--g_jobRetargetDepth;active=false;}}
+    ~WndAdoptionTransition(){Finish();}
+};
+struct WndConfigCommitBarrier {
+    bool active;
+    explicit WndConfigCommitBarrier(bool enabled):active(enabled){if(active)++g_wndConfigCommitDepth;}
+    void Finish(){if(active){--g_wndConfigCommitDepth;active=false;}}
+    ~WndConfigCommitBarrier(){Finish();}
+};
+void WndAdoptionNotify(const std::shared_ptr<WndProcBinding>& binding) {
+    if(!binding||binding->window!=g_hwnd||!WndBindingLive(binding)||WndBindingFind(binding->window)!=binding)return;
+    MaybeSynthActivate();
+    HWND h=binding->window;RECT rc{};wchar_t cls[128]={0},title[256]={0};
+    GetClientRect(h,&rc);GetClassNameW(h,cls,127);GetWindowTextW(h,title,255);
+    if(h==g_hwnd&&WndBindingLive(binding)&&WndBindingFind(h)==binding)
+        Log("target window %p class=%s title=%s client=%dx%d unicode=%d",h,W2U(cls).c_str(),W2U(title).c_str(),rc.right,rc.bottom,(int)binding->unicode);
+}
+// Caller owns g_wndAdoptionMx. No application/title/activation callback here.
+// Every explicit failure precedes active-target/job/generation/configuration mutation.
+bool RetargetLocked(HWND h,std::string* failure,std::shared_ptr<WndProcBinding>& notification) {
+    std::lock_guard<std::recursive_mutex> inputCommit(g_inputMx);
+    notification.reset();std::string reason;
+    auto refuse=[&](){++g_wndBindingRefused;if(failure)*failure=reason;Log("target adoption refused hwnd=%p reason=%s",h,reason.c_str());return false;};
+    if(!WndBindingCanAdopt(h,reason))return refuse();
+    if(h==g_hwnd){
+        auto current=WndBindingFind(h);
+        if(!WndBindingLive(current)||current->original!=g_origWndProc||current->unicode!=g_hwndUnicode){reason="current_window_binding_missing_or_changed";return refuse();}
+        return true;
     }
-    g_hwndUnicode = IsWindowUnicode(h) != FALSE;
-    WNDPROC prev = g_hwndUnicode ? (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)h_WndProc) : (WNDPROC)SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)h_WndProc);
-    g_origWndProc = prev;
-    RECT rc; GetClientRect(h, &rc);
-    {std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);if (!g_vcurTouched) { g_vcurX = rc.right / 2; g_vcurY = rc.bottom / 2;++g_pointerIssued; }g_hwnd = h;}
+    // Refuse before touching the candidate binding, jobs, generation or config.
+    if(!RetargetQuiescenceRequired(reason))return refuse();
+    std::shared_ptr<WndProcBinding> binding;
+    if(!WndBindingAttach(h,binding,reason))return refuse();
+    // Only committed adoption may invalidate capture-bound jobs/snapshots.
+    WndAdoptionTransition transition;
+    ++g_inputReadyGeneration;
+    JobsCancelAll("target_changed");
+    WndBindingDetachIfTop(g_hwnd);
+    RECT rc{};GetClientRect(h,&rc);
+    {std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
+     g_hwndUnicode=binding->unicode;g_origWndProc=binding->original;
+     if(!g_vcurTouched){g_vcurX=rc.right/2;g_vcurY=rc.bottom/2;++g_pointerIssued;}g_hwnd=h;}
     {std::lock_guard<std::mutex> lock(g_synthMx);g_appActive=-1;g_lastSynthAct=0;g_synthLeft=3;}
-    if(prev)MaybeSynthActivate();
-    wchar_t cls[128] = {0}, title[256] = {0}; GetClassNameW(h, cls, 127); GetWindowTextW(h, title, 255);
-    Log("target window %p class=%s title=%s client=%dx%d unicode=%d", h, W2U(cls).c_str(), W2U(title).c_str(), rc.right, rc.bottom, (int)g_hwndUnicode);
+    notification=binding;return true;
+}
+bool Retarget(HWND h,std::string* failure=nullptr) {
+    std::shared_ptr<WndProcBinding> notification;
+    {std::unique_lock<std::mutex> adoptionLock(g_wndAdoptionMx);
+     // Recheck after serialization: config may have forced a target since the
+     // monitor sampled its candidate outside this mutex.
+     if(g_hwndForced&&h!=g_hwnd){if(failure)*failure="target_forced";return false;}
+     if(!RetargetLocked(h,failure,notification))return false;}
+    WndAdoptionNotify(notification);return true;
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -1663,7 +1694,8 @@ bool ParseStr(const std::string& s, size_t& i, std::string& out) {
     }
     if (i >= s.size()) return false; i++; return true;
 }
-bool ParseJson(const std::string& s, JObj& o) {
+bool ParseJson(const std::string& s, JObj& o, bool* duplicate = nullptr) {
+    if (duplicate) *duplicate = false;
     size_t i = 0; SkipWs(s, i); if (i >= s.size() || s[i] != '{') return false; i++;
     for (;;) {
         SkipWs(s, i); if (i < s.size() && s[i] == '}') return true;
@@ -1675,6 +1707,7 @@ bool ParseJson(const std::string& s, JObj& o) {
         else if (!s.compare(i, 5, "false")) { v.t = 3; v.b = false; i += 5; }
         else if (!s.compare(i, 4, "null")) { v.t = 4; i += 4; }
         else { char* e = nullptr; v.n = strtod(s.c_str() + i, &e); if (e == s.c_str() + i) return false; v.t = 2; i = e - s.c_str(); }
+        if (duplicate && o.find(k) != o.end()) *duplicate = true;
         o[k] = v;
         SkipWs(s, i); if (i < s.size() && s[i] == ',') { i++; continue; } if (i < s.size() && s[i] == '}') return true; return false;
     }
@@ -1693,6 +1726,8 @@ struct JOut {
     void raw(const char* k, const std::string& v) { key(k); s += v; }
     std::string done() { return s + "}"; }
 };
+#include "vi_capture_diagnostics_json.inl"
+
 void EdgeFields(JOut& o,const PointerPath* path=nullptr){std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);PointerPath live;const PointerPath* p=path;if(!p&&live.Init(g_vcurX,g_vcurY))p=&live;
     o.num("edge_margin",g_cfg.edgeMargin);o.bol("edge_contact",p&&p->Contact(g_vcurX,g_vcurY)!=0);o.num("edge_sides",p?p->Contact(g_vcurX,g_vcurY):0);
     o.bol("edge_guard_applied",p&&p->changed);o.bol("edge_guard_bypassed",p&&p->bypassed);if(p){o.num("edge_margin_x",p->mx);o.num("edge_margin_y",p->my);}}
@@ -1716,21 +1751,12 @@ bool JBool(const JObj& o, const char* k, bool d) { auto it = o.find(k); if (it =
 int VkFromName(const std::string& n) { return vi_keys::VkFromName(n); }
 std::vector<int> ParseCombo(const std::string& s) { return vi_keys::ParseCombo(s); }
 // unknown names used to be ignored silently (the command then returned ok with nothing pressed); they are now reported
-WORD PadButtonsFromNames(const std::string& s, std::string* bad = nullptr) {
-    WORD b = 0; size_t st = 0;
-    while (st < s.size()) {
-        size_t p = s.find_first_of("+, ", st); std::string n = s.substr(st, p == std::string::npos ? std::string::npos : p - st);
-        for (auto& c : n) c = (char)tolower((unsigned char)c);
-        if (n == "a") b |= 0x1000; else if (n == "b") b |= 0x2000; else if (n == "x") b |= 0x4000; else if (n == "y") b |= 0x8000;
-        else if (n == "up") b |= 1; else if (n == "down") b |= 2; else if (n == "left") b |= 4; else if (n == "right") b |= 8;
-        else if (n == "start") b |= 0x10; else if (n == "back") b |= 0x20; else if (n == "ls") b |= 0x40; else if (n == "rs") b |= 0x80;
-        else if (n == "lb") b |= 0x100; else if (n == "rb") b |= 0x200;
-        else if (n == "guide") b |= 0x400;   // only visible through XInputGetStateEx
-        else if (n.empty() || n == "none") {}
-        else if (bad && bad->empty()) *bad = n;
-        if (p == std::string::npos) break; st = p + 1;
-    }
-    return b;
+bool PadIsOff(std::string names){for(auto& ch:names)ch=(char)tolower((unsigned char)ch);return names=="off";}
+WORD PadButtonsFromNames(const std::string& names, std::string* bad = nullptr, unsigned* aliases = nullptr) {
+    vi_pad_buttons::State state; std::string error;
+    if (!vi_pad_buttons::ParsePadButtonState(names, state, error)) { if (bad) *bad = error; return 0; }
+    if (aliases) *aliases = state.trigger_mask;
+    return state.buttons;
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -1766,6 +1792,12 @@ void ReleaseAll() {
     std::lock_guard<std::mutex> padLock(g_padStateMx);g_padButtons = 0; g_padSetMask = 0; g_padLT = g_padRT = g_padLX = g_padLY = g_padRX = g_padRY = 0; g_padPacket++;
 }
 std::string ErrJ(const std::string& e) { JOut o; o.bol("ok", false); o.str("error", e); return o.done(); }
+std::string WndAdoptionRefused(HWND requested,const std::string& reason) {
+ JOut o;o.bol("ok",false);o.bol("adoption_refused",true);o.str("adoption_reason",reason);
+ o.str("error","window adoption refused: "+reason);o.bol("target_changed",false);o.bol("input_injected",false);
+ char value[32];sprintf_s(value,"0x%llX",(unsigned long long)(ULONG_PTR)requested);o.str("requested_hwnd",value);
+ sprintf_s(value,"0x%llX",(unsigned long long)(ULONG_PTR)g_hwnd);o.str("hwnd",value);return o.done();
+}
 std::string OkJ() { JOut o; o.bol("ok", true); return o.done(); }
 std::string AntiCheatRefusal() {
     char name[256] = {0}; WideCharToMultiByte(CP_UTF8, 0, g_acModule, -1, name, sizeof(name) - 1, nullptr, nullptr);
@@ -1779,6 +1811,13 @@ std::string AntiCheatRefusal() {
 void EnforceAntiCheat() {
     if (g_acProduct.load() && !g_acLogged.exchange(true)) { JobsCancelAll("anticheat_detected"); ReleaseAll(); Log("anti-cheat module detected (%s): input and capture disabled", g_acProduct.load()); }
 }
+
+std::string CaptureScopeFailure(const char* reason,const CaptureScope* scope=nullptr,bool fileWritten=false){
+ JOut out;out.bol("ok",false);out.bol("input_injected",false);out.bol("capture_space_updated",false);out.bol("capture_space_valid",false);out.bol("file_written",fileWritten);out.str("capture_scope_reason",reason?reason:"scope_changed");
+ out.str("error","capture-space no longer matches the adopted window lifetime/client geometry; save a fresh single-frame capture");if(scope)out.raw("capture_scope",CaptureScopeJson(*scope));return out.done();
+}
+std::string CaptureMapRefusal(){const char* why=nullptr;CaptureMapCurrent(&why);return CaptureScopeFailure(why,g_savedCaptureMap.valid?&g_savedCaptureMap.scope:nullptr);}
+
 
 std::string KeyTraceJson(int vk) {
     if (vk <= 0 || vk > 255) return ErrJ("trace needs a valid key");
@@ -1827,7 +1866,7 @@ void ClaimFields(JOut& o) {
 // Commands that neither drive input nor change state: always allowed, and they bypass the exec mutex so an
 // agent can read status while a long hover / --after-frames / hold is running on the same target.
 bool IsOpenCommand(const std::string& cmd) {
-    return cmd == "ping" || cmd == "status" || cmd == "log" || cmd == "trace" || cmd == "claim" || cmd == "unclaim" || cmd == "restore-foreground" || cmd == "jobs" || cmd == "job-status";
+    return cmd == "ping" || cmd == "readiness" || cmd == "status" || cmd == "log" || cmd == "trace" || cmd == "claim" || cmd == "unclaim" || cmd == "restore-foreground" || cmd == "jobs" || cmd == "job-status";
 }
 std::string ClaimRefusal(const char* why) {
     // caller holds g_claimMx
@@ -1868,9 +1907,14 @@ std::string ClaimGate(const std::string& cmd, const JObj& j) {
 
 bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_jobs.inl"
+#include "vi_readiness.inl"
+#include "vi_cursor_status.inl"
 
 std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
+    o.num("key_sequence_version",1);
+    o.num("cursor_guard_version",1);o.raw("cursor_guard",CursorGuardStatus());
+    o.num("pad_timeline_version",2);
 #ifdef _WIN64
     o.num("bits", 64);
 #else
@@ -1880,6 +1924,8 @@ std::string StatusJson() {
     o.bol("anticheat_disabled", g_acProduct.load() != nullptr);
     o.str("log_path", W2U(g_logPath));
     char hb[32]; sprintf_s(hb, "0x%llX", (unsigned long long)(ULONG_PTR)g_hwnd); o.str("hwnd", hb);
+    o.raw("retarget_quiescence",RetargetQuiescenceStatusJson());
+    o.bol("wndproc_binding_ready",WndBindingReady(g_hwnd));o.num("wndproc_adoption_refused",(double)g_wndBindingRefused.load());o.num("wndproc_unbound_callbacks",(double)g_wndBindingMissing.load());
     if (g_hwnd) {
         wchar_t cls[128] = {0}, title[256] = {0}; GetClassNameW(g_hwnd, cls, 127); GetWindowTextW(g_hwnd, title, 255);
         RECT rc; GetClientRect(g_hwnd, &rc);
@@ -1901,11 +1947,12 @@ std::string StatusJson() {
         char h[32];sprintf_s(h,"0x%llX",(unsigned long long)(ULONG_PTR)g_fgRestoreWindow.load());guard.str("restore_hwnd",h);
         o.raw("foreground_guard",guard.done());
     }
-    o.bol("fakefocus", g_cfg.fakefocus); o.bol("autoactivate",g_cfg.autoactivate);o.num("app_active",g_appActive);o.num("autoactivate_attempts_left",g_synthLeft); o.bol("isolate", g_cfg.isolate); o.bol("blockfocus", g_cfg.blockfocus); o.bol("nofullscreen", g_cfg.nofullscreen); o.bol("keepvisible", g_cfg.keepvisible); if (g_hwnd) o.bol("minimized", IsIconic(g_hwnd) != FALSE);
+    o.raw("posted_input",PostedInputStatusJson());bool isolationSnapshot=true;o.raw("physical_input",PhysicalInputStatusJson(&isolationSnapshot));o.bol("fakefocus", g_cfg.fakefocus); o.bol("autoactivate",g_cfg.autoactivate);o.num("app_active",g_appActive);o.num("autoactivate_attempts_left",g_synthLeft); o.bol("isolate", isolationSnapshot); o.bol("blockfocus", g_cfg.blockfocus); o.bol("nofullscreen", g_cfg.nofullscreen); o.bol("keepvisible", g_cfg.keepvisible); if (g_hwnd) o.bol("minimized", IsIconic(g_hwnd) != FALSE);
     { JOut fs;fs.str("policy",g_cfg.nofullscreen?(g_fullscreenPolicy==1?"refuse":"borderless"):"native");fs.num("requests",g_fsRequests);fs.num("emulated",g_fsEmulated);fs.num("refused",g_fsRefused);fs.num("failures",g_fsFailed);fs.num("passthrough",g_fsPassthrough);fs.num("states_live",g_fsStates);fs.num("output_refs",g_fsOutputs);fs.num("last_hresult",(double)(unsigned long)g_fsLastResult.load());fs.bol("blocked_before_first_present",FullscreenBlockedBeforePresent());o.raw("fullscreen",fs.done()); }
     o.num("cursor_mode", g_cfg.cursor);o.str("cursor_mode_name",g_cfg.cursor==1?"virtual":g_cfg.cursor==2?"real":"auto");o.str("effective_cursor",UseVirtualCursor()?"virtual":"real");o.str("cursor_effective",UseVirtualCursor()?"virtual":"real");o.bol("owner_active",OwnerCursorActive());o.bol("owner_holding",g_ownerHolding);o.num("owner_input_count",g_ownerInputCount);o.num("owner_guard_standdowns",g_ownerStanddowns);if(TestHooksEnabled())o.num("test_realfg",g_testRealFg);o.bol("user_took_foreground",g_userIntent.Active()); o.num("rawmode", g_cfg.rawmode); o.num("msgmode", g_cfg.msgmode);
     o.num("vcur_x", g_vcurX); o.num("vcur_y", g_vcurY);
     EdgeFields(o);o.raw("input_precision","{\"edge_guard\":true,\"release_poll\":true,\"placement_drag\":true}");
+    o.raw("self_raw",SelfRawStatusJson());
     o.num("relative_accounting_version",1);o.str("di_pending_dx",std::to_string(g_diDX.load()));o.str("di_pending_dy",std::to_string(g_diDY.load()));o.num("raw_unread_overwrites",(double)g_rawRingOverwrites.load());
     RawReg rr = QueryRawReg();
     o.bol("raw_kbd", rr.kbd); o.bol("raw_kbd_nolegacy", rr.kbdNoLegacy); o.bol("raw_mouse", rr.mouse); o.bol("raw_mouse_nolegacy", rr.mouseNoLegacy);
@@ -1922,7 +1969,7 @@ std::string StatusJson() {
     {   // native capture: which API the counted frames come from, and what served the last capture
         o.str("frame_api", ApiName(g_frameApi)); o.num("frames", (double)C.present_ours.load());
         o.str("capture_path", ApiName(g_lastCaptureApi));
-        o.num("capture_output_version",1);
+        o.num("capture_output_version",1);o.num("capture_scope_version",1);
         JOut fa; fa.num("d3d11", (double)g_frame11.load()); fa.num("d3d12", (double)g_frame12.load());
         fa.num("ddraw",(double)g_frameDd.load()); fa.num("gl", (double)g_frameGl.load()); fa.num("vk", (double)g_frameVk.load()); fa.num("foreign_dxgi", (double)g_frameForeign.load());
         o.raw("frames_by_api", fa.done());
@@ -1961,6 +2008,7 @@ std::string StatusJson() {
 }
 
 std::string DoCapture(const JObj& j) {
+    CaptureDiagReset();
     std::string path = JStr(j, "path");
     bool hashOnly = JBool(j, "hash_only", false);
     if (path.empty() && !hashOnly) return ErrJ("capture needs path");
@@ -1989,6 +2037,7 @@ std::string DoCapture(const JObj& j) {
     double requestedFrames = JNum(j, "after_frames", 0);
     if (timeout < 1 || timeout > 120000 || requestedFrames < 0 || requestedFrames > 3600 || requestedFrames != std::floor(requestedFrames)) return ErrJ("capture timeout/after-frames out of range");
     if(method!="printwindow"&&(FullscreenBlockedBeforePresent()||DdBlockedBeforePresent()||D9BlockedBeforePresent())){JOut blocked;blocked.bol("ok",false);blocked.str("error","fullscreen negotiation blocked before the first target Present; inspect status.fullscreen or use config fullscreen=borderless (native exclusive remains disabled)");blocked.str("reason","fullscreen_blocked_before_first_present");return blocked.done();}
+    CaptureScope captureScope;if(!CaptureScopeTake(captureScope))return CaptureScopeFailure("capture_target_unavailable");
     long frameBefore = C.present_ours;
     DWORD frameStart = GetTickCount();
     while (C.present_ours - frameBefore < requestedFrames && GetTickCount() - frameStart < (DWORD)timeout) Sleep(2);
@@ -2036,7 +2085,8 @@ std::string DoCapture(const JObj& j) {
     }
     if (!got) return ErrJ(err);
     if (used=="swapchain" && g_capApi==API_DDRAW && DdGeometryMismatch()) return ErrJ("ddraw: client dimensions no longer match virtual display mode");
-    RECT rc{}; if (g_hwnd) GetClientRect(g_hwnd, &rc);
+    const char* scopeReason=nullptr;if(!CaptureScopeCurrent(captureScope,&scopeReason))return CaptureScopeFailure(scopeReason,&captureScope);
+    RECT rc{0,0,captureScope.width,captureScope.height};
     double mapOx=0,mapOy=0,mapCw=rc.right,mapCh=rc.bottom;
     g_captureOriginX = g_captureOriginY = 0; g_captureClientW = rc.right; g_captureClientH = rc.bottom;
     if (JHas(j, "region")) {
@@ -2069,12 +2119,15 @@ std::string DoCapture(const JObj& j) {
             if(outputW!=g_capW||outputH!=g_capH){vi_vision::Image resized;if(!vi_image::Resize(output,outputW,outputH,resized,e3))return ErrJ(e3);output=std::move(resized);}
             if(!vi_image::Save(wp,output,format,(int)qualityValue,e3))return ErrJ(e3);
         }else if(!SavePng(wp,g_capPix,g_capW,g_capH,e3))return ErrJ(e3);
-        if(!preserveMap)g_savedCaptureMap={true,outputW,outputH,mapOx,mapOy,mapCw,mapCh};
+        if(!CaptureScopeCurrent(captureScope,&scopeReason))return CaptureScopeFailure(scopeReason,&captureScope,true);
+
     }
+    if(!CaptureScopeCurrent(captureScope,&scopeReason))return CaptureScopeFailure(scopeReason,&captureScope,!hashOnly);
+    if(!hashOnly&&!preserveMap)g_savedCaptureMap={true,outputW,outputH,mapOx,mapOy,mapCw,mapCh,captureScope};
     g_lastCaptureApi = used == "printwindow" ? API_PRINTWINDOW : g_capApi.load();
     C.captures++;
     JOut o; o.bol("ok", true); o.str("path", path); o.str("method", used); o.str("capture_path", path_); o.num("w", outputW); o.num("h", outputH);
-    o.num("source_w",g_capW);o.num("source_h",g_capH);o.str("format",format);o.str("hash_scope","source_region_bgra");o.bol("capture_space_updated",!hashOnly&&!preserveMap);
+    o.num("source_w",g_capW);o.num("source_h",g_capH);o.str("format",format);o.str("hash_scope","source_region_bgra");o.bol("capture_space_updated",!hashOnly&&!preserveMap);o.raw("capture_scope",CaptureScopeJson(captureScope));
     if(format=="jpeg")o.num("quality",qualityValue);
     o.num("frame", used == "printwindow" ? (double)C.present_ours.load() : (double)g_capturedPresent.load());
     o.str("hash", hashText); o.num("present_before", frameBefore); o.num("captured_present", g_capturedPresent);
@@ -2082,6 +2135,7 @@ std::string DoCapture(const JObj& j) {
     o.num("region_client_w", mapCw); o.num("region_client_h", mapCh);
     if (!err.empty()) o.str("note", err);
     o.num("client_w", rc.right); o.num("client_h", rc.bottom);
+    o.raw("capture_diagnostics",CaptureDiagnosticsJson(used=="printwindow"));
     return o.done();
 }
 
@@ -2093,23 +2147,41 @@ bool ResolveXY(const JObj& j, LONG& x, LONG& y) {
     double fx=0,fy=0;if(!number("x",g_vcurX,fx)||!number("y",g_vcurY,fy))return false;
     RECT rc{}; if (!g_hwnd||!GetClientRect(g_hwnd, &rc)||rc.right<1||rc.bottom<1)return false;
     if (JBool(j, "norm", false)) { fx *= rc.right; fy *= rc.bottom; }
-    else if (JStr(j, "space") == "capture") {if(!g_savedCaptureMap.valid)return false;fx = g_savedCaptureMap.ox + fx * g_savedCaptureMap.cw / g_savedCaptureMap.w; fy = g_savedCaptureMap.oy + fy * g_savedCaptureMap.ch / g_savedCaptureMap.h; }
+    else if (JStr(j, "space") == "capture") {if(!CaptureMapCurrent())return false;fx = g_savedCaptureMap.ox + fx * g_savedCaptureMap.cw / g_savedCaptureMap.w; fy = g_savedCaptureMap.oy + fy * g_savedCaptureMap.ch / g_savedCaptureMap.h; }
     if(!std::isfinite(fx)||!std::isfinite(fy)||fx<-2147483648.0||fx>2147483647.0||fy<-2147483648.0||fy>2147483647.0)return false;
     x=(LONG)std::llround(fx);y=(LONG)std::llround(fy);return true;
 }
 
+#include "vi_type_input.inl"
+
 std::string Exec(const std::string& line) {
     JObj j;
-    if (!ParseJson(line, j)) return ErrJ("bad json");
+    bool duplicate = false;
+    if (!ParseJson(line, j, &duplicate)) return ErrJ("bad json");
     std::string cmd = JStr(j, "cmd");
-    if(line.size()>65536&&(cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="pad"||cmd=="pad-ramp"||cmd=="pad-timeline"))return ErrJ("input job request exceeds64KiB; no input was injected");
-    if((JHas(j,"async")||JHas(j,"replace"))&&cmd!="placement-drag"&&cmd!="key"&&cmd!="hold"&&cmd!="pulse"&&cmd!="pad"&&cmd!="pad-ramp"&&cmd!="pad-timeline"&&cmd!="up"&&cmd!="mouseup"&&cmd!="release")return ErrJ("async/replace only apply to timed input jobs; no input was injected");
+    CursorCommandScope cursorCommandScope(cmd);
+    if (duplicate && (cmd == "pad" || cmd == "pad-ramp" || cmd == "pad-timeline")) return ErrJ("pad request has duplicate fields; no input was injected");
+    if(JHas(j,"for_ms")&&cmd!="config")return ErrJ("for_ms applies only to config isolate=false; no input or configuration changed");
+    if(JHas(j,"stagger_ms")&&cmd!="pad-timeline")return ErrJ("stagger_ms is only implemented for pad-timeline; no input was injected");
+    if(line.size()>65536&&(cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="seq"||cmd=="sequence"||cmd=="pad"||cmd=="pad-ramp"||cmd=="pad-timeline"))return ErrJ("input job request exceeds64KiB; no input was injected");
+    if((JHas(j,"async")||JHas(j,"replace"))&&cmd!="placement-drag"&&cmd!="key"&&cmd!="hold"&&cmd!="pulse"&&cmd!="seq"&&cmd!="sequence"&&cmd!="pad"&&cmd!="pad-ramp"&&cmd!="pad-timeline"&&cmd!="up"&&cmd!="mouseup"&&cmd!="release")return ErrJ("async/replace only apply to timed input jobs; no input was injected");
     { std::string refused = ClaimGate(cmd, j); if (!refused.empty()) return refused; }
     if (g_acProduct.load() && cmd != "ping" && cmd != "status" && cmd != "log") { EnforceAntiCheat(); return AntiCheatRefusal(); }
+    if(cmd=="readiness")return InputReadyCommand(j);
+    if(CursorInputProducer(cmd)&&!(cmd=="pad"&&PadIsOff(JStr(j,"buttons")))&&!CursorProtectionReady())return CursorInputRefusal();
+    if(InputNeedsReady(cmd,j)) {
+        std::string ready=CommandInputReadiness(cmd,j);JObj state;
+        if(!ParseJson(ready,state)||!JBool(state,"ok",false))return ready;
+        if(!CursorProtectionReady())return CursorInputRefusal();
+        // Ownership can change while the window or its queue is becoming ready.
+        std::string refused=ClaimGate(cmd,j);if(!refused.empty())return refused;
+    }
     if(cmd=="jobs"||cmd=="job-status"||cmd=="job-cancel")return JobCommand(cmd,j);
-    if((cmd=="mouse"||cmd=="click"||cmd=="mousedown")&&(JHas(j,"x")||JHas(j,"y"))&&JStr(j,"space")=="capture"&&!g_savedCaptureMap.valid)return ErrJ("capture-space requires a successful saved single-frame capture; bursts/hash-only do not set it");
+    const bool coordinateMotion=(cmd=="mouse"||cmd=="move")&&!JHas(j,"dx")&&!JHas(j,"dy");
+    const bool positionedPress=(cmd=="click"||cmd=="mousedown")&&(JHas(j,"x")||JHas(j,"y"));
+    if((coordinateMotion||positionedPress)&&JStr(j,"space")=="capture"&&!JBool(j,"norm",false)&&!CaptureMapCurrent())return CaptureMapRefusal();
     if (cmd == "claim" || cmd == "unclaim") { JOut o; o.bol("ok", true); ClaimFields(o); return o.done(); }
-    if (cmd == "ping") return OkJ();
+    if (cmd == "ping"){if(JBool(j,"capture_scope_support",false)){JOut out;out.bol("ok",true);out.num("capture_scope_version",1);return out.done();}if(JBool(j,"isolation_deadline_support",false)){JOut out;out.bol("ok",true);out.num("isolation_deadline_version",1);return out.done();}if(JBool(j,"pad_timeline_support",false)){JOut out;out.bol("ok",true);out.num("pad_timeline_version",2);return out.done();}return OkJ();}
     if (cmd == "status") return StatusJson();
     if (cmd == "trace") return KeyTraceJson(VkFromName(JStr(j, "key")));
     if (cmd == "log") {
@@ -2118,17 +2190,39 @@ std::string Exec(const std::string& line) {
         JOut o; o.bol("ok", true); o.raw("log", a); return o.done();
     }
     if (cmd == "config") {
+        if(duplicate)return ErrJ("config request has duplicate fields; no configuration changed");
+        if(JHas(j,"for")||JHas(j,"for-ms")||JHas(j,"isolate_for_ms"))return ErrJ("use for_ms for the isolation deadline; no configuration changed");
+        ULONGLONG isolateFor=0;
+        if(JHas(j,"for_ms")){
+            const auto& value=j.find("for_ms")->second;
+            if(!JHas(j,"isolate")||j.find("isolate")->second.t!=3||JBool(j,"isolate",true)||value.t!=2||!std::isfinite(value.n)||value.n<1||value.n>120000||value.n!=std::floor(value.n))return ErrJ("for_ms requires isolate=false and an integer1..120000 ms; no configuration changed");
+            isolateFor=(ULONGLONG)value.n;
+        }
+        // Validate every configuration choice which can reject before changing the lease.
+        if(JHas(j,"fullscreen")&&JStr(j,"fullscreen")!="borderless"&&JStr(j,"fullscreen")!="refuse")return ErrJ("fullscreen must be borderless or refuse; no configuration changed");
         if(JHas(j,"edge_margin")){double n=JNum(j,"edge_margin",-1);if(!(n>=0&&n<=4096&&n==std::floor(n))||j.find("edge_margin")->second.t==3)return ErrJ("edge_margin must be integer0..4096 client pixels; no configuration changed");}
         if(JHas(j,"hwnd")){DWORD windowOwner=0;HWND requested=(HWND)(ULONG_PTR)strtoull(JStr(j,"hwnd").c_str(),nullptr,0);if(!IsWindow(requested)||!GetWindowThreadProcessId(requested,&windowOwner)||windowOwner!=g_pid)return ErrJ("hwnd must belong to this target process; no configuration changed");}
+        if(JHas(j,"hwnd")){HWND requested=(HWND)(ULONG_PTR)strtoull(JStr(j,"hwnd").c_str(),nullptr,0);std::string reason;if(!WndBindingCanAdopt(requested,reason)){++g_wndBindingRefused;return WndAdoptionRefused(requested,reason);}}
 #ifndef _WIN64
         if(JHas(j,"raw")&&JStr(j,"raw")=="buffer")return ErrJ("raw=buffer is unsupported for 32-bit/x86 synthetic records; use raw=auto or raw=post");
 #endif
 
+        // Stage every potentially failing adoption operation before changing any
+        // setting. Keep retarget serialization and an activation/readiness-only barrier
+        // through the non-callback configuration commit.
+        WndConfigCommitBarrier configTransition(JHas(j,"hwnd"));
+        std::unique_lock<std::mutex> adoptionCommit(g_wndAdoptionMx,std::defer_lock);
+        std::shared_ptr<WndProcBinding> notification;
+        if(JHas(j,"hwnd")){
+            adoptionCommit.lock();HWND h=(HWND)(ULONG_PTR)strtoull(JStr(j,"hwnd").c_str(),nullptr,0);std::string reason;
+            if(!RetargetLocked(h,&reason,notification))return WndAdoptionRefused(h,reason);
+            g_hwndForced=true;
+        }
         if (JHas(j, "autoactivate")) g_cfg.autoactivate = JBool(j, "autoactivate", true);
         if (JHas(j, "fakefocus")) g_cfg.fakefocus = JBool(j, "fakefocus", true);
-        if (JHas(j, "isolate")) g_cfg.isolate = JBool(j, "isolate", true);
+        if(JHas(j,"isolate"))SetIsolation(JBool(j,"isolate",true),isolateFor);
         if (JHas(j, "blockfocus")) g_cfg.blockfocus = JBool(j, "blockfocus", true);
-        if (JHas(j, "fullscreen")) { std::string policy=JStr(j,"fullscreen");if(policy!="borderless"&&policy!="refuse")return ErrJ("fullscreen must be borderless or refuse (nofullscreen=false explicitly allows native passthrough)");g_fullscreenPolicy=policy=="refuse"?1:0; }
+        if (JHas(j, "fullscreen")) g_fullscreenPolicy=JStr(j,"fullscreen")=="refuse"?1:0; // validated before staging
         if (JHas(j, "nofullscreen")) g_cfg.nofullscreen = JBool(j, "nofullscreen", true);
         if (JHas(j, "keepvisible")) g_cfg.keepvisible = JBool(j, "keepvisible", true);
         if (JHas(j, "vk")) g_vkEnabled = JBool(j, "vk", true);   // vk=off: Vulkan hooks pass through (no usage change, no capture)
@@ -2137,7 +2231,9 @@ std::string Exec(const std::string& line) {
         if (JHas(j,"edge_margin"))g_cfg.edgeMargin=(int)JNum(j,"edge_margin",8);
         if (JHas(j, "raw")) { std::string c = JStr(j, "raw"); g_cfg.rawmode = c == "post" ? 1 : c == "buffer" ? 2 : c == "off" ? 3 : 0; }
         if (JHas(j, "msgs")) { std::string c = JStr(j, "msgs"); g_cfg.msgmode = c == "on" ? 1 : c == "off" ? 2 : 0; }
-        if (JHas(j, "hwnd")) { HWND h = (HWND)(ULONG_PTR)strtoull(JStr(j, "hwnd").c_str(), nullptr, 0); if (IsWindow(h)) { g_hwndForced = true; Retarget(h); } else return ErrJ("not a window"); }
+        if(adoptionCommit.owns_lock())adoptionCommit.unlock();
+        configTransition.Finish();
+        WndAdoptionNotify(notification);
         return StatusJson();
     }
     if (cmd == "activate") {
@@ -2172,6 +2268,7 @@ std::string Exec(const std::string& line) {
     if (cmd == "release") { ReleaseAll(); return OkJ(); }
     if (cmd == "restore") { if (!g_hwnd) return ErrJ("no window"); ShowWindowAsync(g_hwnd, SW_SHOWNOACTIVATE); Sleep(300); return StatusJson(); }
     if(cmd=="placement-drag")return SchedulePlacement(j);
+    if(cmd=="seq"||cmd=="sequence")return ScheduleKeySequence(j);
     if(cmd=="pulse"||cmd=="key"||cmd=="hold")return ScheduleKeyInput(j,cmd=="pulse");
     if (cmd == "down" || cmd == "up") {
         std::vector<int> vks = ParseCombo(JStr(j, "key"));
@@ -2188,28 +2285,7 @@ std::string Exec(const std::string& line) {
         }
         return OkJ();
     }
-    if (cmd == "type") {
-        std::wstring t = U2W(JStr(j, "text"));
-        double delay = JNum(j, "delay", 30);
-        bool keys = JBool(j, "keys", false);
-        if (!g_hwnd) return ErrJ("no window");
-        for (wchar_t ch : t) {
-            if (keys) {
-                SHORT vs = VkKeyScanW(ch);
-                if (vs != -1) {
-                    int vk = vs & 0xFF; bool sh = (vs & 0x100) != 0;
-                    if (sh) KeyEvent(VK_SHIFT, true);
-                    KeyEvent(vk, true); Sleep(20); KeyEvent(vk, false);
-                    if (sh) KeyEvent(VK_SHIFT, false);
-                }
-            } else {
-                if (ch == L'\n') { KeyEvent(VK_RETURN, true); Sleep(20); KeyEvent(VK_RETURN, false); }
-                else PostMessageW(g_hwnd, WM_CHAR, (WPARAM)ch, 1);
-            }
-            SleepMs(delay);
-        }
-        return OkJ();
-    }
+    if(cmd=="type")return TypeInput(j);
     if (cmd == "mouse" || cmd == "move") {
         if (!g_hwnd) return ErrJ("no window");
         double stepsValue=JNum(j,"steps",1);if(!(stepsValue>=1&&stepsValue<=10000&&stepsValue==std::floor(stepsValue)))return ErrJ("steps must be integer1..10000");int steps=(int)stepsValue;
@@ -2265,6 +2341,7 @@ std::string Exec(const std::string& line) {
             if(g_cfg.edgeMargin>0)g_cfg.cursor=1;
             for (int s=1; s<=steps; s++) {
                 if(!path.Valid())return motionError("pointer target changed or resized during move");
+                if(JStr(j,"space")=="capture"&&!JBool(j,"norm",false)&&!CaptureMapCurrent())return motionError("capture-space changed during move; no further movement was published");
                 AppliedMouse a=MouseMoveTo((LONG)(ox+((long long)x-ox)*s/steps),(LONG)(oy+((long long)y-oy)*s/steps),false,0,0,false,&path);
                 appliedX+=a.dx; appliedY+=a.dy;
                 accounting.Add(a.accounting);++published;
@@ -2293,7 +2370,8 @@ std::string Exec(const std::string& line) {
         g_cfg.cursor = 1;
         long hoverFrames = 0, hoverRequested = 0; bool hoverUnconfirmed = false, queueConfirmed = false; HWND preparedWindow = g_hwnd; WNDPROC qualifiedOuter = nullptr;
         const bool positioned=JHas(j,"x") || JHas(j,"y");
-        if(cmd=="mouseup"&&positioned&&JStr(j,"space")=="capture"&&!g_savedCaptureMap.valid){upCleanup.Run();JOut out;out.bol("ok",false);out.str("error","capture-space requires a successful saved single-frame capture; mouse button cleanup was attempted without moving the cursor");out.num("button_down_count",0);out.bol("button_released",!g_vk[vk]);return out.done();}
+        CaptureScope clickScope;if(cmd!="mouseup"&&!CaptureScopeTake(clickScope))return ErrJ("pointer target scope unavailable");
+        if(cmd=="mouseup"&&positioned&&JStr(j,"space")=="capture"&&!JBool(j,"norm",false)&&!CaptureMapCurrent()){const char* why=nullptr;CaptureMapCurrent(&why);upCleanup.Run();JOut out;out.bol("ok",false);out.bol("capture_space_valid",false);out.str("capture_scope_reason",why?why:"scope_changed");out.str("error","capture-space is missing or stale; mouse button cleanup was attempted without moving the cursor");out.num("button_down_count",0);out.bol("button_released",!g_vk[vk]);return out.done();}
         DWORD hoverStart=0,hoverWaitMs=0,hoverIdleBudget=0,hoverAbsoluteBudget=0;bool hoverAdaptive=false,hoverWaitFinished=false;
         const char* hoverWaitReason="not_requested";
         auto hoverFields=[&](JOut& o) {
@@ -2304,6 +2382,18 @@ std::string Exec(const std::string& line) {
             if(!hoverWaitFinished && positioned && hoverAbsoluteBudget)hoverWaitMs=GetTickCount()-hoverStart;
             upCleanup.Run();hoverWaitReason=reason;JOut o;o.bol("ok",false);o.str("error",message);o.num("button_down_count",0);if(cmd=="mouseup")o.bol("button_released",!g_vk[vk]);hoverFields(o);return o.done();
         };
+        // Validate every static press/release option before any positioned hover is published.
+        const double countValue=JNum(j,"count",1),ms=cmd=="click"?JNum(j,"ms",60):0,gap=JNum(j,"gap",80),pollCapValue=JNum(j,"di_poll_timeout_ms",1000);
+        if(cmd=="click" && (!(ms>=0&&ms<=120000)||!(gap>=0&&gap<=60000)||!(countValue>=1&&countValue<=1000&&countValue==std::floor(countValue))))return hoverError("click duration/count/gap out of range; no button was pressed","invalid_click_timing");
+        if(JHas(j,"di_poll_timeout_ms") && (cmd!="click" || j.find("di_poll_timeout_ms")->second.t!=2 || !(pollCapValue>=0&&pollCapValue<=5000&&pollCapValue==std::floor(pollCapValue)))) {
+            if(cmd=="mouseup"){MouseButton(vk,false);JOut o;o.bol("ok",false);o.str("error","button released; di_poll_timeout_ms applies only to timed click");o.bol("button_released",!g_vk[vk]);o.num("button_down_count",0);return o.done();}
+            return hoverError("di_poll_timeout_ms must be integer0..5000 for timed click only; no button was pressed","invalid_poll_timing");
+        }
+        const int count=cmd=="click"?(int)countValue:1,button=vk==VK_RBUTTON?1:vk==VK_MBUTTON?2:vk==VK_XBUTTON1?3:vk==VK_XBUTTON2?4:0;
+        const bool pollExplicit=JHas(j,"di_poll_timeout_ms");const DWORD pollCap=(DWORD)pollCapValue;
+        const double releaseCapValue=JNum(j,"di_release_timeout_ms",pollCapValue);
+        if(JHas(j,"di_release_timeout_ms")&&(cmd!="click"||j.find("di_release_timeout_ms")->second.t!=2||!(releaseCapValue>=0&&releaseCapValue<=5000&&releaseCapValue==std::floor(releaseCapValue))))return hoverError("di_release_timeout_ms must be integer0..5000 for timed click only; mouse-up cleanup remains enabled","invalid_release_poll_timing");
+        const DWORD releaseCap=(DWORD)releaseCapValue;const bool releaseExplicit=JHas(j,"di_release_timeout_ms"),releaseRequired=(releaseExplicit&&releaseCap>0)||(pollExplicit&&pollCap>0);
         double requestedX=JNum(j,"x",g_vcurX),requestedY=JNum(j,"y",g_vcurY);
         POINT resolved{g_vcurX,g_vcurY},expected=resolved,applied=resolved,lastPress=resolved;
         int presses=0;
@@ -2323,6 +2413,7 @@ std::string Exec(const std::string& line) {
             HWND window = g_hwnd;
             WNDPROC outer = CurrentWindowProcedure(window);
             const bool external = outer && outer != h_WndProc;
+            if(JStr(j,"space")=="capture"&&!JBool(j,"norm",false)&&!CaptureMapCurrent())return hoverError("capture-space changed before hover; no movement or button was published","capture_scope_changed");
             AppliedMouse hover = MouseMoveTo(x, y, false, 0, 0);
             DWORD timeout = (DWORD)timeoutValue;
             if (hover.message_attempted) {
@@ -2360,17 +2451,6 @@ std::string Exec(const std::string& line) {
         }
         if (cmd != "mouseup" && (g_hwnd != preparedWindow || !IsWindow(preparedWindow))) return hoverError("target window changed during hover; no button was pressed","target_changed");
         if (cmd != "mouseup" && hoverUnconfirmed && CurrentWindowProcedure(preparedWindow) != qualifiedOuter) return hoverError("outer WndProc changed during hover preparation; no button was pressed","outer_changed");
-        const double countValue=JNum(j,"count",1),ms=cmd=="click"?JNum(j,"ms",60):0,gap=JNum(j,"gap",80),pollCapValue=JNum(j,"di_poll_timeout_ms",1000);
-        if(cmd=="click" && (!(ms>=0&&ms<=120000)||!(gap>=0&&gap<=60000)||!(countValue>=1&&countValue<=1000&&countValue==std::floor(countValue))))return hoverError("click duration/count/gap out of range; no button was pressed","invalid_click_timing");
-        if(JHas(j,"di_poll_timeout_ms") && (cmd!="click" || j.find("di_poll_timeout_ms")->second.t!=2 || !(pollCapValue>=0&&pollCapValue<=5000&&pollCapValue==std::floor(pollCapValue)))) {
-            if(cmd=="mouseup"){MouseButton(vk,false);JOut o;o.bol("ok",false);o.str("error","button released; di_poll_timeout_ms applies only to timed click");o.bol("button_released",!g_vk[vk]);o.num("button_down_count",0);return o.done();}
-            return hoverError("di_poll_timeout_ms must be integer0..5000 for timed click only; no button was pressed","invalid_poll_timing");
-        }
-        const int count=cmd=="click"?(int)countValue:1,button=vk==VK_RBUTTON?1:vk==VK_MBUTTON?2:vk==VK_XBUTTON1?3:vk==VK_XBUTTON2?4:0;
-        const bool pollExplicit=JHas(j,"di_poll_timeout_ms");const DWORD pollCap=(DWORD)pollCapValue;
-        const double releaseCapValue=JNum(j,"di_release_timeout_ms",pollCapValue);
-        if(JHas(j,"di_release_timeout_ms")&&(cmd!="click"||j.find("di_release_timeout_ms")->second.t!=2||!(releaseCapValue>=0&&releaseCapValue<=5000&&releaseCapValue==std::floor(releaseCapValue))))return hoverError("di_release_timeout_ms must be integer0..5000 for timed click only; mouse-up cleanup remains enabled","invalid_release_poll_timing");
-        const DWORD releaseCap=(DWORD)releaseCapValue;const bool releaseExplicit=JHas(j,"di_release_timeout_ms"),releaseRequired=(releaseExplicit&&releaseCap>0)||(pollExplicit&&pollCap>0);
         bool pollTimedOut=false,lastPollConfirmed=false,lastPollWaited=false;int pollsWaited=0,pollsConfirmed=0;
         bool releaseTimedOut=false,lastReleaseConfirmed=false,releaseWaited=false;int releasesConfirmed=0;unsigned long long releaseGeneration=0;double releaseWaitMs=0;const char* releaseChannel="none";
         unsigned long long pressGeneration=0;ULONGLONG consumerAge=0;bool consumerSeen=false;double lastHoldMs=0;
@@ -2393,9 +2473,11 @@ std::string Exec(const std::string& line) {
         };
         std::string pressFailure="virtual cursor changed from the requested client point before button-down; no further press was sent; pause the game's camera/menu recentering and inspect the frame before trying again";
         auto press=[&]() {
+            if(!CaptureScopeCurrent(clickScope)){pressFailure="target window lifetime or geometry changed before button-down; no further press was sent";return false;}
+            if(positioned&&JStr(j,"space")=="capture"&&!JBool(j,"norm",false)&&!CaptureMapCurrent()){pressFailure="capture-space changed during hover; no button-down was sent";return false;}
             if(g_hwnd!=preparedWindow || !IsWindow(preparedWindow)) { applied={g_vcurX,g_vcurY};pressFailure="target window changed before button-down; no further press was sent";return false; }
             if(hoverUnconfirmed && CurrentWindowProcedure(preparedWindow)!=qualifiedOuter) { applied={g_vcurX,g_vcurY};pressFailure="outer WndProc changed before button-down; no further press was sent";return false; }
-            if(!MouseButtonChecked(vk,true,positioned?&expected:nullptr,&applied))return false;
+            if(!MouseButtonChecked(vk,true,positioned?&expected:nullptr,&applied,&clickScope))return false;
             ++presses;lastPress=applied;return true;
         };
         auto driftError=[&]() { JOut o;o.bol("ok",false);o.str("error",pressFailure);coordinates(o);hoverFields(o);pollFields(o);return o.done(); };
@@ -2450,31 +2532,38 @@ std::string Exec(const std::string& line) {
     if (cmd == "wheel") { MouseWheel((int)JNum(j, "delta", 120), JBool(j, "horizontal", false)); return OkJ(); }
     if(cmd=="pad-ramp"||cmd=="pad-timeline")return SchedulePadSteering(j,cmd=="pad-timeline");
     if (cmd == "pad") {
+        for (const auto& field : j) {
+            const std::string& name = field.first;
+            if (name != "cmd" && name != "buttons" && name != "ms" && name != "hold" && name != "async" && name != "replace" && name != "lt" && name != "rt" && name != "lx" && name != "ly" && name != "rx" && name != "ry" && name != "owner" && name != "force_claim") return ErrJ("unknown pad field '" + name + "'; no input was injected");
+        }
         if (JHas(j, "hold") && j.find("hold")->second.t != 3) return ErrJ("pad hold must be a JSON boolean true or false; numeric durations belong in ms");
-        const double ms = JNum(j, "ms", 100);
+        double ms = 0;
+        if (!JobNumber(j, "ms", 100, 0, 120000, ms)) return ErrJ("pad duration must be a finite JSON number0..120000; no input was injected");
         const bool hold = JBool(j, "hold", false);
         if(hold&&(JHas(j,"async")||JHas(j,"replace")))return ErrJ("indefinite pad hold cannot use async/replace; use a bounded duration");
         if (hold && JHas(j, "ms")) return ErrJ("pad hold is indefinite and cannot include ms; omit hold for a timed command");
         if (!(ms >= 0 && ms <= 120000)) return ErrJ("pad duration must be 0..120000 ms");
+        if (JHas(j, "buttons") && j.find("buttons")->second.t != 1) return ErrJ("pad buttons must be a string; no input was injected");
         std::string names = JStr(j, "buttons");
-        std::string lower = names; for (auto& ch : lower) ch = (char)tolower((unsigned char)ch);
-        if (lower == "off") {   // stop overriding: pad 0 is the real pad again (or "not connected" when there is none)
+        if (PadIsOff(names)) {   // stop overriding: pad 0 is the real pad again (or "not connected" when there is none)
             std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);JobsOverridePad();std::lock_guard<std::mutex> stateLock(g_padStateMx);g_padActive = false; g_padButtons = 0; g_padSetMask = 0; g_padPacket++;
             JOut o; o.bol("ok", true); o.bol("pad_active", false); return o.done();
         }
-        std::string bad;
-        WORD b = PadButtonsFromNames(names, &bad);
-        if (!bad.empty()) return ErrJ("pad: unknown button '" + bad + "' (a b x y up down left right start back ls rs lb rb, none, off)");
-        const double kUnset = -1e18;
+        std::string bad; unsigned aliases = 0;
+        WORD b = PadButtonsFromNames(names, &bad, &aliases);
+        if (!bad.empty()) return ErrJ(bad + "; supported: a b x y up down left right start back ls rs lb rb guide lt rt, none, off; no input was injected");
         const char* axes[6] = {"lt", "rt", "lx", "ly", "rx", "ry"};
         int v[6] = {}, mask = 0; bool clamped = false;
         for (int a = 0; a < 6; a++) {
-            double d = JNum(j, axes[a], kUnset);
-            if (d == kUnset) continue;
+            auto value = j.find(axes[a]);
+            if (value == j.end()) continue;
+            if (value->second.t != 2 || !std::isfinite(value->second.n)) return ErrJ("pad axes must be finite JSON numbers; no input was injected");
+            double d = value->second.n;
             double lo = a < 2 ? 0 : -32768, hi = a < 2 ? 255 : 32767;
             if (d < lo) { d = lo; clamped = true; } if (d > hi) { d = hi; clamped = true; }
             v[a] = (int)d; mask |= 1 << a;
         }
+        if (!vi_pad_buttons::ApplyTriggerAliases(aliases, mask, v, bad)) return ErrJ(bad + "; no input was injected");
         if(!hold)return SchedulePadInput(j,b,mask,v,ms,clamped);
         {std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);JobsOverridePad();JobPadPublish(b,mask,v);}
         JOut o; o.bol("ok", true); o.num("buttons", b); o.num("axes_set_mask", mask); o.bol("clamped", clamped);
@@ -2507,7 +2596,7 @@ DWORD WINAPI ClientThread(LPVOID p) {
             std::string resp;
             // Read-only / ownership commands skip the exec mutex. The mutex lives in this target process, so it only
             // serialises clients of THIS game; other targets (other processes) are never blocked by it.
-            g_waitJob.reset();JObj peek;const bool parsed=ParseJson(line,peek);const std::string peekCmd=JStr(peek,"cmd");bool open=parsed&&(IsOpenCommand(peekCmd)||peekCmd=="job-cancel"||peekCmd=="release"||peekCmd=="up"||(peekCmd=="pad"&&JStr(peek,"buttons")=="off"));
+            g_waitJob.reset();JObj peek;const bool parsed=ParseJson(line,peek);const std::string peekCmd=JStr(peek,"cmd");bool open=parsed&&(IsOpenCommand(peekCmd)||peekCmd=="job-cancel"||peekCmd=="release"||peekCmd=="up"||(peekCmd=="pad"&&PadIsOff(JStr(peek,"buttons"))));
             if (open) { try { resp = Exec(line); } catch (...) { resp = ErrJ("exception"); } }
             else { std::lock_guard<std::mutex> lk(execMx); try { resp = Exec(line); } catch (...) { resp = ErrJ("exception"); } }
             if(g_waitJob){auto pending=g_waitJob;g_waitJob.reset();WaitForSingleObject(pending->completion,INFINITE);resp=JobReply(pending);}
@@ -2568,6 +2657,7 @@ DWORD WINAPI MonitorThread(LPVOID) {
     HWND lastFgWnd = RealForeground();
     for (;;) {
         EnforceAntiCheat();   // a module that loaded after start: stop held input and running jobs without waiting for a command
+        IsolationEnabled(); // bounded passthrough expires even when the target stops polling
         HWND fw = RealForeground();
         bool fg = ComputeRealFg();
         g_realFg = fg;
@@ -2594,9 +2684,7 @@ DWORD WINAPI MonitorThread(LPVOID) {
             }
         }
         if (lastFg && !fg && g_hwnd) {
-            // the game just lost the real foreground: make sure it does not keep the real cursor trapped
-            RECT clip, wr; GetClipCursor(&clip); GetWindowRect(g_hwnd, &wr);
-            RECT inter; if (IntersectRect(&inter, &clip, &wr) && EqualRect(&inter, &clip)) o_ClipCursor(nullptr);
+            // Physical clips are never written here. An unknown preexisting desktop clip has no proved owner.
             for (int vk = 1; vk < 256; vk++) g_vkPressed[vk] = 0;
         }
         lastFg = fg;
@@ -2626,7 +2714,8 @@ DWORD WINAPI ForegroundGuardThread(LPVOID) {
     bool wasOurs=false;
     ULONGLONG lastAttempt=0;
     for (;;) {
-        g_userIntent.SetTarget(g_hwnd,g_pid);g_userIntent.Pump();
+        const auto cursorObservation=++g_cursorOwnershipClock;HWND intentWindow=g_hwnd;const auto intentGeneration=g_inputReadyGeneration.load();
+        g_userIntent.SetTarget(intentWindow,g_pid);g_userIntent.Pump();
         HWND fg=RealForeground(); DWORD pid=0; if(fg)GetWindowThreadProcessId(fg,&pid);
         bool oursActual=ForegroundBelongsToTarget(fg);
         bool ours=TestRealFgOverride(oursActual);
@@ -2640,6 +2729,8 @@ DWORD WINAPI ForegroundGuardThread(LPVOID) {
             else if(!ours && GetTickCount64()-g_ownerHoldAt.load()>1500) g_ownerHolding=false;
         }
         const bool ownerHolds=g_ownerHolding.load();
+        const bool cursorForeground=PhysicalForegroundOwned();
+        if(human&&intentWindow==g_hwnd&&intentGeneration==g_inputReadyGeneration&&cursorForeground)CursorPublishHuman(intentWindow,intentGeneration,false,cursorObservation);else CursorValidateHumanScope(intentWindow,intentGeneration,cursorForeground,cursorObservation);
         if(fg && pid && !oursActual) {
             if(history.empty() || history.back().hwnd!=fg) {
                 history.erase(std::remove_if(history.begin(),history.end(),[&](const Destination& d){return d.hwnd==fg;}),history.end());
@@ -2712,6 +2803,8 @@ DWORD WINAPI InitThread(LPVOID) {
         Log("REFUSED: anti-cheat module loaded (%s, %s). vinput is for offline games only: no hooks, no pipe.", g_acProduct.load(), name);
         return 0;
     }
+    g_inputReadyMessage=RegisterWindowMessageW(L"vinput.input.readiness.barrier.v1");
+    g_inputReadyCookie=(ULONG_PTR)&g_inputReadyCookie^(ULONG_PTR)GetTickCount64()^(ULONG_PTR)GetCurrentProcessId();
     g_hoverBarrierMessage = RegisterWindowMessageW(L"vinput.mouse.queue_barrier.v1");
     g_hoverBarrierCookie = (ULONG_PTR)&g_hoverBarrierCookie ^ (ULONG_PTR)GetTickCount64() ^ (ULONG_PTR)GetCurrentProcessId();
     g_capEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -2731,7 +2824,7 @@ DWORD WINAPI InitThread(LPVOID) {
     FindRawDevices();
     g_realFg = ComputeRealFg();
     HANDLE t = CreateThread(nullptr, 0, PipeThread, nullptr, 0, nullptr); if (t) CloseHandle(t);
-    for (int i = 0; i < 600 && !g_hwnd; i++) { HWND h = FindMainWindow(); if (h) { Retarget(h); break; } Sleep(200); }
+    for (int i = 0; i < 600 && !g_hwnd; i++) { HWND h = FindMainWindow(); if (h && Retarget(h)) { break; } Sleep(200); }
     Log("hooks ok: %s", g_hooksOk.c_str());
     if (!g_hooksFail.empty()) Log("hooks FAILED: %s", g_hooksFail.c_str());
     t = CreateThread(nullptr, 0, ForegroundGuardThread, nullptr, 0, nullptr); if (t) CloseHandle(t);

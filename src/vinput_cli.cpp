@@ -154,8 +154,11 @@ namespace vi_doctor{static std::string Field(const std::string&,const std::strin
 struct OverlayFind{DWORD pid;HWND best;unsigned long long area;};
 static BOOL CALLBACK OverlayFindProc(HWND window,LPARAM value){auto* search=(OverlayFind*)value;DWORD pid=0;GetWindowThreadProcessId(window,&pid);if(pid!=search->pid||!IsWindowVisible(window))return TRUE;wchar_t name[96]{};if(!GetClassNameW(window,name,96)||!wcsstr(name,L"PresentationWindow"))return TRUE;RECT r{};if(!GetClientRect(window,&r)||r.right<=0||r.bottom<=0)return TRUE;auto area=(unsigned long long)r.right*r.bottom;if(area>search->area){search->best=window;search->area=area;}return TRUE;}
 static std::string StampOverlay(DWORD pid,const std::string& line){auto cmd=vi_doctor::Field(line,"cmd");if((cmd!="\"capture\""&&cmd!="\"frame-hash\"")||vi_doctor::Field(line,"overlay")!="null")return line;auto start=line.find_first_not_of(" \t\r\n");if(start==std::string::npos||line[start]!='{')return line;OverlayFind search{pid,nullptr,0};EnumWindows(OverlayFindProc,(LPARAM)&search);if(!search.best)return line;return line.substr(0,start+1)+"\"overlay\":"+std::to_string((unsigned long long)(ULONG_PTR)search.best)+","+line.substr(start+1);}
+static bool CaptureScopePreflight(DWORD,std::string&,std::string&);
 static bool Request(DWORD pid, const std::string& rawLine, std::string& resp, DWORD connectTimeout = 5000, HANDLE targetProcess = nullptr) {
-    std::string line = StampOverlay(pid,StampOwner(rawLine));
+    std::string admitted=rawLine;
+    if(CaptureScopePreflight(pid,admitted,resp))return true;
+    std::string line = StampOverlay(pid,StampOwner(admitted));
     HANDLE h = OpenPipe(pid, connectTimeout, targetProcess);
     if (h == INVALID_HANDLE_VALUE) { resp = "{\"ok\":false,\"error\":\"cannot connect to \\\\\\\\.\\\\pipe\\\\vinput_" + std::to_string(pid) + " (not injected / process gone)\"}"; return false; }
     bool ok = PipeRequest(h, line, resp);
@@ -168,6 +171,7 @@ static bool Request(DWORD pid, const std::string& rawLine, std::string& resp, DW
 // CLI-args -> JSON command
 // ------------------------------------------------------------------------------------------
 struct Args { std::vector<std::string> pos; std::vector<std::pair<std::string, std::string>> opt; };
+static bool HasOpt(const Args& a, const char* k);
 static Args SplitArgs(const std::vector<std::string>& a) {
     Args r;
     for (size_t i = 0; i < a.size(); i++) {
@@ -176,7 +180,7 @@ static Args SplitArgs(const std::vector<std::string>& a) {
             std::string k = s.substr(2), v = "true";
             size_t eq = k.find('='); if (eq != std::string::npos) { v = k.substr(eq + 1); k = k.substr(0, eq); }
             else if (i + 1 < a.size() && !(a[i + 1].size() > 2 && a[i + 1][0] == '-' && a[i + 1][1] == '-') &&
-                     k != "placement" && k != "async" && k != "replace" && k != "strict-frames" && k != "norm" && k != "keys" && k != "hold" && k != "horizontal" && k != "capture-space" && k != "raw" && k != "force" && k != "json" && k != "exact" && k != "gone" && k != "absent" && k != "dry-run" && k != "continue" && k != "lines-only" && k != "no-scale" && k != "tiles" && k != "no-tiles" && k != "optional" && k != "allow-dialog") { v = a[++i]; }
+                     k != "placement" && k != "async" && k != "replace" && k != "strict-frames" && k != "norm" && k != "keys" && k != "hold" && k != "horizontal" && k != "capture-space" && k != "raw" && k != "force" && k != "json" && k != "exact" && k != "gone" && k != "absent" && k != "dry-run" && k != "continue" && k != "lines-only" && k != "no-scale" && k != "tiles" && k != "no-tiles" && k != "optional" && k != "allow-dialog" && k != "hooks-only") { v = a[++i]; }
             r.opt.push_back({k, v});
         } else r.pos.push_back(s);
     }
@@ -194,10 +198,21 @@ static bool BuildJson(const std::vector<std::string>& argv, std::string& out, st
     std::string cmd = argv[0];
     if (cmd == "json") { if (argv.size() < 2) { err = "json needs a payload"; return false; } out = argv[1]; return true; }
     Args a = SplitArgs(std::vector<std::string>(argv.begin() + 1, argv.end()));
+    if(HasOpt(a,"stagger-ms")&&cmd!="pad-timeline"){err="--stagger-ms is only implemented for pad-timeline; no input was sent";return false;}
+    if((HasOpt(a,"for")||HasOpt(a,"for-ms")||HasOpt(a,"for_ms"))&&cmd!="config"){err="--for applies only to config isolate=false";return false;}
     std::string j = "{"; PutS(j, "cmd", cmd);
     auto P = [&](size_t i) -> std::string { return i < a.pos.size() ? a.pos[i] : std::string(); };
     if (cmd == "key" || cmd == "down" || cmd == "up" || cmd == "pulse") { if (a.pos.empty()) { err = cmd + " needs a key"; return false; } PutS(j, "key", P(0)); if (!P(1).empty()) Put(j, "ms", P(1)); }
     else if (cmd == "hold") { if (a.pos.empty()) { err = "hold needs a key"; return false; } PutS(j, "key", P(0)); Put(j, "ms", P(1).empty() ? "1000" : P(1)); }
+    else if(cmd=="readiness") {
+        if(!a.pos.empty()){err="readiness takes no positional arguments; use --wait-ms N and --hooks-only=true|false";return false;}
+        std::set<std::string> seen;
+        for(const auto& option:a.opt) {
+            if(option.first!="wait-ms"&&option.first!="hooks-only"){err="readiness accepts only --wait-ms and --hooks-only";return false;}
+            if(!seen.insert(option.first).second){err="duplicate readiness option: --"+option.first;return false;}
+            if(option.first=="hooks-only"&&option.second!="true"&&option.second!="false"){err="--hooks-only must be true or false";return false;}
+        }
+    }
     else if(cmd=="job-status"||cmd=="job-cancel"){if(P(0).empty()){err=cmd+" needs a job ID";return false;}PutS(j,"id",P(0));}
     else if(cmd=="pad-ramp"){if(a.pos.size()!=4){err="pad-ramp <axis> <from> <to> <ms>";return false;}PutS(j,"axis",P(0));Put(j,"from",P(1));Put(j,"to",P(2));Put(j,"ms",P(3));}
     else if(cmd=="pad-timeline"){if(a.pos.size()!=1){err="pad-timeline needs a JSON state-array file";return false;}FILE* file=nullptr;_wfopen_s(&file,U2W(P(0)).c_str(),L"rb");if(!file){err="cannot open timeline file";return false;}std::string content;char block[4096];size_t size;bool valid=true;while((size=fread(block,1,sizeof(block),file))){if(content.size()+size>65536){valid=false;break;}content.append(block,size);}valid=valid&&!ferror(file)&&feof(file);fclose(file);if(!valid){err="timeline exceeds64KiB or could not be read";return false;}PutS(j,"states_json",content);}
@@ -212,6 +227,14 @@ static bool BuildJson(const std::vector<std::string>& argv, std::string& out, st
     }
     else if (cmd == "wheel") Put(j, "delta", P(0).empty() ? "120" : P(0));
     else if (cmd == "pad") {
+        if (a.pos.size() > 2) { err = "pad accepts one button list and one duration; no input was injected"; return false; }
+        std::set<std::string> padOptions;
+        for (const auto& option : a.opt) {
+            if (!padOptions.insert(option.first).second) { err = "duplicate pad option --" + option.first + "; no input was injected"; return false; }
+            const std::string& name = option.first;
+            if (name != "ms" && name != "hold" && name != "async" && name != "replace" && name != "lt" && name != "rt" && name != "lx" && name != "ly" && name != "rx" && name != "ry" && name != "buttons") { err = "unknown pad option --" + name + "; no input was injected"; return false; }
+        }
+        if (padOptions.count("buttons")) { err = "pad takes button names positionally, e.g. pad a+lt 100; use the buttons field in direct JSON"; return false; }
         bool hold = false, hasDuration = false;
         for (const auto& o : a.opt) {
             if (o.first == "hold") {
@@ -224,13 +247,18 @@ static bool BuildJson(const std::vector<std::string>& argv, std::string& out, st
             err = "pad --hold is indefinite and cannot take a duration; omit --hold for a timed pad command, e.g. pad --lx 30000 1500";
             return false;
         }
+        if (hasDuration && (a.pos.size() > 1 || (a.pos.size() == 1 && IsNumber(P(0))))) { err = "pad duration specified more than once; no input was injected"; return false; }
         // "pad --lx 30000 1500" used to send buttons="1500" and the default 100 ms: a lone number is the duration
         if (a.pos.size() == 1 && IsNumber(P(0))) Put(j, "ms", P(0));
         else { PutS(j, "buttons", P(0)); if (!P(1).empty()) Put(j, "ms", P(1)); }
     }
     else if (cmd == "capture") { if (a.pos.empty()) { err = "capture needs a path"; return false; } wchar_t full[MAX_PATH]; GetFullPathNameW(U2W(P(0)).c_str(), MAX_PATH, full, nullptr); PutS(j, "path", W2U(full)); }
     else if (cmd == "wait") Put(j, "ms", P(0).empty() ? "100" : P(0));
-    else if (cmd == "config") { for (auto& p : a.pos) { size_t eq = p.find('='); if (eq != std::string::npos) Put(j, p.substr(0, eq), p.substr(eq + 1)); } }
+    else if(cmd=="config"){
+        std::set<std::string> seen;
+        for(const auto& positional:a.pos){const auto eq=positional.find('=');if(eq==std::string::npos){err="config expects name=value";return false;}const auto name=positional.substr(0,eq);if(!seen.insert(name).second){err="duplicate config field "+name;return false;}Put(j,name,positional.substr(eq+1));}
+        for(const auto& option:a.opt){const auto name=option.first=="for"||option.first=="for-ms"?"for_ms":option.first;if(!seen.insert(name).second){err="duplicate config field "+name;return false;}}
+    }
     for (auto& o : a.opt) {
         std::string k = o.first;
         if (k == "capture-space") { PutS(j, "space", "capture"); continue; }
@@ -238,7 +266,9 @@ static bool BuildJson(const std::vector<std::string>& argv, std::string& out, st
         if (k == "hover-frames") k = "hover_frames"; if (k == "hover-timeout-ms") k = "hover_timeout_ms";
         if (k == "di-poll-timeout-ms") k = "di_poll_timeout_ms";
         if (k == "di-release-timeout-ms") k = "di_release_timeout_ms";
-        if(k=="period-ms")k="period_ms";if(k=="duration-ms")k="ms";if(k=="end-hold-ms")k="end_hold_ms";if(k=="strict-frames")k="strict_frames";
+        if(k=="period-ms")k="period_ms";if(k=="duration-ms")k="ms";if(k=="end-hold-ms")k="end_hold_ms";if(k=="stagger-ms")k="stagger_ms";if(k=="strict-frames")k="strict_frames";
+        if((k=="for"||k=="for-ms")&&cmd=="config")k="for_ms";
+        if (k == "wait-ms") k = "wait_ms";if (k == "hooks-only") k = "hooks_only";
         if (k == "after-frames") k = "after_frames";
         if (k == "max-width") k = "max_width";
         Put(j, k, o.second);
@@ -363,7 +393,8 @@ static std::string AcRefusalJson(const vi_ac::Finding& f, DWORD pid) {
     j += ",\"anticheat\":{\"product\":\"" + JEsc(f.product) + "\",\"kind\":\"" + JEsc(f.kind) + "\",\"name\":\"" + JEsc(f.name) + "\"}}";
     return j;
 }
-static int Inject(DWORD pid, std::wstring dll, bool quiet = false) {
+#include "vi_cli_readiness.inl"
+static int Inject(DWORD pid, std::wstring dll, bool quiet = false, bool hooksOnly = false) {
     FILE* output = quiet ? stderr : stdout;
     {
         vi_ac::Finding f = vi_ac::CheckTarget(pid, g_acSuspended);
@@ -372,14 +403,18 @@ static int Inject(DWORD pid, std::wstring dll, bool quiet = false) {
     bool is32 = false;
     if (!ProcessIs32(pid, is32)) { fprintf(output, "{\"ok\":false,\"error\":\"cannot open pid %lu\"}\n", pid); return 2; }
 #ifdef _WIN64
-    if (is32) { std::vector<std::wstring> a = {L"inject", L"--pid", std::to_wstring(pid)}; if (quiet) a.push_back(L"--quiet"); if (g_acSuspended) a.push_back(L"--internal-suspended"); if (!dll.empty()) { a.push_back(L"--dll"); a.push_back(dll); } return RunChild32(a,quiet); }
+    if (is32) { std::vector<std::wstring> a = {L"inject", L"--pid", std::to_wstring(pid)}; if (quiet) a.push_back(L"--quiet"); if (g_acSuspended) a.push_back(L"--internal-suspended"); if(hooksOnly)a.push_back(L"--hooks-only"); if (!dll.empty()) { a.push_back(L"--dll"); a.push_back(dll); } return RunChild32(a,quiet); }
     if (dll.empty()) dll = ExeDir() + L"\\vinput64.dll";
 #else
     if (!is32) { fprintf(output, "{\"ok\":false,\"error\":\"64-bit target: use vinput.exe\"}\n"); return 2; }
     if (dll.empty()) dll = ExeDir() + L"\\vinput32.dll";
 #endif
     std::string resp;
-    if (Request(pid, "{\"cmd\":\"ping\"}", resp, 200)) { if (!quiet) fprintf(output, "{\"ok\":true,\"pid\":%lu,\"note\":\"already injected\"}\n", pid); return 0; }
+    if (ReadinessTransport(pid, "{\"cmd\":\"ping\"}", 200,resp)) {
+        HANDLE existing=OpenProcess(SYNCHRONIZE,FALSE,pid);
+        int result=ReportInputReady(output,pid,dll,quiet,hooksOnly,true,existing);
+        if(existing)CloseHandle(existing);return result;
+    }
     wchar_t full[MAX_PATH]; GetFullPathNameW(dll.c_str(), MAX_PATH, full, nullptr); dll = full;
     if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) { fprintf(output, "{\"ok\":false,\"error\":\"dll not found: %s\"}\n", JEsc(W2U(dll)).c_str()); return 2; }
     // load a per-build COPY (dist\run\<name>_<mtime>.dll) so the dist DLL is never locked by a running game
@@ -417,15 +452,14 @@ static int Inject(DWORD pid, std::wstring dll, bool quiet = false) {
     VirtualFreeEx(hp, mem, 0, MEM_RELEASE);
     if (PrintInjectionExit(output, hp, pid, "load-library")) { CloseHandle(hp); return 2; }
     if (!code) { CloseHandle(hp); fprintf(output, "{\"ok\":false,\"error\":\"LoadLibraryW returned NULL in target\"}\n"); return 2; }
-    if (!Request(pid, "{\"cmd\":\"ping\"}", resp, 20000, hp)) {
+    if (!ReadinessTransport(pid, "{\"cmd\":\"ping\"}",20000,resp,hp)) {
         // A dying process can close its pipe just before its process object signals.
         // Observe that exact object briefly; a live server failure remains a generic pipe error.
         if (!PrintInjectionExit(output, hp, pid, "pipe-wait", 100)) fprintf(output, "{\"ok\":false,\"error\":\"dll loaded but pipe never came up\"}\n");
         CloseHandle(hp); return 2;
     }
-    CloseHandle(hp);
-    if (!quiet) fprintf(output, "{\"ok\":true,\"pid\":%lu,\"dll\":\"%s\"}\n", pid, JEsc(W2U(dll)).c_str());
-    return 0;
+    int result=ReportInputReady(output,pid,dll,quiet,hooksOnly,false,hp);
+    CloseHandle(hp);return result;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -762,7 +796,7 @@ static int Launch(const Args& a) {
                 // Suspended: vinput's hooks (and its DLL-load notification for vulkan-1/opengl32) are installed
                 // before the game's first instruction; the pipe is up before the main thread is resumed.
                 DWORD ti = GetTickCount();
-                if (Inject(pid, dll, true) != 0) {
+                if (Inject(pid, dll, true, true) != 0) {
                     TerminateProcess(pi.hProcess, 1);   // our own suspended child, by handle
                     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
                     if (!g_acLastRefusal.empty()) { printf("%s\n", g_acLastRefusal.c_str()); rc = 4; break; }
@@ -913,7 +947,9 @@ static int ListPipes() {
 static void Usage() {
     const char* usage =
         "vinput - per-process virtual input + capture for automating offline games\n"
-        "  vinput inject --pid N [--dll PATH]\n"
+        "  vinput inject --pid N [--dll PATH] [--hooks-only[=true|false]]\n"
+        "      inject waits for keyboard/focus hooks, an adopted window and posted queue progress; --hooks-only is for suspended/no-window setup.\n"
+        "      --hooks-only=false retains the full handshake. Input commands still wait for a ready window/queue.\n"
         "  vinput launch (--exe PATH | --steam APPID --wait-exe NAME.exe | --aumid PFN!AppId) [--args \"...\"] [--wait-exe NAME.exe]\n"
         "                [--lock PATH] [--lock-retry 60] [--lock-timeout SECONDS] [--timeout 240] [--settle 5] [--fg-guard 5] [--early] [--dll PATH] [--no-inject] [--claim-ttl 300]\n"
         "      --lock-retry: seconds BETWEEN attempts (1..86400); --lock-timeout: total wait seconds (0..86400, default0=unlimited).\n"
@@ -929,10 +965,13 @@ static void Usage() {
         "  vinput --owner NAME --pid N claim [--ttl 300] | unclaim     other owners are refused until unclaim/expiry\n"
         "  vinput --pid N status | ping | log | activate | release | restore\n"
         "  vinput --pid N waitexit [--timeout MS]       block until the process exits; reply has exit_code (works on any pid, injected or not)\n"
+        "  vinput --pid N readiness [--wait-ms 1000] [--hooks-only[=true|false]]\n"
+        "      readiness reports hook_ready/window_ready/queue_ready; host/application startup is unmeasured. wait-ms is0..10000.\n"
         "  vinput --pid N jobs | job-status ID | job-cancel ID; timed key/hold/pad accept --async [--replace]\n"
+        "  vinput --pid N seq <file>          keyboard sequence returns a background job ID; use job-status/job-cancel\n"
         "  vinput --pid N pulse <key> <ms> --duty 25 --period-ms 100 [--async]\n"
         "  vinput --pid N pad-ramp lx 0 16000 1000 [--pacing frames|time] [--end-hold-ms 100]\n"
-        "  vinput --pid N pad-timeline states.json [--pacing frames|time] [--strict-frames]\n"
+        "  vinput --pid N pad-timeline states.json [--pacing frames|time] [--strict-frames] [--stagger-ms 60]\n"
         "  vinput --pid N hold-while w --until-text TEXT [--timeout-ms 5000] (pad-hold-while also available)\n"
         "  vinput --pid N key <combo> [ms] [--count N] [--gap ms]      combo: enter, esc, w, ctrl+s, f1, 0x2D ...\n"
         "  vinput --pid N down <combo> | up <combo> | hold <combo> <ms>\n"
@@ -943,11 +982,12 @@ static void Usage() {
         "  vinput --pid N move <dx> <dy> [--steps N]                            (relative)\n"
         "  vinput --pid N click [left|right|middle] [<x> <y>] [--norm] [--capture-space] [--count N] [--ms 60]\n"
         "  vinput --pid N wheel <delta>\n"
-        "  vinput --pid N pad <a+b+start...> [ms] [--lx N --ly N --hold]\n"
+        "  vinput --pid N pad <a+b+lt+rt+start...|none> [ms] [--lx N --ly N --rx N --ry N --lt N --rt N] [--hold]\n"
         "  vinput --pid N capture <out.png> [--method auto|swapchain|printwindow]\n"
         "      [--scale 0.5 | --max-width 640] [--format png|jpeg] [--quality 85] (JPEG only); source hash stays before output transforms.\n"
         "  vinput --pid N capture-burst <sheet.png> [--frames 8] [--interval-ms 250] [--columns 4] [--max-width 320] [--format png|jpeg]\n"
         "      Bounded temporal tiles; actual timing metadata, other commands run between frames; never changes --capture-space.\n"
+        "  vinput --pid N config isolate=false --for 1000   (1..120000 ms; physical input passes until auto-revert)\n"
         "  vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true keepvisible=true cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off\n"
         "  vinput --pid N json '{\"cmd\":\"status\"}'\n"
         "  vinput --pid N ocr [--region x,y,w,h] [--lang en-US] [--scale 1] [--preprocess MODE] [--lines-only] [--out file.json]\n"
@@ -993,13 +1033,17 @@ int wmain(int argc, wchar_t** wargv) {
     if (rest.empty()) { Usage(); return 1; }
     const std::string cmd = rest[0];
     Args a = SplitArgs(std::vector<std::string>(rest.begin() + 1, rest.end()));
+    if((HasOpt(a,"for")||HasOpt(a,"for-ms")||HasOpt(a,"for_ms"))&&cmd!="config"){printf("{\"ok\":false,\"configuration_changed\":false,\"error\":\"--for applies only to config isolate=false\"}\n");return 2;}
+    if(HasOpt(a,"stagger-ms")&&cmd!="pad-timeline"){printf("{\"ok\":false,\"input_injected\":false,\"error\":\"--stagger-ms is only implemented for pad-timeline\"}\n");return 2;}
     if (HasExpectationOptions(a) && cmd != "key" && cmd != "hold") {
         Reply r = ExpectRejected("expectation flags apply only to key and hold; no input was injected"); printf("%s\n",r.json.c_str()); return 2;
     }
     if (cmd == "inject") {
+        bool hooksOnly=false;std::string flagError;
+        if(!InjectHooksOnly(a,hooksOnly,flagError)){printf("{\"ok\":false,\"input_injected\":false,\"error\":\"%s\"}\n",JEsc(flagError).c_str());return 2;}
         if (!pid) { printf("{\"ok\":false,\"error\":\"inject needs --pid\"}\n"); return 2; }
         g_acSuspended = HasOpt(a, "internal-suspended");   // passed only by vinput.exe to vinput32.exe for launch --early
-        return Inject(pid, U2W(GetOpt(a, "dll")), HasOpt(a, "quiet"));
+        return Inject(pid, U2W(GetOpt(a, "dll")), HasOpt(a, "quiet"),hooksOnly);
     }
     if (cmd == "launch") return Launch(a);
     if (cmd == "list") return ListPipes();
