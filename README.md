@@ -42,6 +42,35 @@ game in front, steals your mouse and keyboard, and allows exactly one game at a 
 | **Vision (CLI side)** | Windows OCR (`Windows.Media.Ocr`), normalised cross-correlation template matching | runs in the CLI, nothing extra is loaded into the game |
 | **Targets** | 64-bit and 32-bit games, UWP / Xbox-app (AppContainer) games | `vinput.exe` hands 32-bit targets to `vinput32.exe` |
 
+## Install (prebuilt, no compiler needed)
+
+**Windows only.** You need Node.js 20 or newer.
+
+1. Download `llm-game-automation-mcp-win-x64.zip` from the
+   [latest release](https://github.com/CorruptedAng3l/llm-game-automation-mcp/releases/latest) and unzip it, for
+   example to `C:\Tools\llm-game-automation-mcp`.
+2. Add it to your MCP client. Claude Code:
+
+   ```bat
+   claude mcp add game-automation -- node C:\Tools\llm-game-automation-mcp\mcp\build\index.js
+   ```
+
+   Codex (`~/.codex/config.toml`):
+
+   ```toml
+   [mcp_servers.game-automation]
+   command = "node"
+   args = ['C:\Tools\llm-game-automation-mcp\mcp\build\index.js']
+   startup_timeout_sec = 60
+   ```
+
+   Other clients: see [MCP quick start](#mcp-quick-start).
+3. Start a new chat and ask the agent to launch a single-player game and play it in the background.
+
+The zip contains `vinput.exe`, `vinput32.exe`, `vinput64.dll`, `vinput32.dll` and the built MCP server with its
+dependencies, so there is no `npm install` step. The binaries are not code-signed, and they inject a DLL into a game,
+so antivirus software may flag them. To build everything yourself instead, see [Build](#build).
+
 ## Requirements
 
 - Windows 10 or 11, x64.
@@ -287,8 +316,13 @@ anti-cheat that stays resident (for example Vanguard's `vgc` service) blocks vin
 - The game can still be brought to the front by **other** programs; while it is really in front it receives the real
   keyboard and mouse, and a cursor clip it sets applies only while it stays in front (released when it loses it).
 - vinput stays loaded in a game until the game exits.
-- Verified live on a set of commercial D3D11, D3D12 (UWP) and OpenGL games; **Vulkan has only been verified on the
-  synthetic test target**, not in a real game. See [TESTING.md](TESTING.md).
+- **Electron / Chromium games** (for example Phantom Rose) slow down or freeze their rendering when Chromium thinks
+  the window is hidden. Launch them with Chromium's anti-throttling switches: `args`
+  `" --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=CalculateNativeWinOcclusion"`.
+  Keep the **leading space**: an `args` value that starts with `--` is currently lost on the way to the game (a known
+  bug, being fixed).
+- Verified live on a set of commercial D3D11, D3D12 (UWP), OpenGL and Vulkan (with `launch --early`) games. See
+  [TESTING.md](TESTING.md).
 
 ## Repository layout
 
