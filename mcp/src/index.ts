@@ -15,7 +15,7 @@ import { compactStatus, configView, diagnoseFrames, tailLog } from "./status.js"
 import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
