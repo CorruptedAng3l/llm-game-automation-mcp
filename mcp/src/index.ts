@@ -3,8 +3,9 @@
 // through vinput. Every tool runs the vinput CLI and returns its JSON reply verbatim, with "ok" surfaced as isError.
 // Offline games only: vinput injects a DLL and refuses targets with a known anti-cheat (see DISCLAIMER.md).
 import { sizeMismatchWarning } from "./launchsize.js";
-import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { closeSync, fstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -200,7 +201,11 @@ tool("config", "Configure vinput for a game",
     pid,
     fakefocus: bool("Fake focus / activation APIs so a background game believes it is active (default on)."),
     autoactivate: bool("Send the activation messages a real window switch would, to a game that started in the background (default on)."),
-    isolate: bool("Hide real background input from the game so the user's mouse and keyboard do not leak in (default on)."),
+    isolate: bool("Hide real keyboard / mouse / raw / DirectInput input from the game unless it truly owns the foreground (default on). " +
+      "isolate:false passes the user's physical input through, even in the background; prefer a bounded opt-out with for_ms."),
+    for_ms: z.number().int().min(1).max(120000).optional().describe(
+      "Only with isolate:false: pass physical input for this many ms (1..120000), then vinput restores isolate:true inside the game, " +
+      "even if this server goes away. Needs a vinput DLL with timed isolation; an older DLL is refused and nothing is changed."),
     blockfocus: bool("Stop the game taking the real foreground (default on)."),
     nofullscreen: bool("Refuse DXGI exclusive fullscreen (default on). Exclusive fullscreen loses its swapchain in the background."),
     keepvisible: bool("Undo a minimise of a background game (minimised games stop rendering) (default on)."),
@@ -218,7 +223,8 @@ tool("config", "Configure vinput for a game",
     const keys = ["fakefocus", "autoactivate", "isolate", "blockfocus", "nofullscreen", "keepvisible", "cursor", "raw", "msgs", "edge_margin", "fullscreen"] as const;
     const want: Record<string, unknown> = {};
     for (const k of keys) if (a[k] !== undefined) want[k] = a[k];
-    const r = await runVinput([...at(a.pid), "config", ...Object.entries(want).map(([k, v]) => `${k}=${v}`)], 30000);
+    if (a.for_ms !== undefined && a.isolate !== false) return fail("for_ms applies only together with isolate:false");
+    const r = await runVinput([...at(a.pid), "config", ...Object.entries(want).map(([k, v]) => `${k}=${v}`), ...opt("--for", a.for_ms)], 30000);
     if (!r.ok || !r.json || typeof r.json !== "object") return reply(r);
     const eff = configView(r.json as Record<string, unknown>);
     const warnings = Object.entries(want).filter(([k, v]) => eff[k] !== v).map(([k, v]) => `${k}=${v} requested but the game reports ${k}=${eff[k]}`);
@@ -566,7 +572,7 @@ const xy = {
   x: z.number().describe("X in client pixels (or 0..1 with norm)."),
   y: z.number().describe("Y in client pixels (or 0..1 with norm)."),
   norm: z.boolean().optional().describe("x and y are fractions of the client size (0..1)."),
-  capture_space: z.boolean().optional().describe("x and y are pixels of the last capture (use after a region capture)."),
+  capture_space: z.boolean().optional().describe("x and y are pixels of the last capture (use after a region capture). vinput binds that map to one window and client size and refuses it after a resize or retarget: capture again."),
 };
 const mappingSchema = z.object({ scale: z.number().positive(), offset_x: z.number(), offset_y: z.number() })
   .describe("Image-to-client mapping as returned by capture (image: {scale, offset_x, offset_y}).");
@@ -871,15 +877,20 @@ tool("pad_ramp", "Ramp a pad axis",
 
 const timelineState = z.object({
   at_ms: z.number().int().min(0).max(120000).describe("When this state starts, ms from the start (first state 0, strictly increasing)."),
+  buttons: z.string().optional().describe("Digital buttons held in this state, e.g. 'a', 'a+lt' or 'none'. Omitted = none; every state is a complete snapshot."),
+  phase: z.string().regex(/^[A-Za-z0-9_.-]{1,32}$/).optional().describe("Optional label (1..32 letters, digits, _ . -) echoed in the job receipt."),
   ...padConst,
 }).strict();
 tool("pad_timeline", "Timed pad script",
   "Play a list of XInput stick / trigger states at given times, e.g. [{at_ms:0,lx:0,ly:20000},{at_ms:400,lx:16000,ly:20000}," +
   "{at_ms:900,lx:0,ly:0}] = drive forward, steer right, stop. Axes not given in a state are 0. Runs as one job inside the " +
   "game; frame pacing never bunches overdue states (it reports skipped_states / max_lateness_ms), strict_frames fails instead " +
-  "of skipping. ms = total duration if it should run past the last state (default: the last at_ms). At most 256 states.",
+  "of skipping. ms = total duration if it should run past the last state (default: the last at_ms). At most 256 states. " +
+  "stagger_ms (0..1000) delays a newly pressed button or trigger until after the stick change that precedes it has been " +
+  "published (and, with frame pacing, a later presented frame); releases are never delayed.",
   { pid, states: z.array(timelineState).min(1).max(256),
     ms: z.number().int().min(0).max(120000).optional(), end_hold_ms: z.number().int().min(0).max(10000).optional(),
+    stagger_ms: z.number().int().min(0).max(1000).optional().describe("Wait at least this long after a stick change before a new button / trigger press (needs a vinput DLL with pad-timeline stagger)."),
     pacing: pacingArg, strict_frames: z.boolean().optional(), async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
   async (a) => {
     if (a.states[0].at_ms !== 0) return fail("the first state must have at_ms 0");
@@ -890,11 +901,40 @@ tool("pad_timeline", "Timed pad script",
     if (a.end_hold_ms !== undefined) cmd.end_hold_ms = a.end_hold_ms;
     if (a.pacing) cmd.pacing = a.pacing;
     if (a.strict_frames) cmd.strict_frames = true;
+    if (a.stagger_ms !== undefined) cmd.stagger_ms = a.stagger_ms;
     if (a.async) cmd.async = true;
     if (a.replace) cmd.replace = true;
     const total = Math.max(a.ms ?? 0, a.states[a.states.length - 1].at_ms) + (a.end_hold_ms ?? 0);
     const r = await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], a.async ? 60000 : total + 60000);
     return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+  });
+
+const seqStep = z.object({
+  action: z.enum(["hold", "key", "wait"]).describe("hold / key: press the chord for ms; wait: do nothing for ms."),
+  key: keyCombo.optional().describe("Key or chord (hold / key only), e.g. 'w' or 'w+space'."),
+  ms: z.number().int().min(1).max(118000),
+}).strict();
+tool("key_sequence", "Run a keyboard sequence",
+  "Run a validated keyboard sequence as ONE background job inside the game: each step presses a key or chord for ms (hold / key) " +
+  "or waits (wait), e.g. [{action:'hold',key:'w+space',ms:1500},{action:'wait',ms:100},{action:'key',key:'d',ms:300}]. Returns a job_id at once; " +
+  "follow it with job_status (current step) or stop it with job_cancel, which releases the active chord. Keys of later steps are reserved, " +
+  "so pressing one of them by hand cancels the rest. Limits: 1024 steps, 118000 ms of declared timing. Needs a vinput DLL with key sequences.",
+  { pid, steps: z.array(seqStep).min(1).max(1024), replace: replaceArg },
+  async (a) => {
+    const lines: string[] = [];
+    for (const [i, st] of a.steps.entries()) {
+      if (st.action === "wait") { if (st.key !== undefined) return fail(`step ${i + 1}: wait takes no key`); lines.push(`wait ${st.ms}`); continue; }
+      if (!st.key) return fail(`step ${i + 1}: ${st.action} needs a key`);
+      if (/\s/.test(st.key)) return fail(`step ${i + 1}: key names cannot contain spaces`);
+      lines.push(`${st.action} ${st.key} ${st.ms}`);
+    }
+    const dir = mkdtempSync(join(tmpdir(), "vinput-seq-"));
+    const file = join(dir, "sequence.vin");
+    try {
+      writeFileSync(file, lines.join("\n") + "\n");
+      const r = await runVinput([...at(a.pid), "seq", file, ...(a.replace ? ["--replace=true"] : [])], 60000);
+      return reply(r, jobExtra(r));
+    } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
   });
 
 tool("pulse", "Pulse a key (proportional)",
@@ -931,7 +971,7 @@ tool("hold_while", "Hold until text appears",
   });
 
 tool("job_status", "Input job status",
-  "State of a background input job (from async key / pad / pulse / pad_ramp / pad_timeline / drag placement): job_state, " +
+  "State of a background input job (from async key / pad / pulse / pad_ramp / pad_timeline / key_sequence / drag placement): job_state, " +
   "job_reason, job_complete, hold_ready, counts and timing. Without id: every job vinput still remembers for this game " +
   "(finished jobs are kept for about 60 s).",
   { pid, id: z.string().min(1).optional().describe("job_id from the async reply.") },

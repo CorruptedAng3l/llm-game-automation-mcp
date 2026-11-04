@@ -9,7 +9,10 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 
 const argv = process.argv.slice(2);
 const log = process.env.VINPUT_FAKE_LOG;
-if (log) appendFileSync(log, JSON.stringify({ argv, t: Date.now() }) + "\n");
+// `seq <file>`: record the sequence file text too (the MCP server deletes its temp file after the call)
+let seqText;
+{ const i = argv.indexOf("seq"); if (i >= 0 && argv[i + 1] && existsSync(argv[i + 1])) seqText = readFileSync(argv[i + 1], "utf8"); }
+if (log) appendFileSync(log, JSON.stringify({ argv, t: Date.now(), seqText }) + "\n");
 const scen = process.env.VINPUT_FAKE_SCENARIO && existsSync(process.env.VINPUT_FAKE_SCENARIO)
   ? JSON.parse(readFileSync(process.env.VINPUT_FAKE_SCENARIO, "utf8")) : {};
 

@@ -1,5 +1,7 @@
 // (J) owned input jobs: async key / pad, job_status / job_cancel, pulse, pad_ramp, pad_timeline, hold_while.
+import assert from "node:assert";
 import { cmdOf, makeChecker, startFake } from "./lib.mjs";
+const sameJson = (x, y) => { try { assert.deepStrictEqual(x, y); return true; } catch { return false; } };
 const { state, check } = makeChecker();
 const pid = process.pid;
 const t = await startFake({ replies: { key: { ok: true, job_id: "j1", job_state: "running" }, pad: { ok: true, job_id: "j2" },
@@ -70,6 +72,33 @@ try {
   check(r.isError && t.callsOf("json").length === 0, "non-increasing at_ms is refused", r.text.slice(0, 200));
   r = await t.call("pad_timeline", { pid, states: [{ at_ms: 0 }], strict_frames: true, pacing: "time" });
   check(r.isError && t.callsOf("json").length === 0, "strict_frames with time pacing is refused", r.text.slice(0, 200));
+
+  // ---- pad_timeline: per-state buttons / phase and stagger_ms
+  const staged = [{ at_ms: 0, phase: "aim", lx: 5000 }, { at_ms: 900, phase: "confirm", buttons: "a+lt", lx: 5000 }, { at_ms: 1300, phase: "released", buttons: "none", lx: 5000 }];
+  r = await t.call("pad_timeline", { pid, states: staged, stagger_ms: 60, strict_frames: true, ms: 1450 });
+  p = jsonPayload();
+  check(!r.isError && p?.cmd === "pad-timeline" && p.stagger_ms === 60 && p.ms === 1450 && sameJson(JSON.parse(p.states_json), staged),
+    "pad_timeline passes stagger_ms and per-state buttons / phase", JSON.stringify(p));
+  t.clearCalls();
+  r = await t.call("pad_timeline", { pid, states: [{ at_ms: 0, phase: "bad phase!" }] });
+  check(r.isError && t.callsOf("json").length === 0, "an invalid phase label is refused by the schema", r.text.slice(0, 200));
+  r = await t.call("pad_timeline", { pid, states: [{ at_ms: 0 }], stagger_ms: 5000 });
+  check(r.isError && t.callsOf("json").length === 0, "stagger_ms above 1000 is refused", r.text.slice(0, 200));
+
+  // ---- key_sequence (sent as `seq <file>`)
+  t.setScenario({ replies: { seq: { ok: true, accepted: true, job_id: "j9" } } });
+  r = await t.call("key_sequence", { pid, steps: [{ action: "hold", key: "w+space", ms: 1500 }, { action: "wait", ms: 100 }, { action: "key", key: "d", ms: 300 }], replace: true });
+  check(!r.isError && r.json?.job_id === "j9" && /job_status/.test(String(r.json?.note)), "key_sequence returns the job id and a job_status hint", r.text.slice(0, 300));
+  check(t.lastSeqText() === "hold w+space 1500\nwait 100\nkey d 300\n", "key_sequence writes one line per step", JSON.stringify(t.lastSeqText()));
+  const seqArgs = last("seq");
+  check(seqArgs[0] === "seq" && seqArgs.at(-1) === "--replace=true" && /sequence\.vin$/.test(seqArgs[1] ?? ""), "seq gets the file and --replace=true", JSON.stringify(seqArgs));
+  t.clearCalls();
+  r = await t.call("key_sequence", { pid, steps: [{ action: "hold", ms: 100 }] });
+  check(r.isError && t.callsOf("seq").length === 0, "hold without a key is refused before anything is sent", r.text.slice(0, 200));
+  r = await t.call("key_sequence", { pid, steps: [{ action: "wait", key: "w", ms: 100 }] });
+  check(r.isError && t.callsOf("seq").length === 0, "wait with a key is refused", r.text.slice(0, 200));
+  r = await t.call("key_sequence", { pid, steps: [{ action: "key", key: "w x", ms: 100 }] });
+  check(r.isError && t.callsOf("seq").length === 0, "a key name with a space is refused", r.text.slice(0, 200));
 
   // ---- hold_while
   r = await t.call("hold_while", { pid, key: "w", until_text: "Village", timeout_ms: 4000, region: { x: 0, y: 0, w: 100, h: 50 } });

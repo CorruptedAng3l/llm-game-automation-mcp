@@ -35,6 +35,19 @@ try {
   const q = await t.call("config", { pid });
   check(!q.isError && cmdOf(t.calls().at(-1)).join(" ") === "config", "no settings = just read the config", q.text.slice(0, 200));
 
+  // bounded physical-input opt-out: for_ms becomes --for, only with isolate:false
+  t.setScenario({ replies: { config: fullStatus({ isolate: false }) } });
+  t.clearCalls();
+  const lease = await t.call("config", { pid, isolate: false, for_ms: 1000 });
+  const leaseWords = cmdOf(t.calls().at(-1));
+  check(!lease.isError && leaseWords.join(" ") === "config isolate=false --for 1000", "isolate:false + for_ms -> `config isolate=false --for 1000`", leaseWords.join(" "));
+  check(props.for_ms?.type === "integer" && props.for_ms?.maximum === 120000, "for_ms is an integer 1..120000", JSON.stringify(props.for_ms));
+  t.clearCalls();
+  const noLease = await t.call("config", { pid, for_ms: 1000 });
+  check(noLease.isError && t.calls().length === 0, "for_ms without isolate:false is refused before anything is sent", noLease.text.slice(0, 200));
+  const trueLease = await t.call("config", { pid, isolate: true, for_ms: 1000 });
+  check(trueLease.isError && t.calls().length === 0, "for_ms with isolate:true is refused", trueLease.text.slice(0, 200));
+
   // bad enum value rejected by the schema
   const bad = await t.call("config", { pid, cursor: "sideways" });
   check(bad.isError === true, "an invalid enum value is an error", bad.text.slice(0, 200));
