@@ -12,6 +12,8 @@ struct SelfRawPacket {
     HWND window=nullptr; DWORD thread=0; WPARAM w=0; LPARAM l=0;
     ULONG_PTR proof=0,windowStamp=0; ULONGLONG expires=0;
     bool internal=false;RAWINPUT record{};
+    std::shared_ptr<WndProcBinding> inputBinding; // immutable selected origin, including latched revocation
+
 };
 constexpr size_t kSelfRawCapacity=1024;
 constexpr ULONGLONG kSelfRawLifetimeMs=10000;
@@ -25,17 +27,29 @@ std::atomic<unsigned long long> g_selfRawCapacityRejected{0},g_selfRawInternalPo
 std::atomic<DWORD> g_selfRawLastPostError{0};
 struct SelfRawContext {HWND window=nullptr;HRAWINPUT raw=nullptr;bool active=false;const SelfRawPacket* packet=nullptr;};
 thread_local SelfRawContext g_selfRawContext;
+bool SelfRawBindingCurrent(const SelfRawPacket& packet){
+    return !packet.inputBinding||(WndBindingLive(packet.inputBinding)&&WndBindingFind(packet.inputBinding->window)==packet.inputBinding);
+}
+bool SelfRawContextCurrent(){
+    const auto* packet=g_selfRawContext.packet;DWORD owner=0;
+    return packet&&SelfRawBindingCurrent(*packet)&&packet->window==g_selfRawContext.window&&WndBindingRawAllowed(packet->window)&&
+        GetWindowThreadProcessId(packet->window,&owner)==packet->thread&&owner==g_pid&&
+        (ULONG_PTR)GetPropW(packet->window,kSelfRawWindowProperty)==packet->windowStamp;
+}
 
 bool SelfRawTrusted(HWND window,HRAWINPUT raw) {
     // A cross-thread SendMessage may re-enter the WndProc during a trusted dispatch.
     // Such a sent message must not borrow the current posted-message provenance.
-    return g_selfRawContext.active && g_selfRawContext.window==window &&
+    return g_selfRawContext.active && SelfRawContextCurrent() && g_selfRawContext.window==window &&
         g_selfRawContext.raw==raw && InSendMessageEx(nullptr)==ISMEX_NOSEND;
 }
 bool SelfRawTrustedRead(HRAWINPUT raw) {
-    return g_selfRawContext.active && g_selfRawContext.raw==raw &&
+    return g_selfRawContext.active && SelfRawContextCurrent() && g_selfRawContext.raw==raw &&
         InSendMessageEx(nullptr)==ISMEX_NOSEND;
 }
+// Matching admitted private provenance must not fall through to a
+// foreground/opt-out native decoder after its lifetime is revoked.
+bool SelfRawReadRevoked(HRAWINPUT raw){return g_selfRawContext.active&&g_selfRawContext.raw==raw&&!SelfRawContextCurrent();}
 struct SelfRawScope {
     SelfRawContext previous;
     explicit SelfRawScope(const SelfRawPacket& packet):previous(g_selfRawContext) {
@@ -85,11 +99,13 @@ BOOL SelfRawPost(ViPostMessage original,HWND window,UINT message,WPARAM w,LPARAM
         if(record){++g_selfRawRejected;g_selfRawLastPostError=ERROR_INVALID_WINDOW_HANDLE;SetLastError(ERROR_INVALID_WINDOW_HANDLE);return FALSE;}
         return original(window,message,w,l);
     }
+    if(!WndBindingRawAllowed(window)){WndBindingRecordInputRefusal();++g_selfRawRejected;g_selfRawLastPostError=ERROR_NOT_READY;SetLastError(ERROR_NOT_READY);return FALSE;}
     if(!g_selfRawReady) {
         if(record){++g_selfRawPostFailed;g_selfRawLastPostError=ERROR_NOT_SUPPORTED;SetLastError(ERROR_NOT_SUPPORTED);return FALSE;}
         return original(window,message,w,l);
     }
-    SelfRawPacket packet;packet.window=window;packet.w=w;packet.l=l;
+    SelfRawPacket packet;packet.window=window;packet.w=w;packet.l=l;const HWND selected=g_hwnd;packet.inputBinding=WndBindingFind(selected);
+    if((selected&&!packet.inputBinding)||!SelfRawBindingCurrent(packet)){WndBindingRecordInputRefusal();++g_selfRawRejected;g_selfRawLastPostError=ERROR_NOT_READY;SetLastError(ERROR_NOT_READY);return FALSE;}
     if(record) {
         if(record->header.dwSize<sizeof(RAWINPUTHEADER)||record->header.dwSize>sizeof(RAWINPUT)){++g_selfRawRejected;g_selfRawLastPostError=ERROR_INVALID_DATA;SetLastError(ERROR_INVALID_DATA);return FALSE;}
         packet.internal=true;packet.record=*record; // immutable payload belongs to this one-shot packet
@@ -141,6 +157,10 @@ LRESULT SelfRawDispatch(ViDispatchMessage original,const MSG* message) {
     if(!message)return original(message);
     MSG copied{};if(!ReaderBufferLoad(message,&copied,sizeof(copied))){SetLastError(ERROR_NOACCESS);return 0;}
     message=&copied;PostedDispatchScope postedScope(copied);
+    const bool bindingAllowed=(message->message==WM_INPUT||message->message==envelope)?WndBindingRawAllowed(message->hwnd):WndBindingInputAllowed(message->hwnd);
+    if(!bindingAllowed&&(PostedInputMessage(message->message)||message->message==WM_INPUT)){
+        WndBindingRecordInputRefusal();if(message->message==WM_INPUT){++C.wm_input;++C.wm_input_dropped;return IsWindowUnicode(message->hwnd)?DefWindowProcW(message->hwnd,WM_INPUT,message->wParam,message->lParam):DefWindowProcA(message->hwnd,WM_INPUT,message->wParam,message->lParam);}return 0;
+    }
     if(message->message==WM_INPUT && MouseKeyboardIsolating() && !SelfRawTrusted(message->hwnd,(HRAWINPUT)message->lParam)) {
         // Admission precedes the OUTER host WndProc too: a host that consumes
         // WM_INPUT above our subclass must not receive outside raw messages.
@@ -162,6 +182,7 @@ LRESULT SelfRawDispatch(ViDispatchMessage original,const MSG* message) {
         }
     }
     if(!admitted){++g_selfRawRejected;return 0;}
+    if(!bindingAllowed||!SelfRawBindingCurrent(packet)||!WndBindingRawAllowed(packet.window)){WndBindingRecordInputRefusal();++g_selfRawRejected;return 0;}
     MSG restored=*message;restored.message=WM_INPUT;restored.wParam=packet.w;restored.lParam=packet.l;
     SelfRawScope scope(packet);++g_selfRawDispatched;if(packet.internal)++g_selfRawInternalDispatched;
     // The original dispatcher invokes the current OUTER WndProc with the original host marker.

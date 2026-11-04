@@ -1,5 +1,6 @@
 // Bounded legacy-message publication records. This preserves ordinary keyboard
 // messages and queue filters; tuple matching is not cryptographic queue origin.
+bool WndBindingInputAllowed(HWND);void WndBindingRecordInputRefusal();
 constexpr int kPostedCapacity=512;
 struct PostedMsg {
     UINT m=0;WPARAM w=0;LPARAM l=0;HWND window=nullptr;DWORD thread=0;
@@ -33,13 +34,14 @@ bool PostedCaptureTarget(PostedMsg& target){
     std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);target={};target.window=g_hwnd;target.generation=g_inputReadyGeneration;
     DWORD owner=0;target.thread=target.window?GetWindowThreadProcessId(target.window,&owner):0;
     if(!target.thread||owner!=g_pid){SetLastError(ERROR_INVALID_WINDOW_HANDLE);return false;}
+    if(!WndBindingInputAllowed(target.window)){WndBindingRecordInputRefusal();SetLastError(ERROR_NOT_READY);return false;}
     AcquireSRWLockExclusive(&g_ringLock);target.windowStamp=(ULONG_PTR)GetPropW(target.window,kPostedWindowProperty);
     if(!target.windowStamp){target.windowStamp=++g_postedWindowSerial;if(!target.windowStamp)target.windowStamp=++g_postedWindowSerial;
         if(!SetPropW(target.window,kPostedWindowProperty,(HANDLE)target.windowStamp)){ReleaseSRWLockExclusive(&g_ringLock);return false;}}
     ReleaseSRWLockExclusive(&g_ringLock);return true;
 }
 bool PostedTargetCurrent(const PostedMsg& target){
-    DWORD owner=0;return target.window==g_hwnd&&target.generation==g_inputReadyGeneration.load()&&
+    DWORD owner=0;return WndBindingInputAllowed(target.window)&&target.window==g_hwnd&&target.generation==g_inputReadyGeneration.load()&&
         GetWindowThreadProcessId(target.window,&owner)==target.thread&&owner==g_pid&&
         (ULONG_PTR)GetPropW(target.window,kPostedWindowProperty)==target.windowStamp;
 }
@@ -146,9 +148,10 @@ BOOL WINAPI h_TranslateMessage(const MSG* input){
     MSG message{};
     if(!input||!ReaderBufferLoad(input,&message,sizeof(message))){SetLastError(ERROR_NOACCESS);return FALSE;}
     if(!PostedKeyMessage(message.message))return o_TranslateMessage(input);
-    const bool isolating=MouseKeyboardIsolating();PostedMsg snapshot;
+    const bool isolating=MouseKeyboardIsolating();const bool bindingAllowed=WndBindingInputAllowed(message.hwnd);PostedMsg snapshot;
     int source=0;PostedTranslationInFlight inFlight;
-    {std::lock_guard<std::recursive_mutex> claim(g_inputMx);source=RingTranslation(message,isolating,snapshot);if(source==1||source==3)inFlight.BeginLocked();}
+    {std::lock_guard<std::recursive_mutex> claim(g_inputMx);source=RingTranslation(message,isolating,snapshot);if(bindingAllowed&&(source==1||source==3))inFlight.BeginLocked();}
+    if(!bindingAllowed){WndBindingRecordInputRefusal();return source?TRUE:FALSE;}
     if(source==3||(!source&&!isolating))return o_TranslateMessage(input);
     if(!source)return FALSE; // outside key messages are not translated while isolated
     if(source==2)return TRUE;
@@ -179,6 +182,7 @@ bool PostPublication(HWND window,UINT message,WPARAM w,LPARAM l,bool suppressTra
     // Includes direct type/translated chars, which can publish outside KeyEvent.
     std::lock_guard<std::recursive_mutex> inputPublication(g_inputMx);
     DWORD owner=0;if(!window||!GetWindowThreadProcessId(window,&owner)||owner!=g_pid){DWORD error=owner?ERROR_ACCESS_DENIED:ERROR_INVALID_WINDOW_HANDLE;++C.post_target_rejected;C.last_post_target_error=error;SetLastError(error);return false;}
+    if(PostedInputMessage(message)&&!WndBindingInputAllowed(window)){WndBindingRecordInputRefusal();++C.post_target_rejected;C.last_post_target_error=ERROR_NOT_READY;SetLastError(ERROR_NOT_READY);return false;}
     bool down=false;const int vk=MessageKey(message,w,down);
     int slot=-1;unsigned long long serial=0;
     if(PostedInputMessage(message)){

@@ -32,10 +32,10 @@ static bool RequestInputReady(DWORD pid,bool hooksOnly,std::string& response,HAN
  return ReadinessTransport(pid,std::string("{\"cmd\":\"readiness\",\"wait_ms\":5000,\"hooks_only\":")+(hooksOnly?"true":"false")+"}",6500,response,target);
 }
 #include "vi_cli_cursor_guard.inl"
-static int ReportInputReady(FILE* output,DWORD pid,const std::wstring& dll,bool quiet,bool hooksOnly,bool already,HANDLE target=nullptr) {
+static int ReportInputReady(FILE* output,DWORD pid,const std::wstring& dll,bool quiet,bool hooksOnly,bool already,HANDLE target=nullptr,std::string* captured=nullptr) {
  std::string response;const bool received=RequestInputReady(pid,hooksOnly,response,target);
  const auto reply=vi_ready_json::Parse(response);const bool supported=received&&reply.supported;
  const bool ok=supported&&reply.ok&&reply.hooks&&CursorGuardHandshakeReady(response)&&(hooksOnly||(reply.window&&reply.queue));
- if(!quiet||!ok)fprintf(output,"{\"ok\":%s,\"pid\":%lu,\"injected\":true,\"%s\":\"%s\",\"already_injected\":%s,\"readiness\":%s%s%s}\n",ok?"true":"false",pid,already?"requested_dll":"dll",JEsc(W2U(dll)).c_str(),already?"true":"false",supported?response.c_str():"null",already?",\"note\":\"already injected\"":"",ok?"":received?(supported?",\"error\":\"DLL loaded but input infrastructure readiness failed; inspect readiness\"":",\"error\":\"DLL pipe exists but readiness v1 is unsupported; restart the owned target with the matching updated DLL\""):",\"error\":\"DLL loaded but readiness transport/deadline failed; input readiness is unconfirmed\"");
+ if(captured||!quiet||!ok)EmitInjectReply(output,captured,"{\"ok\":%s,\"pid\":%lu,\"injected\":true,\"%s\":\"%s\",\"already_injected\":%s,\"readiness\":%s%s%s}\n",ok?"true":"false",pid,already?"requested_dll":"dll",JEsc(W2U(dll)).c_str(),already?"true":"false",supported?response.c_str():"null",already?",\"note\":\"already injected\"":"",ok?"":received?(supported?",\"error\":\"DLL loaded but input infrastructure readiness failed; inspect readiness\"":",\"error\":\"DLL pipe exists but readiness v1 is unsupported; restart the owned target with the matching updated DLL\""):",\"error\":\"DLL loaded but readiness transport/deadline failed; input readiness is unconfirmed\"");
  return ok?0:2;
 }

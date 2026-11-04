@@ -340,6 +340,7 @@ std::deque<RAWINPUT> g_rawQ;          // for GetRawInputBuffer consumers
 std::atomic<DWORD> g_lastRIB{0};      // tick of last GetRawInputBuffer call
 bool SelfRawTrusted(HWND,HRAWINPUT);
 bool SelfRawTrustedRead(HRAWINPUT);
+bool SelfRawReadRevoked(HRAWINPUT);
 bool SelfRawReadInternal(HRAWINPUT,UINT,LPVOID,PUINT,UINT,UINT&);
 BOOL SelfRawPostRecord(HWND,const RAWINPUT&,LPARAM);
 
@@ -489,7 +490,7 @@ bool RawWanted(bool kbd, const RawReg& rr) {
 void MouseButton(int vk, bool down);
 
 bool KeyEvent(int vk, bool down, bool suppressTranslation=false,const PostedMsg* expected=nullptr,unsigned long long* pressGeneration=nullptr) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);if(pressGeneration)*pressGeneration=0;if(expected&&!PostedTargetCurrent(*expected)){SetLastError(ERROR_RETRY);return false;}NoteAgentInput();if(!g_jobApplying)JobsOverrideKey(vk);
+    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);if(pressGeneration)*pressGeneration=0;if(expected&&!PostedTargetCurrent(*expected)){SetLastError(ERROR_RETRY);return false;}if(down&&!WndBindingInputAllowed(g_hwnd)){WndBindingRecordInputRefusal();SetLastError(ERROR_NOT_READY);return false;}NoteAgentInput();if(!g_jobApplying)JobsOverrideKey(vk);
     if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2) { MouseButton(vk, down); return true; }
     SetVkState(vk, down);
     if(pressGeneration&&down)*pressGeneration=g_resourceGeneration[JobResource(vk)];
@@ -513,6 +514,7 @@ bool KeyEvent(int vk, bool down, bool suppressTranslation=false,const PostedMsg*
 // cursor after setting the key state. Concurrent application reads remain unconfirmed.
 bool MouseButtonChecked(int vk, bool down, const POINT* expected, POINT* used,const CaptureScope* scope=nullptr) {
     std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
+    if(down&&!WndBindingInputAllowed(g_hwnd)){WndBindingRecordInputRefusal();SetLastError(ERROR_NOT_READY);return false;}
     if(down&&scope&&!CaptureScopeCurrent(*scope)){SetLastError(ERROR_RETRY);return false;}
     NoteAgentInput();
     POINT position{g_vcurX,g_vcurY};
@@ -745,13 +747,12 @@ BOOL WINAPI h_GetKeyboardState(PBYTE ks) {
 // TranslateMessage (Ctrl/Shift chords from virtual modifier state): h_TranslateMessage lives in vi_posted_input.inl, which
 // snapshots the virtual key state when each message is posted and translates from that snapshot.
 BOOL WINAPI h_GetCursorPos(LPPOINT p) {
-    C.gcur++;
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
+    C.gcur++; // Virtual reads lock internally; native reader callbacks run unlocked.
     if(UseVirtualCursor())return CursorVirtualGet(p,1)?TRUE:FALSE;
     return o_GetCursorPos(p);
 }
 BOOL WINAPI h_GetPhysicalCursorPos(LPPOINT p) {
-    std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
+    // Match GetCursorPos: no outer input lock across the original reader.
     if(UseVirtualCursor())return CursorVirtualGet(p,2)?TRUE:FALSE;
     return o_GetPhysicalCursorPos(p);
 }
@@ -765,6 +766,7 @@ HWND WINAPI h_WindowFromPoint(POINT pt) {
 }
 UINT WINAPI h_GetRawInputData(HRAWINPUT h, UINT cmd, LPVOID data, PUINT pcb, UINT hdr) {
     C.rid++;
+    if(SelfRawReadRevoked(h)){WndBindingRecordInputRefusal();C.raw_real_denied++;SetLastError(ERROR_NOT_READY);return (UINT)-1;}
     UINT internal=0;
     if(SelfRawReadInternal(h,cmd,data,pcb,hdr,internal)){C.rid_magic++;return internal;}
     if(ReaderMask(ReaderRawData)&&!SelfRawTrustedRead(h)){C.raw_real_denied++;SetLastError(ERROR_ACCESS_DENIED);return (UINT)-1;}
@@ -841,8 +843,14 @@ BOOL WINAPI h_RegisterRawInputDevices(PCRAWINPUTDEVICE devices,UINT count,UINT s
 // window subclass: fake focus + isolation of real mouse/raw input in the background
 // ----------------------------------------------------------------------------------------------
 #include "vi_wndproc_binding.inl"
-LRESULT CallOrig(HWND h, UINT m, WPARAM w, LPARAM l) {
-    return WndBindingOriginal(h,m,w,l);
+// Read-only lifetime witness for native confinement; no input lock or callback.
+bool NativeClipWindowProof(HWND window,DWORD& thread,ULONG_PTR& lifetime){
+    auto binding=WndBindingFind(window);if(!WndBindingLive(binding))return false;
+    thread=binding->thread;lifetime=binding->lifetime;
+    return WndBindingFind(window)==binding&&WndBindingLive(binding);
+}
+LRESULT CallOrig(const std::shared_ptr<WndProcBinding>& binding,HWND h, UINT m, WPARAM w, LPARAM l) {
+    return WndBindingOriginal(binding,h,m,w,l);
 }
 bool AdoptionHumanSelectionPending() {
     return g_userIntent.Active() || g_userIntent.Provisional() || g_userIntent.EvaluatingAltTab();
@@ -890,7 +898,7 @@ void MaybeSynthActivate() {
 }
 LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     WndBindingCallback callback(h,m);
-    if(!WndBindingLive(callback.binding)){++g_wndBindingMissing;return WndBindingDefault(h,m,w,l);}
+    if(!callback.gui){++g_wndBindingMissing;++g_wndGuiDefaulted;return WndBindingDefault(h,m,w,l);}
     if(h==g_hwnd&&(m==WM_SIZE||m==WM_DPICHANGED||m==WM_NCDESTROY))++g_captureGeometryEpoch;
     if(m==WM_NCDESTROY)RemovePropW(h,kCaptureLifetimeProperty);
     if(m==g_inputReadyMessage && g_inputReadyMessage && h==g_hwnd && WndBindingReady(h) && (ULONG_PTR)l==g_inputReadyCookie) {
@@ -898,7 +906,7 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     if(m==g_adoptionActivationMessage && (ULONG_PTR)l==kAdoptionActivationCookie) {
-        if(w!=g_adoptionActivationSequence || !CanRefreshAdoptedWindow(h) || !g_origWndProc) {
+        if(!WndBindingLive(callback.binding) || w!=g_adoptionActivationSequence || !CanRefreshAdoptedWindow(h) || !g_origWndProc) {
             ++C.act_refresh_cancelled;Log("virtual activation adoption refresh cancelled hwnd=%p",h);return 0;
         }
         // Execute application callbacks on its own UI thread. This private queued
@@ -922,7 +930,7 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         } else ++C.act_refresh_cancelled;
         Log("virtual activation adoption refresh dispatched hwnd=%p actual_fg=%d",h,(int)ComputeRealFg());return 0;
     }
-    if (m == g_hoverBarrierMessage && g_hoverBarrierMessage && h == g_hwnd && (ULONG_PTR)l == g_hoverBarrierCookie && w == g_hoverBarrierExpected.load()) {
+    if (m == g_hoverBarrierMessage && g_hoverBarrierMessage && h == g_hwnd && WndBindingLive(callback.binding) && (ULONG_PTR)l == g_hoverBarrierCookie && w == g_hoverBarrierExpected.load()) {
         g_hoverBarrierAck = w; return 0;
     }
     bool fg = ComputeRealFg();
@@ -948,6 +956,7 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if ((m >= WM_KEYFIRST && m <= WM_KEYLAST)) {
         if (m == WM_CHAR || m == WM_SYSCHAR) C.wm_char++; else C.wm_key++;
         bool ours = RingConsume(h, m, w, l);
+        if(!WndBindingLive(callback.binding)){WndBindingRecordInputRefusal();++g_readerMessageKeyDropped;return 0;}
         if(!ours&&MouseKeyboardIsolating()){++g_readerMessageKeyDropped;return 0;}
         // Not WM_CHAR: the type command posts characters outside the ring, and TranslateMessage derives them from keys.
         if (!ours && fg && m != WM_CHAR && m != WM_SYSCHAR) NoteOwnerInput(true);
@@ -958,6 +967,7 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) {
         C.wm_mouse++;
         bool ours = RingConsume(h, m, w, l);
+        if(!WndBindingLive(callback.binding)){WndBindingRecordInputRefusal();C.wm_mouse_dropped++;return 0;}
         if (!ours && MouseKeyboardIsolating()) { C.wm_mouse_dropped++; return 0; }
         if (!ours && fg) NoteOwnerInput(m != WM_MOUSEMOVE);
         if (ours && m == WM_MOUSEMOVE) g_mouseMovesDelivered++;
@@ -969,6 +979,7 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         C.wm_input++;
         if(!SelfRawTrusted(h,(HRAWINPUT)l)&&fg)NoteOwnerInput(false);
         if(!SelfRawTrusted(h,(HRAWINPUT)l))CursorObserveHardwareActivity();
+        if(!WndBindingLive(callback.binding)){WndBindingRecordInputRefusal();++C.wm_input_dropped;return WndBindingDefault(h,m,w,l);}
         if (!SelfRawTrusted(h,(HRAWINPUT)l) && MouseKeyboardIsolating()) {
             C.wm_input_dropped++;
             return WndBindingDefault(h,m,w,l);
@@ -979,7 +990,7 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if(!fg && ((m==WM_ACTIVATEAPP && !w) || (m==WM_ACTIVATE && LOWORD(w)==WA_INACTIVE) || m==WM_KILLFOCUS)) {
         ++C.act_leaked;Log("deactivation leaked to %p msg=0x%X w=0x%llX fakefocus=%d",h,m,(unsigned long long)w,(int)g_cfg.fakefocus.load());
     }
-    return CallOrig(h, m, w, l);
+    return CallOrig(callback.binding,h, m, w, l);
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -1647,6 +1658,7 @@ bool RetargetLocked(HWND h,std::string* failure,std::shared_ptr<WndProcBinding>&
     if(!WndBindingAttach(h,binding,reason))return refuse();
     // Only committed adoption may invalidate capture-bound jobs/snapshots.
     WndAdoptionTransition transition;
+    NativeClipScopeChanged(); // no native call while adoption/config mutex is held
     ++g_inputReadyGeneration;
     JobsCancelAll("target_changed");
     WndBindingDetachIfTop(g_hwnd);
@@ -1909,6 +1921,7 @@ bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_jobs.inl"
 #include "vi_readiness.inl"
 #include "vi_cursor_status.inl"
+#include "vi_wndproc_status.inl"
 
 std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
@@ -1925,7 +1938,7 @@ std::string StatusJson() {
     o.str("log_path", W2U(g_logPath));
     char hb[32]; sprintf_s(hb, "0x%llX", (unsigned long long)(ULONG_PTR)g_hwnd); o.str("hwnd", hb);
     o.raw("retarget_quiescence",RetargetQuiescenceStatusJson());
-    o.bol("wndproc_binding_ready",WndBindingReady(g_hwnd));o.num("wndproc_adoption_refused",(double)g_wndBindingRefused.load());o.num("wndproc_unbound_callbacks",(double)g_wndBindingMissing.load());
+    o.raw("wndproc_binding",WndBindingStatusJson(g_hwnd));o.bol("wndproc_binding_ready",WndBindingReady(g_hwnd));o.num("wndproc_adoption_refused",(double)g_wndBindingRefused.load());o.num("wndproc_unbound_callbacks",(double)g_wndBindingMissing.load());
     if (g_hwnd) {
         wchar_t cls[128] = {0}, title[256] = {0}; GetClassNameW(g_hwnd, cls, 127); GetWindowTextW(g_hwnd, title, 255);
         RECT rc; GetClientRect(g_hwnd, &rc);
@@ -2176,6 +2189,8 @@ std::string Exec(const std::string& line) {
         // Ownership can change while the window or its queue is becoming ready.
         std::string refused=ClaimGate(cmd,j);if(!refused.empty())return refused;
     }
+    const bool windowInput=cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="down"||cmd=="type"||cmd=="seq"||cmd=="sequence"||cmd=="mouse"||cmd=="move"||cmd=="click"||cmd=="mousedown"||cmd=="drag"||cmd=="placement-drag"||cmd=="wheel";
+    if(windowInput&&!WndBindingInputAllowed(g_hwnd)){WndBindingRecordInputRefusal();JOut out;out.bol("ok",false);out.bol("input_injected",false);out.str("error","window binding lifetime is unconfirmed; release local input, then restart the target or select a fresh safely adoptable window; same-HWND recovery is unsupported");return out.done();}
     if(cmd=="jobs"||cmd=="job-status"||cmd=="job-cancel")return JobCommand(cmd,j);
     const bool coordinateMotion=(cmd=="mouse"||cmd=="move")&&!JHas(j,"dx")&&!JHas(j,"dy");
     const bool positionedPress=(cmd=="click"||cmd=="mousedown")&&(JHas(j,"x")||JHas(j,"y"));
@@ -2262,6 +2277,7 @@ std::string Exec(const std::string& line) {
         if (ForegroundBelongsToTarget(previous)) return ErrJ("restore needs a previous window outside the target");
         if (!ComputeRealFg()) { JOut o;o.bol("ok",true);o.bol("foreground_restored",true);return o.done(); }
         if (!IsWindow(previous)) return ErrJ("restore needs a previous window outside the target");
+        NativeClipScopeChanged(); // validated handoff; guard performs conditional cleanup
         bool restored = RelinquishForeground(previous);
         JOut o; o.bol("ok", restored); o.bol("foreground_restored", restored); return o.done();
     }
@@ -2729,6 +2745,7 @@ DWORD WINAPI ForegroundGuardThread(LPVOID) {
             else if(!ours && GetTickCount64()-g_ownerHoldAt.load()>1500) g_ownerHolding=false;
         }
         const bool ownerHolds=g_ownerHolding.load();
+        NativeClipTick(); // conditional cleanup remains independent of UI/renderer progress
         const bool cursorForeground=PhysicalForegroundOwned();
         if(human&&intentWindow==g_hwnd&&intentGeneration==g_inputReadyGeneration&&cursorForeground)CursorPublishHuman(intentWindow,intentGeneration,false,cursorObservation);else CursorValidateHumanScope(intentWindow,intentGeneration,cursorForeground,cursorObservation);
         if(fg && pid && !oursActual) {

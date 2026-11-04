@@ -53,6 +53,7 @@ vi_cursor_guard::Owner CursorOwnerSnapshot(){
  const HWND a=upstream?GetAncestor(upstream,GA_ROOT):nullptr,b=independent?GetAncestor(independent,GA_ROOT):nullptr,c=after?GetAncestor(after,GA_ROOT):nullptr;
  owner.foregroundVerified=upstream&&independent&&after&&a&&b&&c&&a==b&&b==c;
  owner.foregroundOwned=owner.foregroundVerified&&ForegroundBelongsToTarget(independent);
+ owner.foregroundRoot=owner.foregroundVerified?(std::uintptr_t)b:0;
  HWND target=g_hwnd;DWORD pid=0;owner.windowReady=target&&IsWindow(target)&&GetWindowThreadProcessId(target,&pid)&&pid==g_pid;
  const auto now=GetTickCount64();{std::lock_guard<std::mutex> lock(g_cursorOwnershipMx);const bool same=owner.windowReady&&g_cursorHumanWindow==target&&g_cursorHumanGeneration==g_inputReadyGeneration;
  owner.humanHolding=vi_cursor_guard::ReaderAllowed(owner)&&same&&g_cursorArbitration.Holding();owner.humanFresh=owner.humanHolding&&g_cursorHumanAt&&now>=g_cursorHumanAt&&now-g_cursorHumanAt<=300;
@@ -77,6 +78,7 @@ bool CursorVirtualSet(unsigned api,int x,int y){
  ++counters.virtualized;return true;
 }
 bool CursorVirtualGet(LPPOINT output,int reader){
+ std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
  if(!output){SetLastError(ERROR_INVALID_PARAMETER);return false;}HWND target=g_hwnd;DWORD pid=0;
  if(!target||!IsWindow(target)||!GetWindowThreadProcessId(target,&pid)||pid!=g_pid){POINT zero{};if(!CursorBufferStore(output,&zero,sizeof(zero))){SetLastError(ERROR_NOACCESS);return false;}SetLastError(ERROR_NOT_READY);return false;}
  POINT point{g_vcurX,g_vcurY};if(!ClientToScreen(target,&point))return false;if(!CursorBufferStore(output,&point,sizeof(point))){SetLastError(ERROR_NOACCESS);return false;}g_pointerSeen=g_pointerIssued.load();g_pointerReader=reader;return true;

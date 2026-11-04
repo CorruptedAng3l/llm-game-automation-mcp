@@ -86,7 +86,7 @@ Fix pass after the Cities: Skylines field test (owner input, chords, placement f
 | `build.bat` x64 + x86 | BUILD OK, 0 warnings |
 | `run_ownerinputtest.ps1` (x64 + x86) | 22 PASS, 0 FAIL each; against the previous behaviour 17 PASS, 5 FAIL (x64) |
 | `run_chordtest.ps1` (x64 + x86) | 8 PASS, 0 FAIL each; against the previous behaviour 4 PASS, 4 FAIL (x64): `ctrl+a` arrived as `a`, `shift+a` as lowercase `a` |
-| `verifyun_selftest.ps1` (background plan, 68 suites) | run 1: 68 passed, 0 failed; runs 2 and 3: 67 passed, 0 failed, 1 NOT MEASURED (`legacy_focus`: its quiet-machine control saw physical input; the case passes alone, 272 PASS / 0 FAIL, and on the previous build); run 4: 68 passed, 0 failed |
+| `verify\run_selftest.ps1` (background plan, 68 suites) | run 1: 68 passed, 0 failed; runs 2 and 3: 67 passed, 0 failed, 1 NOT MEASURED (`legacy_focus`: its quiet-machine control saw physical input; the case passes alone, 272 PASS / 0 FAIL, and on the previous build); run 4: 68 passed, 0 failed |
 | `mcp`: `npm run build && npm test && npm run smoke` | 19 test files PASS; smoke PASS, glue 12 PASS |
 | Cities: Skylines, live (windowed 1600x900, background input) | `key ctrl+a` selects all text in a Paradox login field; `drag placement:true` falls back with `placement_fallback`; dropdown list items take clicks in windowed mode |
 | NOT MEASURED | the true OS foreground check for owner input (the test fakes the predicate; needs a real click by the user); Unity text-field chords beyond the one field above |
@@ -102,12 +102,25 @@ warnings and 0 errors; every new fixture source compiles with `/W4 /WX` (x64); t
 (`npm test`). **No native fixture, suite plan, gate or live game has been run on the merged tree**, so none of the suites in the
 rows above has a result for it, and `run_ownerinputtest.ps1` and `run_chordtest.ps1` have not been re-run against the merged
 foreground logic (the Ctrl / Shift chord case is now served by the core's snapshot-based character translation). Run
-`verifyun_selftest.ps1` before relying on any of it.
+`verify\run_selftest.ps1` before relying on any of it.
 
 Open items carried from the dev review, not fixed here: a payload's posted `WM_INPUT` can be served to a game that still ignores
-it (not reproduced or fixed in a real game); a game's window procedure falls back to `DefWindowProc` if its binding witness is lost
-(repair pending); `ClipCursor` is virtual even while you play the game; Fallout-style resize / freeze after a human alt-tab is
-unmeasured. See the README's *Cursor guard and physical input*.
+it (not reproduced or fixed in a real game); Fallout-style resize / freeze after a human alt-tab is unmeasured. See the README's
+*Cursor guard and physical input*.
+
+### Merge of dev commits 830e2d3, 8827920 and 84eea6a (2026-11-04)
+
+- **830e2d3** launch window selection and injection-result reporting (`launch` replies now carry the `inject`,
+  `launch_readiness`, `early_inject` and `dialog_inject` records).
+- **8827920** `ClipCursor` is forwarded natively while the game owns the verified real foreground, then released
+  conditionally (see the README). Dev evidence: native-clip fixture 42 named semantic FAIL -> 0 (21 per arch), background
+  plan 84 PASS / 0 FAIL / 1 NOT MEASURED. OS-level confinement with a real user and real games is **not measured**.
+- **84eea6a** a lost window-binding witness no longer drops the game's window procedure to `DefWindowProc`: GUI messages
+  still reach it, and input to that window is quarantined. Dev evidence: 12-case matrix 126 FAIL occurrences -> 0;
+  retarget quiescence 814 / 0. Only targeted suites ran on dev for this commit.
+- Merged by hand into this tree (it carries the anti-cheat refusal and other public-only code); five conflicts resolved
+  in `vinput_cli.cpp` / `vinput_core.cpp`. The dev-only fixtures (`vi_nativeclip`, `vi_wndquarantine`, `vi_launch_*`)
+  are copied into `test/` but are not yet part of `build.bat` or `vi_suiteplan.ps1`.
 
 ## Real games
 
@@ -116,5 +129,17 @@ single-player games (background menus, loading saves, walking, map toggles, two 
 held the focus): Direct3D 11 games on Unity and Unreal Engine 4, a Direct3D 12 UWP game (capture and XInput pad), and a
 Unity game in OpenGL mode (capture). **Vulkan capture has been verified only on the synthetic target, not in a real
 game.** OCR on stylised game fonts is read inconsistently from run to run; use regions, `--scale 2` or image matching.
+
+Agent-driven field runs (an LLM playing through vinput, the game in the background the whole time):
+
+| game | what was done | evidence |
+|---|---|---|
+| Oxygen Not Included (Unity, D3D11, 2560x1440) | non-activating launch, `click-text "RESUME GAME"` via OCR, held `d` / `w` to pan the map, `g` dig tool, `esc`; every capture after an input had a new frame hash; `really_foreground:false` throughout | 2026-11-02 run log + captures |
+| Phantom Rose 2 Sapphire (`PrintWindow` capture) | full card-battle runs: Silver adventure cleared, then the Gold adventure including its final boss | 2026-11-03 play log |
+| Phantom Rose (`PrintWindow` capture) | card battles won while Notepad held the real foreground (recorded demo) | 2026-11-04 video |
+| Halo Wars 2 (UWP, D3D12) | RTS play through captures and clicks | 2026-11-03 video |
+
+Lesson from the card games: hover-gated buttons need a `move` and a short wait before the click, and hands reflow after
+each card is played (wait about 1 s and capture again before the next placement).
 
 Not verified anywhere: `GetRawInputBuffer` injection (no target uses it), 32-bit real games, D3D9 / D3D10 games.

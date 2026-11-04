@@ -185,7 +185,7 @@ static Reply Dispatch(DWORD pid, const std::vector<std::string>& tk) {
     Args a = SplitArgs(std::vector<std::string>(tk.begin() + 1, tk.end()));
     {std::string refusal;if(CaptureScopeSpecialPreflight(pid,cmd,a,refusal))return {false,refusal};}
     if(HasOpt(a,"stagger-ms")&&cmd!="pad-timeline")return Fail("--stagger-ms is only implemented for pad-timeline; no input was sent");
-    if((CursorGuardSpecialCommand(cmd)||((cmd=="key"||cmd=="hold")&&HasExpectationOptions(a)))&&!RequireCursorGuard(pid))return {false,"{\"ok\":false,\"input_injected\":false,\"error\":\"matching cursor safety guards are not armed; no input was sent\"}"};
+    {std::string acRefusal;if((CursorGuardSpecialCommand(cmd)||((cmd=="key"||cmd=="hold")&&HasExpectationOptions(a)))&&!RequireCursorGuard(pid,&acRefusal))return {false,acRefusal.empty()?"{\"ok\":false,\"input_injected\":false,\"error\":\"matching cursor safety guards are not armed; no input was sent\"}":acRefusal};}
     if (HasExpectationOptions(a)) return ConfirmInput(pid, tk);
     if(cmd=="seq"||cmd=="sequence")return CmdKeySequence(pid,a);
     if(cmd=="hold-while"||cmd=="pad-hold-while")return CmdHoldWhile(pid,a,cmd=="pad-hold-while");
@@ -212,7 +212,7 @@ static Reply Dispatch(DWORD pid, const std::vector<std::string>& tk) {
     }
     std::string j, err, resp;
     if (!BuildJson(tk, j, err)) return Fail(err);
-    if(NeedsCursorGuard(j)&&!RequireCursorGuard(pid))return {false,"{\"ok\":false,\"input_injected\":false,\"cursor_guard_version\":1,\"error\":\"matching cursor safety guards are not armed in this PID; no input was sent; restart the owned target with the updated DLL\"}"};
+    {std::string acRefusal;if(NeedsCursorGuard(j)&&!RequireCursorGuard(pid,&acRefusal))return {false,acRefusal.empty()?"{\"ok\":false,\"input_injected\":false,\"cursor_guard_version\":1,\"error\":\"matching cursor safety guards are not armed in this PID; no input was sent; restart the owned target with the updated DLL\"}":acRefusal};}
     if(NeedsIsolationDeadline(j)){Reply support=RequireIsolationDeadline(pid);if(!support.ok)return support;}
     if(NeedsPadTimelineV2(j)){Reply support=RequirePadTimelineV2(pid);if(!support.ok)return support;}
     if(NeedsInputJobs(j)){Reply support=RequireInputJobs(pid);if(!support.ok)return support;}

@@ -313,14 +313,27 @@ static std::set<DWORD> PidsByName(const std::wstring& name) {
     if (Process32FirstW(s, &e)) do { if (!_wcsicmp(e.szExeFile, name.c_str())) r.insert(e.th32ProcessID); } while (Process32NextW(s, &e));
     CloseHandle(s); return r;
 }
-struct WinFind { DWORD pid; HWND h; HWND dialog = nullptr; };
+struct WinFind { DWORD pid; HWND h; HWND dialog = nullptr, ownedPopup = nullptr; long long area = 0; bool enabled = false; };
+static bool OwnedPopupWindow(HWND window) {
+    return window && GetWindow(window,GW_OWNER)!=nullptr && ((DWORD)GetWindowLongW(window,GWL_STYLE)&WS_POPUP)!=0;
+}
 static BOOL CALLBACK WinEnum(HWND h, LPARAM lp) {
-    WinFind* f = (WinFind*)lp; DWORD p; GetWindowThreadProcessId(h, &p);
+    WinFind* f = (WinFind*)lp; DWORD p=0; GetWindowThreadProcessId(h, &p);
     if (p == f->pid && IsWindowVisible(h)) {
         wchar_t cls[128]={0};GetClassNameW(h,cls,127);
         if(!wcscmp(cls,L"#32770")){if(!f->dialog)f->dialog=h;return TRUE;}
-        RECT r;GetClientRect(h,&r);if(r.right>=200 && r.bottom>=150){f->h=h;return FALSE;}
+        if(OwnedPopupWindow(h)){if(!f->ownedPopup)f->ownedPopup=h;return TRUE;}
+        // Main candidates mirror the core's unowned-window policy. An unowned
+        // WS_POPUP is a valid borderless game window, regardless of its title.
+        if(GetWindow(h,GW_OWNER)||((DWORD)GetWindowLongW(h,GWL_EXSTYLE)&WS_EX_TOOLWINDOW))return TRUE;
+        RECT r{};if(GetClientRect(h,&r)&&r.right>=200&&r.bottom>=150) {
+            long long area=(long long)r.right*r.bottom;
+            const bool enabled=IsWindowEnabled(h)!=FALSE;
+            if(!f->h||(enabled&&!f->enabled)||(enabled==f->enabled&&area>f->area)){f->h=h;f->area=area;f->enabled=enabled;}
+        }
     }
+    // Do not stop on the first visible popup or main: an enabled real main
+    // wins even when an owned popup is above it in the enumeration order.
     return TRUE;
 }
 // UWP: the game's CoreWindow is a child of ApplicationFrameHost's ApplicationFrameWindow (another process).
@@ -338,21 +351,31 @@ static BOOL CALLBACK FrameEnum(HWND h, LPARAM lp) {
 static HWND CoreWindowOf(DWORD pid) { WinFind f{pid, nullptr}; EnumWindows(FrameEnum, (LPARAM)&f); return f.h; }
 static HWND VisibleWindowOf(DWORD pid) {
     WinFind f{pid,nullptr};EnumWindows(WinEnum,(LPARAM)&f);
-    if(f.dialog && (!f.h || !IsWindowEnabled(f.h)))return f.dialog;
-    return f.h ? f.h : CoreWindowOf(pid);
+    HWND main=f.h?f.h:CoreWindowOf(pid),dialog=f.dialog?f.dialog:f.ownedPopup;
+    if(dialog&&(!main||!IsWindowEnabled(main)))return dialog;
+    return main?main:dialog;
 }
 static std::string WindowClass(HWND h) { wchar_t s[128]={0};GetClassNameW(h,s,127);return W2U(s); }
-static std::string WindowTitle(HWND h) { wchar_t s[512]={0};GetWindowTextW(h,s,511);return W2U(s); }
-struct DialogText { std::wstring text; unsigned controls=0; };
+static std::string WindowTitle(HWND h) {
+    DWORD owner=0;if(!GetWindowThreadProcessId(h,&owner)||owner==GetCurrentProcessId())return {};
+    wchar_t text[512]={0};GetWindowTextW(h,text,512);return W2U(text);
+}
+struct DialogText { std::wstring text; unsigned controls=0; DWORD pid=0; };
 static BOOL CALLBACK DialogTextEnum(HWND h,LPARAM param) {
     auto* d=(DialogText*)param;if(++d->controls>16 || d->text.size()>=4096)return FALSE;
+    DWORD owner=0;if(!GetWindowThreadProcessId(h,&owner)||owner==GetCurrentProcessId()||owner!=d->pid)return TRUE;
     wchar_t s[512]={0};DWORD_PTR chars=0;
     if(SendMessageTimeoutW(h,WM_GETTEXT,512,(LPARAM)s,SMTO_ABORTIFHUNG|SMTO_BLOCK,75,&chars) && s[0]) {
-        if(!d->text.empty())d->text+=L" | ";d->text+=s;
+        if(!d->text.empty())d->text.append(L" | ",(std::min)(size_t(3),size_t(4096)-d->text.size()));
+        d->text.append(s,(std::min)(wcslen(s),size_t(4096)-d->text.size()));
     }
     return TRUE;
 }
-static std::string WindowFields(HWND h) { return ",\"window_class\":\""+JEsc(WindowClass(h))+"\",\"window_title\":\""+JEsc(WindowTitle(h))+"\""; }
+static std::string WindowFields(HWND h) { char value[32];sprintf_s(value,"0x%llX",(unsigned long long)(ULONG_PTR)h);return ",\"window_hwnd\":\""+std::string(value)+"\",\"window_class\":\""+JEsc(WindowClass(h))+"\",\"window_title\":\""+JEsc(WindowTitle(h))+"\""; }
+static std::string LaunchDialogFields(HWND window) {
+    char owner[32];sprintf_s(owner,"0x%llX",(unsigned long long)(ULONG_PTR)GetWindow(window,GW_OWNER));
+    return WindowFields(window)+",\"dialog_owned_popup\":"+(OwnedPopupWindow(window)?"true":"false")+",\"dialog_owner_hwnd\":\""+owner+"\"";
+}
 // The process that owns the foreground "for" a target: the target itself, or ApplicationFrameHost hosting its CoreWindow.
 static bool ForegroundIsTarget(HWND fg, DWORD target) {
     if (!fg || !target) return false;
@@ -361,24 +384,76 @@ static bool ForegroundIsTarget(HWND fg, DWORD target) {
     return core && GetAncestor(core, GA_ROOT) == fg;
 }
 
-static int RunChild32(const std::vector<std::wstring>& args, bool quiet=false) {
-    FILE* output=quiet ? stderr : stdout;
-    std::wstring exe = ExeDir() + L"\\vinput32.exe";
-    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) { fprintf(output,"{\"ok\":false,\"error\":\"32-bit target needs vinput32.exe next to vinput.exe\"}\n"); return 2; }
-    std::wstring cl = L"\"" + exe + L"\"";
-    for (auto& a : args) cl += L" \"" + a + L"\"";
-    STARTUPINFOW si = {sizeof(si)}; PROCESS_INFORMATION pi;
-    if (!CreateProcessW(exe.c_str(), &cl[0], nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) { fprintf(output,"{\"ok\":false,\"error\":\"cannot start vinput32.exe\"}\n"); return 2; }
-    WaitForSingleObject(pi.hProcess, INFINITE); DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread); return (int)code;
+#include "vi_cli_inject_reply.inl"
+static int RunChild32(const std::vector<std::wstring>& args,bool quiet=false,std::string* captured=nullptr) {
+    FILE* output=quiet?stderr:stdout;std::string directRecord;const bool direct=captured==nullptr;
+    if(!captured)captured=&directRecord;
+    StandaloneInjectChildReply directReply{output,&directRecord,direct,quiet};captured->clear();
+    std::wstring exe=ExeDir()+L"\\vinput32.exe";
+    if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES){EmitInjectReply(output,captured,"{\"ok\":false,\"error\":\"32-bit target needs vinput32.exe next to vinput.exe\"}");return 2;}
+    std::wstring command=L"\""+exe+L"\"";
+    for(const auto& argument:args)command+=L" \""+argument+L"\"";
+    STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION child{};
+    InjectChildHandle readPipe,writePipe,childError,childInput;
+    if(captured) {
+        SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};HANDLE reader=nullptr,writer=nullptr;
+        if(!CreatePipe(&reader,&writer,&security,65536)){EmitInjectReply(output,captured,"{\"ok\":false,\"error\":\"cannot create delegated injector stdout pipe\",\"win32_error\":%lu}",GetLastError());return 2;}
+        readPipe.Reset(reader);writePipe.Reset(writer);
+        if(!SetHandleInformation(reader,HANDLE_FLAG_INHERIT,0)||!CopyInjectChildStandard(STD_ERROR_HANDLE,true,childError)||!CopyInjectChildStandard(STD_INPUT_HANDLE,false,childInput)) {
+            EmitInjectReply(output,captured,"{\"ok\":false,\"error\":\"cannot prepare delegated injector stdio handles\",\"win32_error\":%lu}",GetLastError());return 2;
+        }
+        startup.dwFlags|=STARTF_USESTDHANDLES;startup.hStdOutput=writer;startup.hStdError=childError.value;startup.hStdInput=childInput.value;
+    }
+    if(!CreateProcessW(exe.c_str(),&command[0],nullptr,nullptr,TRUE,captured?CREATE_NO_WINDOW:0,nullptr,nullptr,&startup,&child)) {
+        EmitInjectReply(output,captured,"{\"ok\":false,\"error\":\"cannot start vinput32.exe\"}");return 2;
+    }
+    InjectChildHandle process,thread;process.Reset(child.hProcess);thread.Reset(child.hThread);
+    writePipe.Reset();childError.Reset();childInput.Reset();
+
+    std::string reply;bool overflow=false,readFailed=false,exited=false,stdoutEof=false;
+    const ULONGLONG deadline=GetTickCount64()+60000;
+    while(GetTickCount64()<deadline) {
+        DWORD available=0;
+        if(!PeekNamedPipe(readPipe.value,nullptr,0,nullptr,&available,nullptr)) {
+            if(GetLastError()!=ERROR_BROKEN_PIPE){readFailed=true;break;}
+            stdoutEof=true;available=0;
+        }
+        if(available) {
+            char block[4096];DWORD read=0;
+            if(!ReadFile(readPipe.value,block,(std::min)(available,(DWORD)sizeof(block)),&read,nullptr)||!read){readFailed=true;break;}
+            if(reply.size()+read<=65536&&!overflow)reply.append(block,read);else overflow=true;
+            continue; // Drain already-available bytes without blocking the GUI watcher.
+        }
+        exited=WaitForSingleObject(process.value,0)==WAIT_OBJECT_0;
+        // A signalled process can leave final bytes in its pipe, or another
+        // inherited writer can keep it open. Only observed EOF proves draining;
+        // peek again on the next bounded iteration, never block on ReadFile.
+        if(exited&&stdoutEof)break;
+        Sleep(2);
+    }
+    exited=WaitForSingleObject(process.value,0)==WAIT_OBJECT_0;
+    if(!exited) {
+        // This is the original retained handle from our own CreateProcess, never a reopened PID.
+        const bool terminated=TerminateProcess(process.value,2)!=FALSE;
+        const bool reaped=WaitForSingleObject(process.value,1500)==WAIT_OBJECT_0;
+        EmitInjectReply(output,captured,"{\"ok\":false,\"reply_unavailable\":true,\"injected\":null,\"delegated_deadline_ms\":60000,\"child_terminated\":%s,\"child_reaped\":%s,\"error\":\"delegated injector reply/deadline failed; target injection state is unknown and was not retried\"}",terminated?"true":"false",reaped?"true":"false");return 2;
+    }
+    DWORD code=1;const bool codeKnown=GetExitCodeProcess(process.value,&code)!=FALSE;
+    const auto first=reply.find_first_not_of(" \t\r\n");if(first!=std::string::npos)reply.erase(0,first);
+    while(!reply.empty()&&isspace((unsigned char)reply.back()))reply.pop_back();
+    vi_ready_json::Reader parsed{reply,0,{}};bool ok=false;
+    if(!codeKnown||!stdoutEof||overflow||readFailed||reply.find_first_of("\r\n")!=std::string::npos||!parsed.Parse()||!parsed.Bool("ok",ok)||ok!=(code==0)) {
+        EmitInjectReply(output,captured,"{\"ok\":false,\"reply_unavailable\":true,\"injected\":null,\"child_exit_code\":%lu,\"error\":\"delegated injector stdout did not contain one bounded JSON result consistent with its exit code; injection was not retried\"}",code);return 2;
+    }
+    *captured=std::move(reply);return (int)code;
 }
 
-static bool PrintInjectionExit(FILE* output, HANDLE target, DWORD pid, const char* stage, DWORD observeMs = 0) {
+static bool PrintInjectionExit(FILE* output, HANDLE target, DWORD pid, const char* stage, DWORD observeMs = 0, std::string* captured = nullptr) {
     DWORD code = 0;
     // Wait on the original handle: STILL_ACTIVE (259) is also a legal process exit code,
     // and reopening the numeric PID here could describe a different reused process.
     if (!target || WaitForSingleObject(target, observeMs) != WAIT_OBJECT_0 || !GetExitCodeProcess(target, &code)) return false;
-    fprintf(output, "{\"ok\":false,\"pid\":%lu,\"target_exited\":true,\"exit_code\":%lu,\"stage\":\"%s\",\"error\":\"target exited (pid %lu, exit code %lu) during inject\"}\n", pid, code, stage, pid, code);
+    EmitInjectReply(output,captured, "{\"ok\":false,\"pid\":%lu,\"target_exited\":true,\"exit_code\":%lu,\"stage\":\"%s\",\"error\":\"target exited (pid %lu, exit code %lu) during inject\"}\n", pid, code, stage, pid, code);
     return true;
 }
 // Anti-cheat refusal (vi_acguard.h). There is deliberately no flag to skip it.
@@ -394,29 +469,29 @@ static std::string AcRefusalJson(const vi_ac::Finding& f, DWORD pid) {
     return j;
 }
 #include "vi_cli_readiness.inl"
-static int Inject(DWORD pid, std::wstring dll, bool quiet = false, bool hooksOnly = false) {
+static int Inject(DWORD pid, std::wstring dll, bool quiet = false, bool hooksOnly = false, std::string* captured = nullptr) {
     FILE* output = quiet ? stderr : stdout;
     {
         vi_ac::Finding f = vi_ac::CheckTarget(pid, g_acSuspended);
         if (f.refused) { g_acLastRefusal = AcRefusalJson(f, pid); fprintf(output, "%s\n", g_acLastRefusal.c_str()); return 4; }
     }
     bool is32 = false;
-    if (!ProcessIs32(pid, is32)) { fprintf(output, "{\"ok\":false,\"error\":\"cannot open pid %lu\"}\n", pid); return 2; }
+    if (!ProcessIs32(pid, is32)) { EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"cannot open pid %lu\"}\n", pid); return 2; }
 #ifdef _WIN64
-    if (is32) { std::vector<std::wstring> a = {L"inject", L"--pid", std::to_wstring(pid)}; if (quiet) a.push_back(L"--quiet"); if (g_acSuspended) a.push_back(L"--internal-suspended"); if(hooksOnly)a.push_back(L"--hooks-only"); if (!dll.empty()) { a.push_back(L"--dll"); a.push_back(dll); } return RunChild32(a,quiet); }
+    if (is32) { std::vector<std::wstring> a = {L"inject", L"--pid", std::to_wstring(pid)}; if (g_acSuspended) a.push_back(L"--internal-suspended"); if(hooksOnly)a.push_back(L"--hooks-only"); if (!dll.empty()) { a.push_back(L"--dll"); a.push_back(dll); } return RunChild32(a,quiet,captured); }
     if (dll.empty()) dll = ExeDir() + L"\\vinput64.dll";
 #else
-    if (!is32) { fprintf(output, "{\"ok\":false,\"error\":\"64-bit target: use vinput.exe\"}\n"); return 2; }
+    if (!is32) { EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"64-bit target: use vinput.exe\"}\n"); return 2; }
     if (dll.empty()) dll = ExeDir() + L"\\vinput32.dll";
 #endif
     std::string resp;
     if (ReadinessTransport(pid, "{\"cmd\":\"ping\"}", 200,resp)) {
         HANDLE existing=OpenProcess(SYNCHRONIZE,FALSE,pid);
-        int result=ReportInputReady(output,pid,dll,quiet,hooksOnly,true,existing);
+        int result=ReportInputReady(output,pid,dll,quiet,hooksOnly,true,existing,captured);
         if(existing)CloseHandle(existing);return result;
     }
     wchar_t full[MAX_PATH]; GetFullPathNameW(dll.c_str(), MAX_PATH, full, nullptr); dll = full;
-    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) { fprintf(output, "{\"ok\":false,\"error\":\"dll not found: %s\"}\n", JEsc(W2U(dll)).c_str()); return 2; }
+    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) { EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"dll not found: %s\"}\n", JEsc(W2U(dll)).c_str()); return 2; }
     // load a per-build COPY (dist\run\<name>_<mtime>.dll) so the dist DLL is never locked by a running game
     // and build.bat can always replace it; games injected earlier keep their own copy.
     {
@@ -427,38 +502,38 @@ static int Inject(DWORD pid, std::wstring dll, bool quiet = false, bool hooksOnl
         wchar_t name[64]; swprintf_s(name, L"_%08lX%08lX.dll", fa.ftLastWriteTime.dwHighDateTime, fa.ftLastWriteTime.dwLowDateTime);
         std::wstring copy = dir + L"\\" + base + name;
         if (GetFileAttributesW(copy.c_str()) == INVALID_FILE_ATTRIBUTES && !CopyFileW(dll.c_str(), copy.c_str(), TRUE)) {
-            fprintf(output, "{\"ok\":false,\"error\":\"cannot copy dll to %s\"}\n", JEsc(W2U(copy)).c_str()); return 2;
+            EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"cannot copy dll to %s\"}\n", JEsc(W2U(copy)).c_str()); return 2;
         }
         dll = copy;
         TargetToken tt = QueryTargetToken(pid);
         if (tt.appContainer) {
             // an AppContainer can neither read our DLL nor write our log dir unless the AC groups are granted
             std::string e;
-            if (!GrantAppContainers(copy, GENERIC_READ | GENERIC_EXECUTE, false, e)) { fprintf(output, "{\"ok\":false,\"error\":\"AppContainer target: cannot grant read/execute on %s: %s\"}\n", JEsc(W2U(copy)).c_str(), e.c_str()); return 2; }
+            if (!GrantAppContainers(copy, GENERIC_READ | GENERIC_EXECUTE, false, e)) { EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"AppContainer target: cannot grant read/execute on %s: %s\"}\n", JEsc(W2U(copy)).c_str(), e.c_str()); return 2; }
             std::wstring logs = dir + L"\\logs"; CreateDirectoryW(logs.c_str(), nullptr);
             if (!GrantAppContainers(logs, FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE, true, e)) fprintf(stderr, "warning: AppContainer log dir grant failed: %s\n", e.c_str());
-            if (tt.acPath.empty()) { fprintf(output, "{\"ok\":false,\"error\":\"AppContainer target: GetAppContainerNamedObjectPath failed, pipe path unknown\"}\n"); return 2; }
+            if (tt.acPath.empty()) { EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"AppContainer target: GetAppContainerNamedObjectPath failed, pipe path unknown\"}\n"); return 2; }
         }
     }
     HANDLE hp = OpenProcess(SYNCHRONIZE | PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, pid);
-    if (!hp) { fprintf(output, "{\"ok\":false,\"error\":\"OpenProcess failed %lu\"}\n", GetLastError()); return 2; }
+    if (!hp) { EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"OpenProcess failed %lu\"}\n", GetLastError()); return 2; }
     SIZE_T sz = (dll.size() + 1) * sizeof(wchar_t);
     void* mem = VirtualAllocEx(hp, nullptr, sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     WriteProcessMemory(hp, mem, dll.c_str(), sz, nullptr);
     auto ll = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
     HANDLE th = CreateRemoteThread(hp, nullptr, 0, ll, mem, 0, nullptr);
-    if (!th) { fprintf(output, "{\"ok\":false,\"error\":\"CreateRemoteThread failed %lu\"}\n", GetLastError()); CloseHandle(hp); return 2; }
+    if (!th) { EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"CreateRemoteThread failed %lu\"}\n", GetLastError()); CloseHandle(hp); return 2; }
     WaitForSingleObject(th, 20000); DWORD code = 0; GetExitCodeThread(th, &code); CloseHandle(th);
     VirtualFreeEx(hp, mem, 0, MEM_RELEASE);
-    if (PrintInjectionExit(output, hp, pid, "load-library")) { CloseHandle(hp); return 2; }
-    if (!code) { CloseHandle(hp); fprintf(output, "{\"ok\":false,\"error\":\"LoadLibraryW returned NULL in target\"}\n"); return 2; }
+    if (PrintInjectionExit(output, hp, pid, "load-library",0,captured)) { CloseHandle(hp); return 2; }
+    if (!code) { CloseHandle(hp); EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"LoadLibraryW returned NULL in target\"}\n"); return 2; }
     if (!ReadinessTransport(pid, "{\"cmd\":\"ping\"}",20000,resp,hp)) {
         // A dying process can close its pipe just before its process object signals.
         // Observe that exact object briefly; a live server failure remains a generic pipe error.
-        if (!PrintInjectionExit(output, hp, pid, "pipe-wait", 100)) fprintf(output, "{\"ok\":false,\"error\":\"dll loaded but pipe never came up\"}\n");
+        if (!PrintInjectionExit(output, hp, pid, "pipe-wait", 100,captured)) EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"dll loaded but pipe never came up\"}\n");
         CloseHandle(hp); return 2;
     }
-    int result=ReportInputReady(output,pid,dll,quiet,hooksOnly,false,hp);
+    int result=ReportInputReady(output,pid,dll,quiet,hooksOnly,false,hp,captured);
     CloseHandle(hp);return result;
 }
 
@@ -730,24 +805,40 @@ static Reply WaitChange(DWORD pid, const Args& a) {
 #include "vi_cli_ui.inl"
 #include "vi_cli_doctor.inl"
 #include "vi_cli_launch_options.inl"
+#include <limits>
+#include "vi_cli_launch_selection.inl"
 
 static int Launch(const Args& a) {
+    std::string injectReply,earlyInjectReply,dialogInjectReply,launchReadiness;
+    // Every launch result adds the actual latest injection record. Early hooks-only
+    // setup remains separate from the full window/queue handshake after resume.
+    auto launchResult=[&](const char* format,auto... values) {
+        std::string result;EmitInjectReply(nullptr,&result,format,values...);
+        if(!result.empty()&&result.back()=='}')result.pop_back();
+        result+=",\"inject\":"+(injectReply.empty()?std::string("null"):injectReply);
+        result+=",\"launch_readiness\":"+(launchReadiness.empty()?std::string("null"):launchReadiness);
+        result+=",\"early_inject\":"+(earlyInjectReply.empty()?std::string("null"):earlyInjectReply);
+        result+=",\"dialog_inject\":"+(dialogInjectReply.empty()?std::string("null"):dialogInjectReply)+"}";
+        printf("%s\n",result.c_str());
+    };
     std::wstring exe = U2W(GetOpt(a, "exe")), steam = U2W(GetOpt(a, "steam")), args = U2W(GetOpt(a, "args")), waitExe = U2W(GetOpt(a, "wait-exe")), aumid = U2W(GetOpt(a, "aumid"));
     std::wstring lock = U2W(GetOpt(a, "lock")), dll = U2W(GetOpt(a, "dll"));
     LaunchOptions launchOptions; std::string launchOptionError;
-    if (!PrepareLaunchOptions(a, exe, launchOptions, launchOptionError)) { printf("{\"ok\":false,\"error\":\"%s\"}\n", JEsc(launchOptionError).c_str()); return 2; }
+    if (!PrepareLaunchOptions(a, exe, launchOptions, launchOptionError)) { launchResult("{\"ok\":false,\"error\":\"%s\"}\n", JEsc(launchOptionError).c_str()); return 2; }
+    bool allowDialog=false;unsigned allowCount=0;
+    for(const auto& option:a.opt)if(option.first=="allow-dialog"){if(++allowCount>1||(option.second!="true"&&option.second!="false")){launchResult("{\"ok\":false,\"error\":\"--allow-dialog must appear once with true or false\"}\n");return 2;}allowDialog=option.second=="true";}
     int timeout = atoi(GetOpt(a, "timeout", "240").c_str()), settle = atoi(GetOpt(a, "settle", "5").c_str());
     unsigned retry = 0, lockTimeout = 0;
-    if (HasOpt(a, "lock-timeout") && HasOpt(a, "lock-max-wait")) { printf("{\"ok\":false,\"error\":\"use only --lock-timeout or its existing --lock-max-wait alias\"}\n"); return 2; }
-    if (!LockSeconds(GetOpt(a, "lock-retry", "60"), 1, retry)) { printf("{\"ok\":false,\"error\":\"--lock-retry is the interval between attempts: use 1..86400 whole seconds; set --lock-timeout for a total wait budget\"}\n"); return 2; }
-    if (!LockSeconds(GetOpt(a, "lock-timeout", GetOpt(a, "lock-max-wait", "0").c_str()), 0, lockTimeout)) { printf("{\"ok\":false,\"error\":\"--lock-timeout (or --lock-max-wait) must be 0..86400 whole seconds; 0 keeps the legacy unlimited wait\"}\n"); return 2; }
-    if (exe.empty() && steam.empty() && aumid.empty()) { printf("{\"ok\":false,\"error\":\"launch needs --exe, --steam or --aumid\"}\n"); return 2; }
-    if (!steam.empty() && waitExe.empty()) { printf("{\"ok\":false,\"error\":\"--steam needs --wait-exe <name.exe>\"}\n"); return 2; }
+    if (HasOpt(a, "lock-timeout") && HasOpt(a, "lock-max-wait")) { launchResult("{\"ok\":false,\"error\":\"use only --lock-timeout or its existing --lock-max-wait alias\"}\n"); return 2; }
+    if (!LockSeconds(GetOpt(a, "lock-retry", "60"), 1, retry)) { launchResult("{\"ok\":false,\"error\":\"--lock-retry is the interval between attempts: use 1..86400 whole seconds; set --lock-timeout for a total wait budget\"}\n"); return 2; }
+    if (!LockSeconds(GetOpt(a, "lock-timeout", GetOpt(a, "lock-max-wait", "0").c_str()), 0, lockTimeout)) { launchResult("{\"ok\":false,\"error\":\"--lock-timeout (or --lock-max-wait) must be 0..86400 whole seconds; 0 keeps the legacy unlimited wait\"}\n"); return 2; }
+    if (exe.empty() && steam.empty() && aumid.empty()) { launchResult("{\"ok\":false,\"error\":\"launch needs --exe, --steam or --aumid\"}\n"); return 2; }
+    if (!steam.empty() && waitExe.empty()) { launchResult("{\"ok\":false,\"error\":\"--steam needs --wait-exe <name.exe>\"}\n"); return 2; }
     bool early = HasOpt(a, "early");
-    if (early && exe.empty()) { printf("{\"ok\":false,\"error\":\"--early needs --exe (the process must be created suspended by vinput)\"}\n"); return 2; }
-    if (early && HasOpt(a, "no-inject")) { printf("{\"ok\":false,\"error\":\"--early and --no-inject contradict each other\"}\n"); return 2; }
+    if (early && exe.empty()) { launchResult("{\"ok\":false,\"error\":\"--early needs --exe (the process must be created suspended by vinput)\"}\n"); return 2; }
+    if (early && HasOpt(a, "no-inject")) { launchResult("{\"ok\":false,\"error\":\"--early and --no-inject contradict each other\"}\n"); return 2; }
     double guardSec = atof(GetOpt(a, "fg-guard", "5").c_str());
-    if (!(guardSec >= 0 && guardSec <= 120)) { printf("{\"ok\":false,\"error\":\"--fg-guard must be 0..120 seconds\"}\n"); return 2; }
+    if (!(guardSec >= 0 && guardSec <= 120)) { launchResult("{\"ok\":false,\"error\":\"--fg-guard must be 0..120 seconds\"}\n"); return 2; }
     std::string claimTtl = GetOpt(a, "claim-ttl", "300");
     if (!HasOpt(a, "no-inject")) {
         vi_ac::Finding f = exe.empty() ? vi_ac::Finding() : vi_ac::CheckExe(exe);
@@ -758,7 +849,7 @@ static int Launch(const Args& a) {
     if (!lock.empty()) {
         LockWaitResult wait = AcquireLock(lock, retry, lockTimeout);
         if (!wait.acquired) {
-            printf("{\"ok\":false,\"error\":\"%s\",\"lock_timed_out\":%s,\"lock_wait_ms\":%llu,\"lock_attempts\":%u,\"lock_timeout_seconds\":%u,\"lock_retry_seconds\":%u,\"lock_holder_hint\":\"%s\"}\n",
+            launchResult("{\"ok\":false,\"error\":\"%s\",\"lock_timed_out\":%s,\"lock_wait_ms\":%llu,\"lock_attempts\":%u,\"lock_timeout_seconds\":%u,\"lock_retry_seconds\":%u,\"lock_holder_hint\":\"%s\"}\n",
                 wait.timedOut ? "lock wait timed out; no target launched" : "could not acquire lock; no target launched", wait.timedOut ? "true" : "false", wait.elapsedMs, wait.attempts, lockTimeout, retry, JEsc(wait.lastError).c_str());
             return 3;
         }
@@ -773,11 +864,11 @@ static int Launch(const Args& a) {
     int rc = 2; DWORD pid = 0; bool earlyInjected = false;
     std::string cwdFields;
     auto rejectDialog = [&](HWND window,bool injected) {
-        if(WindowClass(window)!="#32770" || HasOpt(a,"allow-dialog"))return false;
-        DialogText text;EnumChildWindows(window,DialogTextEnum,(LPARAM)&text);
+        if((WindowClass(window)!="#32770"&&!OwnedPopupWindow(window)) || allowDialog)return false;
+        DialogText text;text.pid=pid;EnumChildWindows(window,DialogTextEnum,(LPARAM)&text);
         RestoreForeground();
-        printf("{\"ok\":false,\"pid\":%lu,\"injected\":%s,\"error\":\"launch found a modal/error dialog instead of a game window; inspect dialog_text (use --allow-dialog only for an intentional dialog target)\",\"dialog_text\":\"%s\",\"foreground_restored\":%s%s}\n",
-            pid,injected?"true":"false",JEsc(W2U(text.text)).c_str(),TargetHoldsForeground(GetForegroundWindow())?"false":"true",WindowFields(window).c_str());
+        launchResult("{\"ok\":false,\"pid\":%lu,\"injected\":%s,\"error\":\"launch found a modal/error dialog instead of a game window; inspect dialog_text (use --allow-dialog only for an intentional dialog target)\",\"dialog_text\":\"%s\",\"foreground_restored\":%s%s}\n",
+            pid,injected?"true":"false",JEsc(W2U(text.text)).c_str(),TargetHoldsForeground(GetForegroundWindow())?"false":"true",LaunchDialogFields(window).c_str());
         return true;
     };
     do {
@@ -789,18 +880,19 @@ static int Launch(const Args& a) {
             std::wstring cl = L"\"" + exe + L"\" " + args;
             STARTUPINFOW si = {sizeof(si)}; PROCESS_INFORMATION pi;
             si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_SHOWNOACTIVATE;
-            if (!CreateProcessW(exe.c_str(), &cl[0], nullptr, nullptr, FALSE, early ? CREATE_SUSPENDED : 0, nullptr, dir.c_str(), &si, &pi)) { printf("{\"ok\":false,\"error\":\"CreateProcess failed %lu\"}\n", GetLastError()); break; }
+            if (!CreateProcessW(exe.c_str(), &cl[0], nullptr, nullptr, FALSE, early ? CREATE_SUSPENDED : 0, nullptr, dir.c_str(), &si, &pi)) { launchResult("{\"ok\":false,\"error\":\"CreateProcess failed %lu\"}\n", GetLastError()); break; }
             pid = pi.dwProcessId; g_initialLaunchPid = pid; g_launchPid = pid;
             if (!cwdFields.empty()) cwdFields += ",\"cwd_applies_to_spawned_pid\":" + std::to_string(pid);
             if (early) {
                 // Suspended: vinput's hooks (and its DLL-load notification for vulkan-1/opengl32) are installed
                 // before the game's first instruction; the pipe is up before the main thread is resumed.
                 DWORD ti = GetTickCount();
-                if (Inject(pid, dll, true, true) != 0) {
+                const int earlyResult=Inject(pid,dll,true,true,&earlyInjectReply);injectReply=earlyInjectReply;
+                if (earlyResult != 0) {
                     TerminateProcess(pi.hProcess, 1);   // our own suspended child, by handle
                     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
                     if (!g_acLastRefusal.empty()) { printf("%s\n", g_acLastRefusal.c_str()); rc = 4; break; }
-                    printf("{\"ok\":false,\"pid\":%lu,\"error\":\"early inject into the suspended process failed; process terminated\"}\n", pid); break;
+                    launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"early inject into the suspended process failed; process terminated\"}\n", pid); break;
                 }
                 earlyInjected = true;
                 g_acSuspended = false;
@@ -815,7 +907,7 @@ static int Launch(const Args& a) {
             HRESULT hr = CoCreateInstance(CLSID_ApplicationActivationManager, nullptr, CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&am));
             if (SUCCEEDED(hr)) { hr = am->ActivateApplication(aumid.c_str(), args.empty() ? nullptr : args.c_str(), AO_NONE, &p); am->Release(); }
             if (SUCCEEDED(ci)) CoUninitialize();
-            if (FAILED(hr) || !p) { printf("{\"ok\":false,\"error\":\"ActivateApplication(%s) failed hr=0x%08X\"}\n", JEsc(W2U(aumid)).c_str(), (unsigned)hr); break; }
+            if (FAILED(hr) || !p) { launchResult("{\"ok\":false,\"error\":\"ActivateApplication(%s) failed hr=0x%08X\"}\n", JEsc(W2U(aumid)).c_str(), (unsigned)hr); break; }
             pid = p; g_initialLaunchPid = pid; g_launchPid = pid;
         } else {
             // steam://run with args can pop a "launch with these arguments?" confirmation; rungameid never does
@@ -827,7 +919,7 @@ static int Launch(const Args& a) {
         if (!waitExe.empty()) {
             pid = 0;
             while (!pid && GetTickCount() - t0 < (DWORD)timeout * 1000) { for (DWORD p : PidsByName(waitExe)) if (!before.count(p)) { pid = p; break; } if (!pid) Sleep(250); }
-            if (!pid) { printf("{\"ok\":false,\"error\":\"%s never appeared\"}\n", JEsc(W2U(waitExe)).c_str()); break; }
+            if (!pid) { launchResult("{\"ok\":false,\"error\":\"%s never appeared\"}\n", JEsc(W2U(waitExe)).c_str()); break; }
             g_launchPid = pid;
             fprintf(stderr, "[vinput] target pid %lu\n", pid);
         }
@@ -847,8 +939,8 @@ static int Launch(const Args& a) {
             Sleep(250);
         }
         if (hp) CloseHandle(hp);
-        if (exited) { printf("{\"ok\":false,\"pid\":%lu,\"error\":\"process exited before showing a window (a launcher or a Steam relaunch?) - use --steam APPID --wait-exe NAME.exe or --wait-exe\"}\n", pid); break; }
-        if (!w) { printf("{\"ok\":false,\"pid\":%lu,\"error\":\"no visible window within timeout\"}\n", pid); break; }
+        if (exited) { launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"process exited before showing a window (a launcher or a Steam relaunch?) - use --steam APPID --wait-exe NAME.exe or --wait-exe\"}\n", pid); break; }
+        if (!w) { launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"no visible window within timeout\"}\n", pid); break; }
         if(rejectDialog(w,earlyInjected))break;
         fprintf(stderr, "[vinput] window up after %.1f s\n", (GetTickCount() - t0) / 1000.0);
         DWORD guardMs = (DWORD)(guardSec * 1000);
@@ -856,18 +948,42 @@ static int Launch(const Args& a) {
             GuardForeground(0, "window");
             GuardForeground(guardMs, "guard");
             bool restored = !TargetHoldsForeground(GetForegroundWindow()),human=g_launchUserIntent.Active(); rc = (restored || human) ? 0 : 2;
-            printf("{\"ok\":%s,\"pid\":%lu,\"injected\":false,\"foreground_restored\":%s,\"user_took_foreground\":%s,\"user_selection_pending\":%s,\"fg_guard_ms\":%lu,\"foreground_regrabs\":%s%s%s}\n", (restored || human) ? "true":"false", pid, restored ? "true":"false",human?"true":"false",g_launchUserIntent.EvaluatingAltTab()?"true":"false", guardMs, RegrabsJson().c_str(),WindowFields(w).c_str(),cwdFields.c_str());
+            launchResult("{\"ok\":%s,\"pid\":%lu,\"injected\":false,\"foreground_restored\":%s,\"user_took_foreground\":%s,\"user_selection_pending\":%s,\"fg_guard_ms\":%lu,\"foreground_regrabs\":%s%s%s}\n", (restored || human) ? "true":"false", pid, restored ? "true":"false",human?"true":"false",g_launchUserIntent.EvaluatingAltTab()?"true":"false", guardMs, RegrabsJson().c_str(),WindowFields(w).c_str(),cwdFields.c_str());
             break;
         }
-        HANDLE injectionTarget = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        int injectionResult = Inject(pid, dll, true);
+        InjectChildHandle launchTarget;launchTarget.Reset(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid));
+        HANDLE injectionTarget=launchTarget.value;
+        const bool exactDialogTarget=allowDialog&&(WindowClass(w)=="#32770"||OwnedPopupWindow(w));
+        int injectionResult = Inject(pid,dll,true,exactDialogTarget,&injectReply);
+        if(injectionResult==0&&exactDialogTarget) {
+            dialogInjectReply=injectReply;
+            // The core deliberately does not auto-adopt owned windows. Only an
+            // explicit allow-dialog request may select this exact target HWND.
+            // Configure while responsive, then demand the normal fresh queue
+            // handshake; hooks-only never becomes the final launch success.
+            char handle[32];sprintf_s(handle,"0x%llX",(unsigned long long)(ULONG_PTR)w);
+            std::string configured;
+            const std::string command="{\"cmd\":\"config\",\"hwnd\":\""+std::string(handle)+"\"}";
+            const bool received=ReadinessTransport(pid,command,5000,configured,injectionTarget);
+            vi_ready_json::Reader parsed{configured,0,{},128};bool accepted=false;std::string target;
+            const bool valid=received&&parsed.Parse()&&parsed.Bool("ok",accepted)&&accepted;
+            auto field=parsed.fields.find("hwnd");
+            if(valid&&field!=parsed.fields.end()&&field->second.type=='"') {
+                vi_ready_json::Reader decoded{field->second.raw,0,{}};if(!decoded.String(target))target.clear();
+            }
+            if(!valid||target!=handle) {
+                fprintf(stderr,"[vinput] explicit dialog target adoption failed; no full readiness was established\n");
+                injectionResult=2;
+            }else injectionResult=ReportInputReady(stderr,pid,dll,true,false,true,injectionTarget,&injectReply);
+        }
         if (injectionResult != 0) {
-            if (!g_acLastRefusal.empty()) { printf("%s\n", g_acLastRefusal.c_str()); rc = 4; if (injectionTarget) CloseHandle(injectionTarget); break; }
-            if (!PrintInjectionExit(stdout, injectionTarget, pid, "inject")) printf("{\"ok\":false,\"pid\":%lu,\"error\":\"inject failed\"}\n", pid);
-            if (injectionTarget) CloseHandle(injectionTarget);
+            // launchTarget (InjectChildHandle) owns injectionTarget and closes it.
+            if (!g_acLastRefusal.empty()) { printf("%s\n", g_acLastRefusal.c_str()); rc = 4; break; }
+            std::string exitedReply;
+            if(PrintInjectionExit(nullptr,injectionTarget,pid,"inject",0,&exitedReply))launchResult("%s",exitedReply.c_str());
+            else launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"inject failed\"}\n",pid);
             break;
         }
-        if (injectionTarget) CloseHandle(injectionTarget);
         // wait until vinput has adopted a main window, then let the game settle before giving up the lock;
         // a foreground grab during the settle is handed back at once instead of after it
         std::string resp; DWORD t1 = GetTickCount();
@@ -908,8 +1024,19 @@ static int Launch(const Args& a) {
         // duplicate launch). The caller must check foreground_restored and fix it under the lock.
         std::string warn;
         if (!restored && !g_launchUserIntent.Active()) warn = ",\"warning\":\"the target still holds the REAL foreground after the guard; hand it back under the lock (vinput --pid N json {\\\"cmd\\\":\\\"restore-foreground\\\",\\\"hwnd\\\":\\\"0x...\\\"})\"";
-        bool ok = alive && pipeUp; rc = ok ? 0 : 2;
-        printf("{\"ok\":%s,\"pid\":%lu,\"injected\":true,\"early_injected\":%s,\"foreground_restored\":%s,\"user_took_foreground\":%s,\"fg_guard_ms\":%lu,\"foreground_regrabs\":%s%s%s%s%s%s%s}\n",
+        bool ok = alive && pipeUp;
+        if(ok){
+            std::string fresh;HWND actual=nullptr;bool validJson=false;
+            const bool received=RequestInputReady(pid,false,fresh,injectionTarget);
+            const bool same=received&&LaunchReadinessTarget(fresh,pid,w,actual,validJson);
+            if(validJson)launchReadiness=fresh;
+            if(!same){
+                char expectedText[32],actualText[32];sprintf_s(expectedText,"0x%llX",(unsigned long long)(ULONG_PTR)w);sprintf_s(actualText,"0x%llX",(unsigned long long)(ULONG_PTR)actual);
+                launchResult("{\"ok\":false,\"pid\":%lu,\"injected\":true,\"selection_mismatch\":%s,\"expected_window_hwnd\":\"%s\",\"actual_window_hwnd\":\"%s\",\"error\":\"selected launch window does not have matching full current readiness; inspect both HWNDs; no automatic retarget was attempted\"%s}\n",pid,actual&&actual!=w?"true":"false",expectedText,actualText,WindowFields(w).c_str());break;
+            }
+        }
+        rc = ok ? 0 : 2;
+        launchResult("{\"ok\":%s,\"pid\":%lu,\"injected\":true,\"early_injected\":%s,\"foreground_restored\":%s,\"user_took_foreground\":%s,\"fg_guard_ms\":%lu,\"foreground_regrabs\":%s%s%s%s%s%s%s}\n",
                ok ? "true" : "false", pid, earlyInjected ? "true" : "false", restored ? "true" : "false",g_launchUserIntent.Active()?"true":"false", guardMs, RegrabsJson().c_str(), claim.c_str(), warn.c_str(),
                ok ? "" : ",\"error\":\"target exited or its pipe went away during settle/guard\"",WindowFields(w).c_str(),cwdFields.c_str(),presentationFields.c_str());
     } while (false);
@@ -988,7 +1115,7 @@ static void Usage() {
         "  vinput --pid N capture-burst <sheet.png> [--frames 8] [--interval-ms 250] [--columns 4] [--max-width 320] [--format png|jpeg]\n"
         "      Bounded temporal tiles; actual timing metadata, other commands run between frames; never changes --capture-space.\n"
         "  vinput --pid N config isolate=false --for 1000   (1..120000 ms; physical input passes until auto-revert)\n"
-        "  vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true keepvisible=true cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off\n"
+        "  vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true keepvisible=true cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off [for_ms=1..120000 | --for N (isolate=false only)]\n"
         "  vinput --pid N json '{\"cmd\":\"status\"}'\n"
         "  vinput --pid N ocr [--region x,y,w,h] [--lang en-US] [--scale 1] [--preprocess MODE] [--lines-only] [--out file.json]\n"
         "  vinput --pid N click-text \"text\" [--nth N] [--exact] [--fuzzy N] [--timeout ms] [--button left] [--dry-run] [--optional]\n"  //@text

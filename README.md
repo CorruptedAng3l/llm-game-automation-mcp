@@ -167,9 +167,12 @@ not your real one:
   foreground (checked through two independent queries) **and** either fresh physical input arrived in its window
   within the last 300 ms or a foreground lease is active and `cursor=virtual` is not forced (`vinput --pid N foreground [--lease-ms 30000]`, a hand-off
   and verification command that really takes the foreground). Otherwise the call is virtualised or refused and counted.
-- **`ClipCursor` is always virtual**, including when you are playing the game: vinput does not confine your real
-  cursor to its window. `GetClipCursor` reports the game's virtual clip. A game that depends on a real clip to keep the
-  mouse inside a windowed or borderless window will let it leave.
+- **`ClipCursor` is real only while you play the game:** a clip the game sets is forwarded to Windows only when the
+  game's adopted window owns the verified real foreground and the rectangle lies inside its client area and the
+  desktop. In the background it stays virtual. vinput releases a clip it forwarded when the game loses the
+  foreground, its window changes or its size changes (best-effort: up to 3 attempts, and only if the clip is still the
+  one it set). `GetClipCursor` reports the game's requested clip, and `status.cursor_guard.native_clip` shows what was
+  forwarded and released.
 - `keybd_event` is not hooked, and a program that talks to the kernel directly bypasses every user-mode hook. The
   counters in `status.cursor_guard` are scoped to the hooked entry points; `real_cursor_writes_leaked` is `null`
   because it is not measured. Input commands refuse a DLL that lacks the cursor guard or whose hooks are not armed.
@@ -185,9 +188,17 @@ and restores `isolate=true` even if the CLI or this MCP server goes away. A late
 
 Known limits of this contract:
 
-- A game that sets its own cursor or `ClipCursor` while really in front of you is virtualised unless you just moved
+- A game that sets its own cursor position while really in front of you is virtualised unless you just moved
   the mouse over it or took a foreground lease; test such a game while it is in front with
-  `vinput --pid N foreground --lease-ms 30000` first.
+  `vinput --pid N foreground --lease-ms 30000` first. (`ClipCursor` follows the foreground rule above.)
+- A program running inside the game (a trainer, for example) that calls target-side `SendInput` or `mouse_event`
+  produces global OS input when it is forwarded; fake focus does not redirect it into the game. The guard forwards it
+  only under the rule above (verified real foreground plus fresh human activity or a lease), and a forward reports an
+  attempt, not that the application accepted it.
+- If the game (or another hook) removes vinput's marker from its window, the window keeps working (its own window
+  procedure still gets every message), but vinput refuses input to that window from then on and
+  `status.wndproc_binding` reports it as quarantined. Restart the game or select a fresh window; recovery on the same
+  window is not supported.
 - In-process raw packets (a program inside the game posting its own `WM_INPUT`) are delivered through a private
   envelope that is unwrapped inside `DispatchMessageA/W`; games that read `msg.message == WM_INPUT` from their own
   message loop without dispatching, filter on `WM_INPUT`, or consume raw input from another queue do not see them.
@@ -232,7 +243,7 @@ Then ask the agent to launch a game and play it. The tools, their schemas and a 
 | fake focus | `GetForegroundWindow` / `GetActiveWindow` / `GetFocus` report the game; the game's window procedure is subclassed and deactivation (`WM_ACTIVATEAPP(0)`, `WM_ACTIVATE(WA_INACTIVE)`, `WM_NCACTIVATE(0)`, `WM_KILLFOCUS`) is swallowed, so it keeps running and rendering in the background |
 | no focus stealing | while the game is not really in front, `SetForegroundWindow` / `BringWindowToTop` / `SetActiveWindow` are no-ops, `SetWindowPos` gets `SWP_NOACTIVATE`, showing the window does not activate it, cursor writes (`SetCursorPos`, `ClipCursor`, `SendInput`, `mouse_event`) go to a virtual cursor unless you are really using the game's window (cursor guard, below), DXGI / DirectDraw / D3D9 exclusive fullscreen becomes a windowed virtual fullscreen (or is refused, `config fullscreen=refuse`); every attempt is logged |
 | virtual input | each event is delivered on every channel the game can read, as a real key would be (see Supported APIs) |
-| isolation | while the game does not own the verified real foreground, the physical keyboard / mouse / raw-input / DirectInput readings are hidden from it, so your typing elsewhere does not leak into it; when it is in front, real input works and virtual input is added on top (but `ClipCursor` stays virtual); `config isolate=false --for MS` is a bounded opt-out |
+| isolation | while the game does not own the verified real foreground, the physical keyboard / mouse / raw-input / DirectInput readings are hidden from it, so your typing elsewhere does not leak into it; when it is in front, real input works and virtual input is added on top (and the game's own `ClipCursor` takes effect); `config isolate=false --for MS` is a bounded opt-out |
 | eyes | native capture from the game's swapchain (per API), with `PrintWindow` as the fallback; replies report `capture_path` and the frame number |
 | control | named pipe `\\.\pipe\vinput_<pid>`, one JSON object per line; `vinput.exe` wraps it |
 | anti-cheat refusal | `src/vi_acguard.h`: the CLI refuses to inject, and the DLL refuses to start or keep working, when a known anti-cheat is detected (see below) |
@@ -274,7 +285,7 @@ anti-cheat that stays resident (for example Vanguard's `vgc` service) blocks vin
 - **Text:** `type` posts `WM_CHAR` (right for text boxes); games that only read raw keys need `type --keys`, which does
   not apply Shift for punctuation yet.
 - The game can still be brought to the front by **other** programs; while it is really in front it receives the real
-  keyboard and mouse, but vinput does not confine your real cursor to its window (`ClipCursor` is virtual).
+  keyboard and mouse, and a cursor clip it sets applies only while it stays in front (released when it loses it).
 - vinput stays loaded in a game until the game exits.
 - Verified live on a set of commercial D3D11, D3D12 (UWP) and OpenGL games; **Vulkan has only been verified on the
   synthetic test target**, not in a real game. See [TESTING.md](TESTING.md).

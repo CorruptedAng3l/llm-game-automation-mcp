@@ -5,4 +5,9 @@ static bool NeedsCursorGuard(const std::string& request){
  if(command=="pad"){auto names=parsed.fields.find("buttons");if(names!=parsed.fields.end()&&names->second.type=='"'){vi_ready_json::Reader text{names->second.raw,0,{}};std::string value;if(text.String(value)){for(char& c:value)c=(char)tolower((unsigned char)c);if(value=="off")return false;}}}
  for(const char* producer:{"key","hold","pulse","down","type","seq","sequence","mouse","move","click","mousedown","drag","placement-drag","wheel","pad","pad-ramp","pad-timeline"})if(command==producer)return true;return false;
 }
-static bool RequireCursorGuard(DWORD pid){std::string response;return ReadinessTransport(pid,"{\"cmd\":\"readiness\",\"hooks_only\":true,\"wait_ms\":0}",1000,response)&&CursorGuardHandshakeReady(response);}
+// An anti-cheat refusal from the target is the real reason and is passed through
+// unchanged (no input was sent either way); every other not-ready reply stays generic.
+static bool RequireCursorGuard(DWORD pid,std::string* refusal=nullptr){std::string response;const bool received=ReadinessTransport(pid,"{\"cmd\":\"readiness\",\"hooks_only\":true,\"wait_ms\":0}",1000,response);
+ if(received&&CursorGuardHandshakeReady(response))return true;
+ if(refusal&&received){vi_ready_json::Reader parsed{response,0,{}};bool flagged=false;if(parsed.Parse()&&parsed.Bool("anticheat_refused",flagged)&&flagged)*refusal=response;}
+ return false;}

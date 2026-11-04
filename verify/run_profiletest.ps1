@@ -90,13 +90,13 @@ try {
     Require $ready "$($c.n) target ready"
     $c.initial_status=$s
     if($c.dll) {
-      $until=[Environment]::TickCount64+10000;$host=$null
-      do{$host=Read-HostMetrics $c;if($host.failed){throw "$($c.n) host hook installation failed: $($host.phase)"};if($host.installed-and$host.returned-gt0){break};Start-Sleep -Milliseconds 25}while([Environment]::TickCount64-lt$until)
-      Require ($host.installed-and$host.returned-gt0-and$host.mh_create-eq0-and$host.mh_enable-eq0) "$($c.n) host hook installed after real vinput initialization"
-      $chainBefore=Command $p.Id @('status');$hostBefore=$host;$chainReady=$false;$until=[Environment]::TickCount64+3500
-      do{Start-Sleep -Milliseconds 100;$host=Read-HostMetrics $c;$s=Command $p.Id @('status');if($host.returned-gt$hostBefore.returned-and$s.counters.present_ours-gt$chainBefore.counters.present_ours){$chainReady=$true;break}}while([Environment]::TickCount64-lt$until)
+      $until=[Environment]::TickCount64+10000;$hostMetrics=$null
+      do{$hostMetrics=Read-HostMetrics $c;if($hostMetrics.failed){throw "$($c.n) host hook installation failed: $($hostMetrics.phase)"};if($hostMetrics.installed-and$hostMetrics.returned-gt0){break};Start-Sleep -Milliseconds 25}while([Environment]::TickCount64-lt$until)
+      Require ($hostMetrics.installed-and$hostMetrics.returned-gt0-and$hostMetrics.mh_create-eq0-and$hostMetrics.mh_enable-eq0) "$($c.n) host hook installed after real vinput initialization"
+      $chainBefore=Command $p.Id @('status');$hostBefore=$hostMetrics;$chainReady=$false;$until=[Environment]::TickCount64+3500
+      do{Start-Sleep -Milliseconds 100;$hostMetrics=Read-HostMetrics $c;$s=Command $p.Id @('status');if($hostMetrics.returned-gt$hostBefore.returned-and$s.counters.present_ours-gt$chainBefore.counters.present_ours){$chainReady=$true;break}}while([Environment]::TickCount64-lt$until)
       Require ($chainReady-and-not$s.really_foreground) "$($c.n) host return and vinput frame counters advance together before input"
-      $c.install_witness=@{host_before=$hostBefore;host_after=$host;status_before=$chainBefore;status_after=$s}
+      $c.install_witness=@{host_before=$hostBefore;host_after=$hostMetrics;status_before=$chainBefore;status_after=$s}
       [void](Copy-HostReceipts $c 'installed')
     }
   }
@@ -118,8 +118,8 @@ try {
     }
     foreach ($other in $cases) { if ($other.n -ne $c.n) { Require (-not $t.Contains("WM_KEYDOWN vk=0x$($other.vk)")) "$($c.n) no $($other.key) cross-talk" } }
     if ($c.dll) {
-      $pf="$($c.module_path).presents.txt";$host=Copy-HostReceipts $c 'complete'
-      Require ((Test-Path -LiteralPath $pf)-and[int](Read-ProfileText $pf)-gt0-and$host.installed-and$host.entered-gt0-and$host.returned-gt0-and$s.counters.present_ours-gt0) "$($c.n) host and vinput Present hooks chain"
+      $pf="$($c.module_path).presents.txt";$hostMetrics=Copy-HostReceipts $c 'complete'
+      Require ((Test-Path -LiteralPath $pf)-and[int](Read-ProfileText $pf)-gt0-and$hostMetrics.installed-and$hostMetrics.entered-gt0-and$hostMetrics.returned-gt0-and$s.counters.present_ours-gt0) "$($c.n) host and vinput Present hooks chain"
     }
   }
   # The four-profile isolation/chain checks are complete; release their render/poll

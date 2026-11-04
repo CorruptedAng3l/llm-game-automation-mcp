@@ -1,23 +1,19 @@
+#include "vi_native_clip.inl"
 BOOL WINAPI h_SetCursorPos(int x,int y){
- ++C.scur;std::lock_guard<std::recursive_mutex> lock(g_inputMx);
+ ++C.scur; // Permission reads and original calls may reenter application code.
+ // CursorVirtualSet retains its existing internal state lock.
  if(!CursorNativeAllowed())return CursorVirtualSet(vi_cursor_guard::SetPosition,x,y)?TRUE:FALSE;
  if(!o_SetCursorPos){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
  ++g_cursorCounts[vi_cursor_guard::SetPosition].forwarded;return o_SetCursorPos(x,y);
 }
 BOOL WINAPI h_SetPhysicalCursorPos(int x,int y){
- std::lock_guard<std::recursive_mutex> lock(g_inputMx);
+ // Match the unchanged native permission rule without an outer input lock.
+ // CursorVirtualSet retains its existing internal state lock.
  if(!CursorNativeAllowed())return CursorVirtualSet(vi_cursor_guard::SetPhysicalPosition,x,y)?TRUE:FALSE;
  if(!o_SetPhysicalCursorPos){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
  ++g_cursorCounts[vi_cursor_guard::SetPhysicalPosition].forwarded;return o_SetPhysicalCursorPos(x,y);
 }
-BOOL WINAPI h_ClipCursor(const RECT* requested){
- ++C.clip;auto& counters=g_cursorCounts[vi_cursor_guard::Clip];++counters.blocked;
- std::lock_guard<std::recursive_mutex> lock(g_inputMx);
- if(!requested){g_virtualClipEnabled=false;++counters.virtualized;return TRUE;}
- RECT clip{};if(!CursorReadBytes(requested,&clip,sizeof(clip))){++counters.failedVirtual;SetLastError(ERROR_NOACCESS);return FALSE;}
- if(clip.right<clip.left||clip.bottom<clip.top){++counters.failedVirtual;SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
- g_virtualClipRect=clip;g_virtualClipEnabled=true;++counters.virtualized;return TRUE;
-}
+BOOL WINAPI h_ClipCursor(const RECT* requested){++C.clip;return NativeClipRequest(requested);}
 BOOL WINAPI h_GetClipCursor(LPRECT output){
  if(!output){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}std::lock_guard<std::recursive_mutex> lock(g_inputMx);
  RECT clip=g_virtualClipRect;if(!g_virtualClipEnabled){clip.left=GetSystemMetrics(SM_XVIRTUALSCREEN);clip.top=GetSystemMetrics(SM_YVIRTUALSCREEN);clip.right=clip.left+GetSystemMetrics(SM_CXVIRTUALSCREEN);clip.bottom=clip.top+GetSystemMetrics(SM_CYVIRTUALSCREEN);}

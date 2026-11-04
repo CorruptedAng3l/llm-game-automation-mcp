@@ -1,5 +1,5 @@
 // Keyboard/mouse reader policy. The cursor guard supplies the independent real-FG witness.
-// This option does not relax cursor writes or change XInput policy.
+// This option does not relax cursor writes. The same isolate flag also selects the existing active-pad/user0 XInput mask; that policy is otherwise unchanged.
 #include "vi_reader_memory.inl"
 constexpr size_t kReaderScratchLimit=1024*1024;
 enum ReaderChannel {ReaderAsyncKey,ReaderKey,ReaderKeyboard,ReaderRawData,ReaderRawBuffer,ReaderDiState,ReaderDiBuffer,ReaderChannels};
@@ -43,8 +43,8 @@ std::string PhysicalInputStatusJson(bool* isolationSnapshot=nullptr){
         ",\"physical_passthrough\":"+(!enabled||foreground?"true":"false")+",\"timed_passthrough\":"+(remaining?"true":"false")+
         ",\"remaining_ms\":"+std::to_string(remaining)+",\"expired_count\":"+std::to_string(expired)+
         ",\"passthrough_elapsed_ms\":"+(enabled?"null":std::to_string(elapsed))+",\"last_explicit_set_age_ms\":"+(setKnown?std::to_string(setAge):"null")+
-        ",\"scope\":\"keyboard/mouse/raw/DirectInput; XInput unchanged\",\"warning\":"+
-        (enabled?"null":"\"isolate=false explicitly passes physical keyboard/mouse input, including while background\"")+
+        ",\"scope\":\"keyboard/mouse/raw/DirectInput; shared isolate flag also gates existing active-pad/user0 XInput mask\",\"warning\":"+
+        (enabled?"null":"\"isolate=false explicitly passes physical keyboard/mouse input while background and disables the existing active-pad/user0 physical-gamepad mask\"")+
         ",\"key_messages_dropped\":"+std::to_string(g_readerMessageKeyDropped.load())+",\"di_unknown_denied\":"+std::to_string(g_readerDiUnknownDenied.load())+",\"readers\":{";
     const char* names[]={"async_key","key","keyboard","raw_data","raw_buffer","di_state","di_buffer"};
     for(unsigned i=0;i<(unsigned)ReaderChannels;i++){if(i)out+=',';out+='"';out+=names[i];out+="\":{\"mask_policy_checks\":"+std::to_string(g_readerMasked[i].load())+",\"passthrough_policy_checks\":"+std::to_string(g_readerPassed[i].load())+"}";}

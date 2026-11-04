@@ -6,7 +6,7 @@ struct CaptureScope {
 };
 std::atomic<ULONG_PTR> g_captureLifetimeSerial{0};
 bool CaptureScopeTake(CaptureScope& result){
- std::lock_guard<std::recursive_mutex> lock(g_inputMx);if(g_jobRetargetDepth)return false;CaptureScope next;next.window=g_hwnd;next.adoption=g_inputReadyGeneration;next.geometry=g_captureGeometryEpoch;
+ std::lock_guard<std::recursive_mutex> lock(g_inputMx);if(g_jobRetargetDepth||!WndBindingInputAllowed(g_hwnd))return false;CaptureScope next;next.window=g_hwnd;next.adoption=g_inputReadyGeneration;next.geometry=g_captureGeometryEpoch;
  DWORD owner=0;next.thread=next.window?GetWindowThreadProcessId(next.window,&owner):0;RECT client{};
  if(!next.thread||owner!=g_pid||!GetClientRect(next.window,&client)||client.right<1||client.bottom<1)return false;
  next.width=client.right;next.height=client.bottom;next.lifetime=(ULONG_PTR)GetPropW(next.window,kCaptureLifetimeProperty);
@@ -18,6 +18,7 @@ bool CaptureScopeCurrent(const CaptureScope& old,const char** reason=nullptr){
  std::lock_guard<std::recursive_mutex> lock(g_inputMx);const char* why=nullptr;DWORD owner=0;RECT client{};
  if(g_jobRetargetDepth)why="adoption_in_progress";
  else if(!old.window||old.window!=g_hwnd||old.adoption!=g_inputReadyGeneration)why="adopted_window_changed";
+ else if(!WndBindingInputAllowed(old.window))why="window_binding_unconfirmed";
  else if(!old.lifetime||GetWindowThreadProcessId(old.window,&owner)!=old.thread||owner!=g_pid||(ULONG_PTR)GetPropW(old.window,kCaptureLifetimeProperty)!=old.lifetime)why="window_lifetime_changed";
  else if(!GetClientRect(old.window,&client)||client.right<1||client.bottom<1)why="client_unavailable";
  else if(client.right!=old.width||client.bottom!=old.height)why="client_size_changed";

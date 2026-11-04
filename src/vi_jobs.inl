@@ -102,6 +102,7 @@ void PlacementRun(InputJob& job,ULONGLONG now){
 void JobRun(InputJob& job,ULONGLONG now,bool frame){
  if(job.done)return;
  DWORD targetPid=0;if(job.target)GetWindowThreadProcessId(job.target,&targetPid);if(job.target!=g_hwnd||!IsWindow(job.target)||targetPid!=g_pid){JobFinish(job,"cancelled","target_changed");return;}
+ if(!job.pad&&!WndBindingInputAllowed(job.target)){JobFinish(job,"cancelled","window_binding_quarantined");return;}
  if(job.claimEpoch!=g_jobClaimEpoch||(job.claimed&&now>=g_jobClaimExpiry)){JobFinish(job,"cancelled","claim_expired_or_changed");return;}
  if(now-job.accepted>=120000){JobFinish(job,"cancelled","job_lifetime_cap");return;}
  if(!job.started){
