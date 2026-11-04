@@ -30,6 +30,8 @@ foreach($arch in @('','32')){
   }
   $scaled=& $v --json --pid $gamePid capture "$dir\scaled.png" --scale 0.5|ConvertFrom-Json;$proofs.Add($scaled)
   Check ($scaled.ok -and $scaled.w -eq 400 -and $scaled.h -eq 225 -and (ImageInfo "$dir\scaled.png").w -eq 400) "capture$arch scale0.5 saves400x225 PNG"
+  $upscaled=& $v --json --pid $gamePid capture "$dir\upscaled.png" --scale 1.5|ConvertFrom-Json;$proofs.Add($upscaled)
+  Check ($upscaled.ok -and $upscaled.w -eq 1200 -and $upscaled.h -eq 675 -and (ImageInfo "$dir\upscaled.png").h -eq 675) "capture$arch scale1.5 saves1200x675 PNG"
   $jpeg=& $v --json --pid $gamePid capture "$dir\small.jpg" --max-width 320 --format jpeg --quality 85|ConvertFrom-Json;$proofs.Add($jpeg)
   $signature=[IO.File]::ReadAllBytes("$dir\small.jpg");$image=ImageInfo "$dir\small.jpg"
   Check ($jpeg.ok -and $jpeg.w -eq 320 -and $jpeg.h -eq 180 -and $signature[0] -eq 255 -and $signature[1] -eq 216 -and $image.w -eq 320) "capture$arch JPEG has actual JPEG signature and proportional max-width dimensions"
@@ -68,7 +70,7 @@ foreach($arch in @('','32')){
    $partial=& $v --json --pid $gamePid capture-burst "$dir\must_not_complete.png" --frames 4 --interval-ms 400 --timeout-ms 250|ConvertFrom-Json;$proofs.Add($partial)
    $partialMap=& $v --json --pid $gamePid mouse 60 25 --capture-space|ConvertFrom-Json
    Check (-not $partial.ok -and $partial.completed_frames -lt 4 -and $partial.capture_space_updated -eq $false -and -not (Test-Path "$dir\must_not_complete.png") -and $partialMap.x -eq 160 -and $partialMap.y -eq 140) "capture$arch partial deadline failure is non-success and preserves the saved map"
-   foreach($bad in @(@('--scale','0'),@('--scale','nan'),@('--scale','1.5'),@('--max-width','0'),@('--max-width','8193'),@('--scale','0.5','--max-width','200'),@('--format','bmp'),@('--format','png','--quality','80'),@('--format','jpeg','--quality','101'))){
+   foreach($bad in @(@('--scale','0'),@('--scale','nan'),@('--scale','4.5'),@('--max-width','0'),@('--max-width','8193'),@('--scale','0.5','--max-width','200'),@('--format','bmp'),@('--format','png','--quality','80'),@('--format','jpeg','--quality','101'))){
     $reply=& $v --json --pid $gamePid capture "$dir\must_not_exist.png" @bad|ConvertFrom-Json
     Check (-not $reply.ok -and -not (Test-Path "$dir\must_not_exist.png")) "capture$arch invalid output options fail before writing: $($bad -join ' ')"
    }

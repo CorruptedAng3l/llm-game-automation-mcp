@@ -1,6 +1,6 @@
 # Native OCR/text map contract. All19 lower writers remain terminal.
 # Unchanged fixture for actual before/after; no expected-red inversion.
-param([Parameter(Mandatory=$true)][string]$RepoRoot,[string]$CliDir='', [string]$Out="$PSScriptRoot\..\build\test\ocr_map")
+param([Parameter(Mandatory=$true)][string]$RepoRoot,[string]$CliDir='', [string]$Out="$PSScriptRoot\_out\ocr_map",[switch]$UpscaleOnly)
 . "$PSScriptRoot\_vcvars.ps1";$vcDir=Get-VcVarsDir
 $ErrorActionPreference='Stop'
 $RepoRoot=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath $RepoRoot).Path)
@@ -64,6 +64,25 @@ function SeedMap([string]$Tag){
  $after=MapSnapshot;Require ($after.print_callbacks-gt$before.print_callbacks) 'actual surrogate callback progressed';return $r
 }
 function ProbeMap([string]$Name){$before=MapSnapshot;$r=Invoke-ViOcrMapCli @('mouse','40','30','--capture-space','--steps','1');$after=MapSnapshot;Check ($r.exit-eq0-and$r.reply.ok-and$r.reply.x-eq160-and$r.reply.y-eq120-and$after.moves-gt$before.moves-and$after.x-eq160-and$after.y-eq120) $Name;return @{reply=$r.reply;before=$before;after=$after}}
+# Same approved owned fixture/lifecycle; new capture outcomes are semantic Checks.
+function Invoke-ViUpscaleCase([int]$Scale,[string]$ReferenceHash){
+ $name="$($current.arch) native scale$Scale";$path=Join-Path $run ($current.arch+'.upscale'+$Scale+'.png');$before=MapSnapshot
+ $r=Invoke-ViOcrMapCli @('capture',$path,'--method','printwindow','--region','80,60,320,240','--scale',[string]$Scale);$after=MapSnapshot
+ $captureOk=$r.exit-eq0-and$r.reply.ok-eq$true;$geometry=$captureOk-and$r.reply.w-eq320*$Scale-and$r.reply.h-eq240*$Scale-and$r.reply.source_w-eq320-and$r.reply.source_h-eq240-and$r.reply.origin_x-eq80-and$r.reply.origin_y-eq60-and$r.reply.region_client_w-eq320-and$r.reply.region_client_h-eq240-and$r.reply.capture_space_updated-eq$true
+ $hashOk=$captureOk-and$r.reply.hash_scope-eq'source_region_bgra'-and$r.reply.hash-match'^[0-9A-Fa-f]{16}$'-and(-not$ReferenceHash-or$r.reply.hash-eq$ReferenceHash)
+ $pngOk=$false;$png=$null;$decodeError=$null
+ if(Test-Path -LiteralPath $path){$bitmap=$null;try{$bitmap=[Drawing.Bitmap]::new($path);$p=$bitmap.GetPixel(10*$Scale,10*$Scale);$png=@{w=$bitmap.Width;h=$bitmap.Height;r=$p.R;g=$p.G;b=$p.B;a=$p.A};$pngOk=$bitmap.Width-eq320*$Scale-and$bitmap.Height-eq240*$Scale-and$p.R-eq30-and$p.G-eq80-and$p.B-eq150}catch{$decodeError=$_.Exception.Message}finally{if($bitmap){$bitmap.Dispose()}}}
+ $callback=$captureOk-and$after.print_callbacks-gt$before.print_callbacks
+ $mapped=$false;$probe=$null
+ if($captureOk){$mapBefore=MapSnapshot;$move=Invoke-ViOcrMapCli @('mouse',[string](80*$Scale),[string](60*$Scale),'--capture-space','--steps','1');$mapAfter=MapSnapshot;$probe=@{reply=$move.reply;before=$mapBefore;after=$mapAfter};$mapped=$move.exit-eq0-and$move.reply.ok-eq$true-and$move.reply.x-eq160-and$move.reply.y-eq120-and$mapAfter.moves-gt$mapBefore.moves-and$mapAfter.x-eq160-and$mapAfter.y-eq120}
+ Check $captureOk "$name capture succeeds (unsupported upscale is an ordinary contract failure)"
+ Check $geometry "$name saved dimensions/client-region metadata are exact"
+ Check ($captureOk-and$pngOk) "$name independent PNG dimensions and known-source interior bytes"
+ Check $hashOk "$name source-region hash remains before output transforms"
+ Check $callback "$name actual owned PrintWindow surrogate callback progressed"
+ Check $mapped "$name actual saved output map reaches observed client160,120"
+ return @{scale=$Scale;completed=$true;capture=$r.reply;exit=$r.exit;before=$before;after=$after;png=$png;decode_error=$decodeError;map_probe=$probe;healthy=$captureOk-and$geometry-and$pngOk-and$hashOk-and$callback-and$mapped}
+}
 try{
  Add-Type -AssemblyName System.Drawing
  foreach($f in @($PSCommandPath,"$PSScriptRoot\vi_r1_identity.ps1","$PSScriptRoot\vi_exited_cli_accounting.ps1","$PSScriptRoot\vi_r1_lifecycle.ps1","$PSScriptRoot\..\test\vi_r1_tail.cs","$PSScriptRoot\..\test\vi_ocrmap.cpp")){Pin $f}
@@ -81,13 +100,16 @@ exit /b %errorlevel%
 "@|Set-Content -LiteralPath $batch -Encoding ascii
    $entry.build=RunOwned $env:ComSpec @('/d','/c',$batch) 120000;Require ($entry.build.exit-eq0-and($entry.build.stdout+$entry.build.stderr)-notmatch'(?i)\bwarning\s+[A-Z]+\d+') 'both-arch W4/WX compile zero warnings';Pin $exe
    $current=StartFixture $exe $cli $dll ($arch+'.target');$current.arch=$arch;$r=Invoke-ViOcrMapCli @('config','msgs=on','raw=off');Require ($r.exit-eq0-and$r.reply.ok) 'message observer channel selected'
+   if($UpscaleOnly){$entry.upscale=[Collections.Generic.List[object]]::new();$one=Invoke-ViUpscaleCase 1 '';$entry.upscale.Add($one);Require $one.healthy 'scale1 full capture/PNG/map prerequisite before attributing upscale failures';foreach($scale in @(2,4)){$case=Invoke-ViUpscaleCase $scale ([string]$one.capture.hash);$entry.upscale.Add($case)}}else{
    $entry.control=SeedMap initial;$entry.initial=ProbeMap "$arch cropped screenshot mapping control reaches client160,120"
    $entry.seed_ocr=SeedMap before_ocr;$r=Invoke-ViOcrMapCli @('ocr','--method','printwindow','--lines-only');Require ($r.exit-eq0-and$r.reply.ok) 'actual CLI OCR completed (zero text allowed)';$entry.ocr=$r.reply;Check ($r.reply.capture_space_updated-eq$false) "$arch OCR explicitly confirms no saved-map update";$entry.after_ocr=ProbeMap "$arch OCR leaves original screenshot map and observed coordinates unchanged"
    $entry.seed_text=SeedMap before_text;$r=Invoke-ViOcrMapCli @('click-text','__VI_OCRMAP_ABSENT_638D1C528BFF__','--exact','--optional','--timeout','0','--method','printwindow');Require ($r.exit-eq0-and$r.reply.ok-and$r.reply.skipped-eq$true-and$r.reply.clicked-eq$false) 'actual missing-text scan completed without clicking';$entry.text=$r.reply;Check ($r.reply.capture_space_updated-eq$false) "$arch text search explicitly confirms no saved-map update";$entry.after_text=ProbeMap "$arch optional text miss leaves original screenshot map and observed coordinates unchanged"
+   }
    $entry.completed=$true
   }catch{$entry.error=$_.Exception.Message;$instrument=$false;Check $false "$arch infrastructure: $($entry.error)"}finally{StopCurrent}
  }
  $complete=$instrument-and$arches.Count-eq2-and@($arches|Where-Object completed -eq $true).Count-eq2
+ if($UpscaleOnly){$complete=$complete-and@($arches|Where-Object {$_.upscale.Count-eq3-and@($_.upscale|Where-Object completed -eq $true).Count-eq3}).Count-eq2}
 }catch{$problem=$_.Exception.Message;Check $false "setup: $problem"}
-@{schema=1;completed=$complete;passed=@($checks|Where-Object pass -eq $true).Count;failed=@($checks|Where-Object pass -eq $false).Count;checks=$checks;arches=$arches;calls=$calls;processes=$processes;pins=$pins;error=$problem;failure_is_expected_inversion=$false;native_os_input_tested=$false;backend='owned lower PrintWindow memory-DC checker surrogate';native_printwindow_tested=$false;tool_issues=@()}|ConvertTo-Json -Depth 35|Set-Content -LiteralPath (Join-Path $run 'result.json') -Encoding utf8NoBOM
+@{schema=1;completed=$complete;passed=@($checks|Where-Object pass -eq $true).Count;failed=@($checks|Where-Object pass -eq $false).Count;checks=$checks;arches=$arches;calls=$calls;processes=$processes;pins=$pins;error=$problem;failure_is_expected_inversion=$false;upscale_mode=[bool]$UpscaleOnly;native_os_input_tested=$false;backend='owned lower PrintWindow memory-DC checker surrogate';native_printwindow_tested=$false;tool_issues=@()}|ConvertTo-Json -Depth 35|Set-Content -LiteralPath (Join-Path $run 'result.json') -Encoding utf8NoBOM
 Write-Host "RESULT $(@($checks|Where-Object pass -eq $true).Count) PASS $(@($checks|Where-Object pass -eq $false).Count) FAIL $run";if(-not$complete-or@($checks|Where-Object pass -eq $false).Count){exit 1};exit 0

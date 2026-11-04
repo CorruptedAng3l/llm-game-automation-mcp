@@ -7,7 +7,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server (stdio transp
 `@modelcontextprotocol/sdk`) that lets any LLM agent play Windows games through vinput: input and screenshots go to
 one game process **in the background**, so the game never needs focus and you keep your mouse and keyboard.
 
-Each tool runs `vinput.exe` and returns **vinput's own JSON reply** as text. `ok` is surfaced as the MCP `isError`
+Apart from the host-timer `wait` tool, tools run `vinput.exe` and return **vinput's own JSON reply** as text. `ok` is surfaced as the MCP `isError`
 flag: `ok:false` (or a crash, timeout or missing binary) always comes back as `isError: true` with the error text,
 never silently. `capture` also returns the PNG as MCP image content.
 
@@ -79,7 +79,7 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 | `launch` | start a game (`exe` / `aumid` / `steam_appid`+`wait_exe`, `args` (a size in them is compared with the real window: `warnings` + `requested_size_ignored`), `cwd`, `early`, `settle_s`, `timeout_s`, `lock`, `claim`) and inject; returns `pid`, plus `warnings` / `nothing_presented` / `fullscreen_refusals` when no frame is being presented |
 | `attach` | inject into a running game by `pid`; vinput waits for its hooks, window and message queue (`readiness`; `application_ready` is always `null`) and the tool waits until the window is adopted |
 | `list_targets` | games that have vinput loaded (pid, exe, owner, uptime, really_foreground) |
-| `status` | compact by default: pid, hwnd, client size, `really_foreground`, `cursor_effective` / `owner_active` (the user is using the window), `app_active`, `present`, cursor / raw / msgs modes, non-zero counters, `capabilities` (what the game's vinput DLL supports), `edge_contact`, `fullscreen` policy, `warnings[]`; `verbose:true` = the full vinput status |
+| `status` | compact by default: pid, hwnd, client size, `really_foreground`, `cursor_effective` / `owner_active` (the user is using the window), `app_active`, `present`, cursor / raw / msgs modes, non-zero counters, `capabilities` (what the game's vinput DLL supports), `edge_contact`, `fullscreen` policy, `warnings[]`, and a valid native `virtual_down` VK array (including `[]`); `verbose:true` = the full vinput status |
 | `config` | change / read how vinput treats a game: `fakefocus`, `autoactivate`, `isolate`, `blockfocus`, `nofullscreen`, `keepvisible`, `cursor`, `raw`, `msgs`, `edge_margin` (vinput's edge guard), `fullscreen` (`borderless` / `refuse`), `for_ms` (only with `isolate:false`: pass the user's physical input for 1..120000 ms, then vinput restores isolation inside the game); returns the effective config. `hwnd` is CLI-only |
 | `log` | tail of vinput's log for a game (`lines`, `contains`, `source` ring/file); repeated lines collapse |
 | `trace` | per-key delivery trace (`trace key <key>`): which input channels the game read |
@@ -111,15 +111,20 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 | `hold_while` | hold a key (or pad buttons / sticks) until `until_text` appears or `timeout_ms`; always releases |
 | `job_status` / `job_cancel` | follow / stop a background input job, including a `key_sequence` (no `id`: list all jobs) |
 | `list_keys` | all key names |
+| `wait` | nonblocking MCP host timer, integer `ms` 0..30000; no target, CLI, input, claim renewal or frame wait; returns requested and actual elapsed ms |
 | `run_script` | run a `.vin` macro file |
 | `release` | release all held input |
 | `detach` | release input and drop this server's claim (vinput stays loaded, inert, until the game exits) |
+
+`wait {ms:1000}` is a host-side pause, not a screen/state postcondition. Its 30-second per-call bound stays below the SDK test client's 60-second tool timeout; scheduling or an outer harness can still delay the reply. It runs no vinput process and does not block other MCP requests. Prefer wait_text/wait_change when waiting for an observable game state; a timer neither proves progress nor renews a claim.
 
 Every tool that targets a game takes `pid`. Coordinates are the game's **client pixels**, which equal the pixels of a
 full capture. Refusals by the anti-cheat check come back as `isError` with `anticheat_refused: true`; there is no way to
 override them from the MCP server.
 
 For a successful top-level completed job outcome (`job_state:"completed"`, nonempty `job_id`, native `accepted:false`), MCP omits the misleading `accepted` field and uses the existing job state and completion evidence. It adds no boolean about whether the original request was queued; it does not identify the original request's async setting, prove callback delivery, or prove a game reaction. Job identity, state and publication counters remain intact. Running/queued async `accepted:true`, failures, nonjob replies and nested raw job-status records stay unchanged. The native CLI schema is unchanged.
+
+Compact `status.virtual_down` is a snapshot of the DLL's published virtual VK state (numeric Windows VK codes, including mouse-button VKs). An empty array means no virtual down bits at that sample; missing or malformed native data is omitted, not converted to an empty array. This does not report physical keys, buffered legacy messages, an application's private key latch, or proof that the game consumed a release. Use a per-key trace and verify the game before diagnosing a stuck key from movement alone.
 
 ## Agents and controllers
 

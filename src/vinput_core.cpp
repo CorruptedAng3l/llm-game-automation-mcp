@@ -2042,7 +2042,7 @@ std::string DoCapture(const JObj& j) {
     if(JHas(j,"scale")&&JHas(j,"max_width"))return ErrJ("use scale or max-width, not both");
     auto number=[&](const char* name,double fallback,double& value){auto item=j.find(name);if(item==j.end()){value=fallback;return true;}if(item->second.t!=2||!std::isfinite(item->second.n))return false;value=item->second.n;return true;};
     double scale=1,maxWidthValue=0,qualityValue=85;
-    if(!number("scale",1,scale)||scale<0.05||scale>1)return ErrJ("capture scale must be a finite number 0.05..1");
+    if(!number("scale",1,scale)||scale<0.05||scale>4)return ErrJ("capture scale must be a finite number 0.05..4");
     if(!number("max_width",0,maxWidthValue)||(JHas(j,"max_width")&&(maxWidthValue<1||maxWidthValue>8192||maxWidthValue!=std::floor(maxWidthValue))))return ErrJ("max-width must be a whole number 1..8192");
     std::string format=JStr(j,"format","png");
     if(JHas(j,"format")&&j.find("format")->second.t!=1)return ErrJ("capture format must be the string png or jpeg");

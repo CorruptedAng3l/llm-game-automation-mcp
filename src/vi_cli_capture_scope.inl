@@ -20,6 +20,14 @@ static bool CaptureScopeSupported(DWORD pid){
 static bool CaptureScopeRefusal(std::string& response,const char* error,bool probed=true){
  response="{\"ok\":false,\"input_injected\":false,\"capture_scope_preflight\":true,\"capture_scope_support_checked\":"+std::string(probed?"true":"false")+",\"capture_scope_version_required\":1,\"coordinate_input_sent\":false,\"button_down_count\":0,\"cleanup_attempted\":false,\"error\":\""+JEsc(error)+"\"}";return true;
 }
+// Failure metadata is not authorization to send or clean up a partial request.
+static std::string CaptureScopeParseError(const vi_ready_json::Reader& parsed){
+ if(!parsed.duplicateKeyFound)return "malformed or over-limit outgoing JSON was refused locally; no original request was sent";
+ const size_t limit=128;std::string error="duplicate decoded outgoing JSON property '"+JobRawBytes(parsed.duplicateKey.substr(0,limit))+"'";
+ if(parsed.duplicateKey.size()>limit)error+=" [name truncated]";
+ if(parsed.duplicateKey=="max_width")error+=" (CLI --max-width)";
+ return error+=" was refused locally; no original request was sent";
+}
 // Preserve original key/value tokens when removing the decoded capture-space
 // property. Strict parsing/unique-key validation already ran before this helper.
 // Unknown Unicode keys must not be rewritten by the selector's ASCII key view.
@@ -44,7 +52,7 @@ static bool CaptureScopeWithoutSpace(const std::string& request,std::string& nor
 // request once through the normal owner-stamping/overlay/transport path.
 static bool CaptureScopePreflight(DWORD pid,std::string& request,std::string& response){
  vi_ready_json::Reader parsed{request,0,{}};
- if(!parsed.Parse())return CaptureScopeRefusal(response,"malformed, duplicate or over-limit outgoing JSON was refused locally; no original request was sent; a separate coordinate-free mouseup remains available",false);
+ if(!parsed.Parse()){const std::string error=CaptureScopeParseError(parsed);return CaptureScopeRefusal(response,error.c_str(),false);}
  const auto commandField=parsed.fields.find("cmd");std::string command;
  if(commandField==parsed.fields.end()||!CaptureScopeText(commandField->second,command))return CaptureScopeRefusal(response,"outgoing request needs one decoded string cmd; no original request was sent",false);
  const bool positioned=parsed.fields.count("x")||parsed.fields.count("y");

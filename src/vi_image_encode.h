@@ -11,9 +11,13 @@ inline bool Dimensions(int w, int h, std::string& error) {
 }
 inline bool OutputSize(int w,int h,double scale,int maxWidth,int& ow,int& oh,std::string& error) {
     if(w<1||h<1){error="source image dimensions must be positive";return false;}
-    if(!std::isfinite(scale)||scale<0.05||scale>1||maxWidth<0||maxWidth>8192){error="capture scale must be 0.05..1 and max-width 1..8192";return false;}
+    if(!std::isfinite(scale)||scale<0.05||scale>4||maxWidth<0||maxWidth>8192){error="capture scale must be 0.05..4 and max-width 1..8192";return false;}
     double factor=maxWidth?(std::min)(1.0,(double)maxWidth/w):scale;
-    ow=(std::max)(1,(int)std::lround(w*factor));oh=(std::max)(1,(int)std::lround(h*factor));
+    // Bound rounded doubles before narrowing: upscaling a large source int must
+    // not overflow lround/int before the unchanged edge/pixel limits run.
+    const double width=(std::max)(1.0,std::round(w*factor)),height=(std::max)(1.0,std::round(h*factor));
+    if(width>8192||height>8192){error="output image must be 1..8192 per edge and at most 16 million pixels";return false;}
+    ow=(int)width;oh=(int)height;
     return Dimensions(ow,oh,error);
 }
 inline bool Resize(const vi_vision::Image& source,int w,int h,vi_vision::Image& output,std::string& error) {

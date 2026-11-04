@@ -4,8 +4,18 @@ static bool BurstNumber(const Args& a,const char* key,double fallback,double low
     std::string text=GetOpt(a,key);char* end=nullptr;value=strtod(text.c_str(),&end);
     return !text.empty()&&end&&!*end&&std::isfinite(value)&&value>=low&&value<=high&&(!whole||value==std::floor(value));
 }
+static bool BurstQuiet(const Args& a,bool& quiet,std::string& error) {
+    quiet=false;bool seen=false;
+    for(const auto& option:a.opt)if(option.first=="quiet") {
+        if(seen){error="capture-burst quiet may appear only once";return false;}seen=true;
+        if(option.second=="true")quiet=true;
+        else if(option.second!="false"){error="capture-burst quiet must be true or false";return false;}
+    }
+    return true;
+}
 static Reply CmdCaptureBurst(DWORD pid,const Args& a) {
     const ULONGLONG commandStarted=GetTickCount64();
+    bool quiet=false;std::string quietError;if(!BurstQuiet(a,quiet,quietError))return Fail(quietError);
     if(a.pos.size()!=1||a.pos[0].empty())return Fail("capture-burst needs exactly one contact-sheet path");
     double countValue=0,intervalValue=0,columnsValue=0,timeoutValue=0,frameTimeoutValue=0,qualityValue=0,scaleValue=1,widthValue=0;
     if(!BurstNumber(a,"frames",8,1,16,true,countValue)||!BurstNumber(a,"interval-ms",250,10,5000,true,intervalValue)||
@@ -45,8 +55,7 @@ static Reply CmdCaptureBurst(DWORD pid,const Args& a) {
         for(int row=0;row<frame.img.h;++row)memcpy(sheet.pixels.data()+((size_t)(y+row)*sheet.w+x)*4,frame.img.pixels.data()+(size_t)row*frame.img.w*4,(size_t)frame.img.w*4);
         if(index)frames+=",";
         frames+="{\"index\":"+std::to_string(index)+",\"scheduled_ms\":"+std::to_string(next-started)+",\"actual_start_ms\":"+std::to_string(before)+",\"actual_end_ms\":"+std::to_string(after)+",\"lateness_ms\":"+std::to_string(before>next?before-next:0)+",\"missed_intervals_before\":"+std::to_string(missed)+",\"tile_rect\":["+std::to_string(x)+","+std::to_string(y)+","+std::to_string(frame.img.w)+","+std::to_string(frame.img.h)+"],\"hash\":\""+frame.hash+"\",\"method\":\""+JEsc(frame.method)+"\",\"captured_present\":"+(frame.method=="printwindow"?"null":Num(frame.nativeFrame))+",\"client_origin_x\":"+Num(frame.ox)+",\"client_origin_y\":"+Num(frame.oy)+",\"client_per_pixel_x\":"+Num(frame.sx)+",\"client_per_pixel_y\":"+Num(frame.sy)+"}";
-        fprintf(stderr,"[vinput] burst frame %u/%u captured at %llu ms\n",index+1,count,after-started);
-        fflush(stderr);
+        if(!quiet){fprintf(stderr,"[vinput] burst frame %u/%u captured at %llu ms\n",index+1,count,after-started);fflush(stderr);}
         if(after>=deadline)return fail("burst cooperative deadline reached after capture",index+1);
         next+=(ULONGLONG)intervalValue;missed=0;
         if(next<after){missed=(unsigned)((after-next)/(ULONGLONG)intervalValue+1);next+=(ULONGLONG)missed*(ULONGLONG)intervalValue;}

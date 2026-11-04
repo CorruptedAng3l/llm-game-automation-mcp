@@ -172,13 +172,16 @@ static bool Request(DWORD pid, const std::string& rawLine, std::string& resp, DW
 // ------------------------------------------------------------------------------------------
 struct Args { std::vector<std::string> pos; std::vector<std::pair<std::string, std::string>> opt; };
 static bool HasOpt(const Args& a, const char* k);
-static Args SplitArgs(const std::vector<std::string>& a) {
+static Args SplitArgs(const std::vector<std::string>& a,bool burstQuiet=false) {
     Args r;
     for (size_t i = 0; i < a.size(); i++) {
         const std::string& s = a[i];
         if (s.size() > 2 && s[0] == '-' && s[1] == '-') {
             std::string k = s.substr(2), v = "true";
             size_t eq = k.find('='); if (eq != std::string::npos) { v = k.substr(eq + 1); k = k.substr(0, eq); }
+            else if(burstQuiet&&k=="quiet") { // Only consume an explicit boolean, never the sheet path.
+                if(i+1<a.size()&&(a[i+1]=="true"||a[i+1]=="false"))v=a[++i];
+            }
             else if (i + 1 < a.size() && !(a[i + 1].size() > 2 && a[i + 1][0] == '-' && a[i + 1][1] == '-') &&
                      k != "placement" && k != "async" && k != "replace" && k != "strict-frames" && k != "norm" && k != "keys" && k != "hold" && k != "horizontal" && k != "capture-space" && k != "raw" && k != "force" && k != "json" && k != "exact" && k != "gone" && k != "absent" && k != "dry-run" && k != "continue" && k != "lines-only" && k != "no-scale" && k != "tiles" && k != "no-tiles" && k != "optional" && k != "allow-dialog" && k != "hooks-only") { v = a[++i]; }
             r.opt.push_back({k, v});
@@ -197,7 +200,7 @@ static bool BuildJson(const std::vector<std::string>& argv, std::string& out, st
     if (argv.empty()) { err = "no command"; return false; }
     std::string cmd = argv[0];
     if (cmd == "json") { if (argv.size() < 2) { err = "json needs a payload"; return false; } out = argv[1]; return true; }
-    Args a = SplitArgs(std::vector<std::string>(argv.begin() + 1, argv.end()));
+    Args a = SplitArgs(std::vector<std::string>(argv.begin() + 1, argv.end()),cmd=="capture-burst");
     if(HasOpt(a,"stagger-ms")&&cmd!="pad-timeline"){err="--stagger-ms is only implemented for pad-timeline; no input was sent";return false;}
     if((HasOpt(a,"for")||HasOpt(a,"for-ms")||HasOpt(a,"for_ms"))&&cmd!="config"){err="--for applies only to config isolate=false";return false;}
     std::string j = "{"; PutS(j, "cmd", cmd);
@@ -1111,8 +1114,8 @@ static void Usage() {
         "  vinput --pid N wheel <delta>\n"
         "  vinput --pid N pad <a+b+lt+rt+start...|none> [ms] [--lx N --ly N --rx N --ry N --lt N --rt N] [--hold]\n"
         "  vinput --pid N capture <out.png> [--method auto|swapchain|printwindow]\n"
-        "      [--scale 0.5 | --max-width 640] [--format png|jpeg] [--quality 85] (JPEG only); source hash stays before output transforms.\n"
-        "  vinput --pid N capture-burst <sheet.png> [--frames 8] [--interval-ms 250] [--columns 4] [--max-width 320] [--format png|jpeg]\n"
+        "      [--scale 0.05..4 | --max-width 640] [--format png|jpeg] [--quality 85] (JPEG only); source hash stays before output transforms.\n"
+        "  vinput --pid N capture-burst <sheet.png> [--frames 8] [--interval-ms 250] [--columns 4] [--max-width 320] [--format png|jpeg] [--quiet[=true|false]]\n"
         "      Bounded temporal tiles; actual timing metadata, other commands run between frames; never changes --capture-space.\n"
         "  vinput --pid N config isolate=false --for 1000   (1..120000 ms; physical input passes until auto-revert)\n"
         "  vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true keepvisible=true cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off [for_ms=1..120000 | --for N (isolate=false only)]\n"
@@ -1159,7 +1162,7 @@ int wmain(int argc, wchar_t** wargv) {
     }
     if (rest.empty()) { Usage(); return 1; }
     const std::string cmd = rest[0];
-    Args a = SplitArgs(std::vector<std::string>(rest.begin() + 1, rest.end()));
+    Args a = SplitArgs(std::vector<std::string>(rest.begin() + 1, rest.end()),cmd=="capture-burst");
     if((HasOpt(a,"for")||HasOpt(a,"for-ms")||HasOpt(a,"for_ms"))&&cmd!="config"){printf("{\"ok\":false,\"configuration_changed\":false,\"error\":\"--for applies only to config isolate=false\"}\n");return 2;}
     if(HasOpt(a,"stagger-ms")&&cmd!="pad-timeline"){printf("{\"ok\":false,\"input_injected\":false,\"error\":\"--stagger-ms is only implemented for pad-timeline\"}\n");return 2;}
     if (HasExpectationOptions(a) && cmd != "key" && cmd != "hold") {

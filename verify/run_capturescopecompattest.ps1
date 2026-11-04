@@ -91,6 +91,11 @@ exit /b %errorlevel%
    $arm=Call $t @('readiness','--wait-ms','1500');Require ($arm.exit-eq0-and$arm.reply.ok-and$arm.reply.queue_ready) "$arch fresh queue readiness"
    $ping=Json $t @{cmd='ping';capture_scope_support=$true};$status=Call $t @('status');$support=$ping.reply.capture_scope_version-ge1-and$status.reply.capture_scope_version-ge1
    Require ($support-eq[bool]$RequireScopeSupport) "$arch selected DLL matches requested capture-scope capability mode"
+   if($RequireScopeSupport){
+    $duplicatePath=Join-Path $run ("$arch.duplicate_must_not_exist.png")
+    $duplicate=Call $t @('capture',$duplicatePath,'--max-width','100','--max-width','200')
+    Check ($duplicate.exit-ne0-and$duplicate.reply.ok-eq$false-and$duplicate.reply.error-match'max_width'-and$duplicate.reply.error-match'--max-width'-and$duplicate.reply.error-notmatch'coordinate-free mouseup'-and-not(Test-Path -LiteralPath $duplicatePath)) "$arch duplicate capture flag is named locally without irrelevant cleanup advice or output"
+   }
    $r=Json $t @{cmd='mouse';x=0.5;y=0.5;norm=$true;space='capture'};$a=Snap $t;Check ($r.exit-eq0-and$r.reply.ok-and$a.ax-eq320-and$a.ay-eq240) "$arch norm=true takes precedence even before any saved capture"
    $saved=Capture $t initial;$resize=Control $t 0x8051 resize;Require ($resize.ok-and$resize.aw-eq800-and$resize.ah-eq600-and$saved.reply.w-eq640-and$saved.reply.h-eq480) "$arch owned geometry change makes initial map stale"
    # A scaled/cropped stale map makes implicit-coordinate consumption observable:

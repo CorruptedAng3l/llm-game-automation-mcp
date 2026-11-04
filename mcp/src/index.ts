@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // llm-game-automation-mcp: an MCP (stdio) server that lets an LLM agent play single-player / offline Windows games
-// through vinput. Every tool runs the vinput CLI and returns its JSON reply verbatim, with "ok" surfaced as isError.
+// through vinput. Vinput-backed tools return CLI JSON with "ok" surfaced as isError; wait uses only a host timer.
 // Offline games only: vinput injects a DLL and refuses targets with a known anti-cheat (see DISCLAIMER.md).
 import { sizeMismatchWarning } from "./launchsize.js";
 import { MOVE_DIRECTIONS, moveVector, smoothMoveStates, calibratedLook, rotateStick } from "./controller.js";
@@ -17,7 +17,7 @@ import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 import { completedJobView, isCompletedJobOutcome } from "./completedjob.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -267,7 +267,8 @@ function statusReply(r: CliResult, verbose?: boolean, extra?: Record<string, unk
 tool("status", "Game status",
   "Essentials of one game: pid, window handle, client size, really_foreground, app_active (0 = the game thinks it is " +
   "inactive and may ignore input), present count (0 = no frame presented yet), cursor / raw / msgs modes, the input-API " +
-  "counters that are non-zero (they show which APIs the game actually reads: read them when it ignores input) and " +
+  "counters that are non-zero (they show which APIs the game actually reads: read them when it ignores input), " +
+  "virtual_down (published virtual VK codes, including mouse buttons; not physical state or game consumption), and " +
   "warnings[] (fullscreen refusal loop, no window, minimized, failed hooks). verbose:true returns vinput's full status " +
   "(about 3 KB: every counter, hook lists, per-API frame counts, Vulkan / D3D12 internals).",
   { pid, verbose: z.boolean().optional().describe("Return the full vinput status instead of the compact view.") },
@@ -1172,6 +1173,17 @@ tool("trace", "Trace one key's delivery",
 
 tool("list_keys", "List key names", "Every key name vinput accepts, with its virtual-key code.", {},
   async () => reply(await runVinput(["keys"], 15000)), true);
+
+tool("wait", "Wait without input",
+  "Pause for 0..30000 ms using a nonblocking MCP host timer. No target, CLI command, input, claim renewal or frame " +
+  "wait is performed. Other tool calls may run meanwhile; elapsed_ms reports actual host elapsed time, not game progress.",
+  { ms: z.number().int().min(0).max(30000).describe("Host timer duration in integer milliseconds (0..30000).") },
+  async (a) => {
+    const started = performance.now();
+    if (a.ms > 0) await new Promise<void>((resolve) => setTimeout(resolve, a.ms));
+    return { content: [{ type: "text", text: JSON.stringify({ ok: true, requested_ms: a.ms,
+      elapsed_ms: Math.max(0, Math.round(performance.now() - started)), scope: "MCP host timer only; no target, input, CLI or frame wait" }) }], isError: false };
+  }, true);
 
 tool("run_script", "Run a macro script",
   "Run a .vin macro on the game: one vinput command per line (no --pid), '#' comments, 'sleep ms'. Stops at the first failing line unless continue_on_error.",

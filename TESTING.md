@@ -145,6 +145,12 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   84 passed, 3 not_measured (`capture_diagnostics` by design; `cursor_guard`, `legacy_focus` with the desk in use).
   `owner_input` failed once when the real cursor moved and passed on the serial-lane rerun.
   These checks use synthetic XInput fixtures; behaviour in real games is a separate field test.
+- Batch 0e6adda..fe867d2 (2026-11-04): `capture --scale` up to 4 (coordinates stay mapped), quiet `capture-burst`,
+  compact virtual key state in MCP `status`, an MCP `wait` tool, duplicate-flag errors that name the flag, and a
+  Unity-style mouse/focus fixture. Gate on the merged tree: `build.bat` x64 + x86 OK; `mcp` `npm test` 28 files PASS;
+  `run_ocrmaptest.ps1` 10 / 0 and `-UpscaleOnly` 36 / 0; `run_unitymousetest.ps1` 24 / 0; background plan (87 cases):
+  84 passed, 3 not_measured (same three as before). `owner_input` failed once with the real cursor moving and passed on
+  the serial-lane rerun; it needs an idle desk.
 
 ## Real games
 

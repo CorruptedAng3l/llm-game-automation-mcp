@@ -98,6 +98,9 @@ export function compactStatus(s: Obj): Obj {
     raw: name(RAW_NAMES, s.rawmode) ?? s.rawmode, msgs: name(MSGS_NAMES, s.msgmode) ?? s.msgmode,
     counters: nonzero,
   };
+  // Native published VK state, including mouse-button VKs; absent/malformed is unknown.
+  if (Array.isArray(s.virtual_down) && s.virtual_down.every((v) => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 255))
+    out.virtual_down = [...s.virtual_down];
   if (claim?.active) out.claimed_by = claim.owner;
   // the owner (human) is using the game window: real input passes through and the virtual cursor stands down until the next agent command
   if (typeof s.cursor_effective === "string") out.cursor_effective = s.cursor_effective;

@@ -182,7 +182,7 @@ static Reply CmdOcr(DWORD pid, const Args& a) {
 static Reply RunScript(DWORD pid, const Args& a);   //@script
 static Reply Dispatch(DWORD pid, const std::vector<std::string>& tk) {
     const std::string& cmd = tk[0];
-    Args a = SplitArgs(std::vector<std::string>(tk.begin() + 1, tk.end()));
+    Args a = SplitArgs(std::vector<std::string>(tk.begin() + 1, tk.end()),cmd=="capture-burst");
     {std::string refusal;if(CaptureScopeSpecialPreflight(pid,cmd,a,refusal))return {false,refusal};}
     if(HasOpt(a,"stagger-ms")&&cmd!="pad-timeline")return Fail("--stagger-ms is only implemented for pad-timeline; no input was sent");
     {std::string acRefusal;if((CursorGuardSpecialCommand(cmd)||((cmd=="key"||cmd=="hold")&&HasExpectationOptions(a)))&&!RequireCursorGuard(pid,&acRefusal))return {false,acRefusal.empty()?"{\"ok\":false,\"input_injected\":false,\"error\":\"matching cursor safety guards are not armed; no input was sent\"}":acRefusal};}
