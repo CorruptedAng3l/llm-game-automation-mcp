@@ -56,3 +56,24 @@ export function rotateStick(stick: "left" | "right", startDeg: number, direction
   }
   return { states, segments, end_deg_unwrapped: startDeg + sweep, total_ms: ms + endDwellMs };
 }
+
+export interface DrivePhase { ms: number; throttle?: number; steer?: number; brake?: number }
+/** Requested mapped controls only: LT may reverse in some games, not stop. */
+export function driveStates(phases: DrivePhase[], tail?: boolean | { amount: number; ms: number }) {
+  const byte = (v = 0) => Number.isInteger(v) && v >= 0 && v <= 255;
+  if (!phases.length || phases.length > 16 || phases.some((p) => !Number.isInteger(p.ms) || p.ms < 1 || p.ms > 60000 ||
+      !byte(p.throttle) || !byte(p.brake) || !Number.isInteger(p.steer ?? 0) || (p.steer ?? 0) < -32768 || (p.steer ?? 0) > 32767))
+    return { error: "driving phases require bounded duration, byte triggers and signed16-bit steering; nothing was sent" };
+  const brake = tail === true ? { amount: 255, ms: 250 } : tail || undefined;
+  if (brake && (!byte(brake.amount) || !Number.isInteger(brake.ms) || brake.ms < 1 || brake.ms > 5000))
+    return { error: "brake_after requires amount0..255 and duration1..5000ms; nothing was sent" };
+  const total = phases.reduce((n, p) => n + p.ms, 0) + (brake?.ms ?? 0);
+  if (total > 60000) return { error: "all driving phases plus brake_after must fit60000ms; nothing was sent" };
+  const state = (at_ms: number, p: DrivePhase, phase: string) => ({ at_ms, phase, buttons: "none",
+    lx: p.steer ?? 0, ly: 0, rx: 0, ry: 0, lt: p.brake ?? 0, rt: p.throttle ?? 0 });
+  let at = 0;
+  const states = phases.map((p, i) => { const s = state(at, p, `drive_${i + 1}`); at += p.ms; return s; });
+  if (brake) { states.push(state(at, { ms: brake.ms, brake: brake.amount }, "brake_after")); at += brake.ms; }
+  states.push(state(at, { ms: 0 }, "neutral"));
+  return { states, total_ms: total, brake_after: brake ?? null };
+}

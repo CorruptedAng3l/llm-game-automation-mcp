@@ -29,6 +29,7 @@ bool NativeClipTakeScope(NativeClipScope& result,const char*& reason){
  NativeClipScope scope;
  {std::lock_guard<std::recursive_mutex> lock(g_inputMx);if(g_jobRetargetDepth||g_wndConfigCommitDepth){reason="adoption_not_ready";return false;}scope.window=g_hwnd;scope.adoption=g_inputReadyGeneration;scope.geometry=g_captureGeometryEpoch;}
  const auto owner=CursorOwnerSnapshot();
+ if(owner.agentClaimLive){reason="agent_claim_active";return false;}
  if(!vi_cursor_guard::NativeClipAllowed(owner)){reason=owner.foregroundVerified?"not_owned_foreground":"foreground_unverified";return false;}
  if(!CursorProtectionReady()||!NativeClipWindowProof(scope.window,scope.thread,scope.lifetime)){reason="hooks_or_window_not_ready";return false;}
  scope.root=GetAncestor(scope.window,GA_ROOT);DWORD rootPid=0;
@@ -120,6 +121,8 @@ BOOL NativeClipRequest(const RECT* requested){
   operation=++g_nativeClipOperation;state.operation=operation;state.busy=true;state.operationKind="set";
  }
  if(!NativeClipScopeCurrent(scope)){std::lock_guard<std::recursive_mutex> lock(g_inputMx);auto& state=g_nativeClip;if(state.operation==operation){state.busy=false;state.operationKind="none";state.scopeReason="scope_changed_before_native_set";++state.scopeRejected;}SetLastError(ERROR_NOT_READY);return FALSE;}
+ ClaimNativeOperation nativeOperation;
+ if(!nativeOperation){std::lock_guard<std::recursive_mutex> lock(g_inputMx);auto& state=g_nativeClip;if(state.operation==operation){state.busy=false;state.operationKind="none";state.scopeReason="claim_native_admission_denied";++state.scopeRejected;++g_cursorCounts[vi_cursor_guard::Clip].blocked;}SetLastError(ERROR_BUSY);return FALSE;}
  const BOOL accepted=NativeClipOriginalSet(&clip);const DWORD error=accepted?ERROR_SUCCESS:GetLastError();
  const bool current=accepted&&NativeClipScopeCurrent(scope);
  {std::lock_guard<std::recursive_mutex> lock(g_inputMx);auto& state=g_nativeClip;

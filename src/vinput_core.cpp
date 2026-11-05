@@ -138,6 +138,7 @@ std::atomic<unsigned> g_wndConfigCommitDepth{0};
 using InterruptClock=void(WINAPI*)(PULONGLONG);
 InterruptClock RealInterruptClock(){static InterruptClock clock=(InterruptClock)GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),"QueryInterruptTime");return clock;}
 ULONGLONG HousekeepingNow(){ULONGLONG value=0;if(auto clock=RealInterruptClock()){clock(&value);return value/10000;}return GetTickCount64();}
+#include "vi_claim_native_fence.inl"
 const int kDiMouseVk[5]={VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};
 struct DiMouseObservation {
     std::atomic<unsigned long long> press{0},state_down{0},buffer_down{0},release{0},state_up{0},buffer_up{0};
@@ -181,6 +182,7 @@ struct Counters {
     std::atomic<long> act_swallowed{0}, act_synth{0}, act_leaked{0}, act_refresh_posted{0}, act_refresh_delivered{0}, act_refresh_cancelled{0}, act_refresh_failed{0}, act_cbt_blocked{0}, act_cbt_installed{0}, act_cbt_failed{0}, act_cbt_unhook_failed{0}, present{0}, present_ours{0}, captures{0};
     std::atomic<long> posted{0}, raw_posted{0}, raw_queued{0}, post_target_rejected{0}, last_post_target_error{0};
 } C;
+#include "vi_pad_api_census.h"
 
 std::string g_hooksOk, g_hooksFail;
 std::mutex g_logMx;
@@ -778,6 +780,11 @@ UINT WINAPI h_GetRawInputData(HRAWINPUT h, UINT cmd, LPVOID data, PUINT pcb, UIN
     // A trusted target-self handle, including a vinput-looking prefix, belongs
     // to its original host decoder. Prefix values confer no payload authority.
     UINT result = o_GetRawInputData(h, cmd, data, pcb, hdr);
+    if(result!=(UINT)-1&&data&&result>=sizeof(RAWINPUTHEADER)&&(cmd==RID_INPUT||cmd==RID_HEADER)){
+        const DWORD nativeError=GetLastError();RAWINPUTHEADER observed{};
+        if(ReaderBufferLoad(data,&observed,sizeof(observed)))PadApiRecordHidReturn(cmd==RID_INPUT,cmd==RID_HEADER,observed.dwType==RIM_TYPEHID);else ++g_padApiHidHeaderUnknown;
+        SetLastError(nativeError); // optional metadata failure must not change native API semantics
+    }
     if (result != (UINT)-1 && cmd == RID_INPUT && data && result >= sizeof(RAWINPUTHEADER) + sizeof(RAWKEYBOARD)) {
         const RAWINPUT& r = *(const RAWINPUT*)data;
         if (r.header.dwType == RIM_TYPEKEYBOARD && r.data.keyboard.VKey < 256)
@@ -839,7 +846,7 @@ UINT WINAPI h_GetRawInputBuffer(PRAWINPUT data,PUINT pcb,UINT hdr){
 BOOL WINAPI h_RegisterRawInputDevices(PCRAWINPUTDEVICE devices,UINT count,UINT size){
     C.reg_raw++;BOOL result=o_RegisterRawInputDevices(devices,count,size);DWORD nativeError=GetLastError();
     g_rawLastRegistrationResult=(1ULL<<63)|(result?(1ULL<<32):0)|(unsigned long long)(result?0:nativeError);
-    if(result){C.reg_raw_ok++;if(devices&&size==sizeof(RAWINPUTDEVICE)&&count<=1024){for(UINT i=0;i<count;i++){const auto& d=devices[i];if(d.dwFlags&RIDEV_REMOVE)C.reg_raw_removed++;Log("RegisterRawInputDevices success page=%u usage=%u flags=0x%X target=%p",d.usUsagePage,d.usUsage,d.dwFlags,d.hwndTarget);}}}
+    if(result){C.reg_raw_ok++;if(devices&&size==sizeof(RAWINPUTDEVICE)&&count<=1024){for(UINT i=0;i<count;i++){const auto& d=devices[i];PadApiRecordHidRegistration(d.usUsagePage,d.usUsage,(d.dwFlags&RIDEV_REMOVE)!=0,(d.dwFlags&RIDEV_EXCLUDE)!=0);if(d.dwFlags&RIDEV_REMOVE)C.reg_raw_removed++;Log("RegisterRawInputDevices success page=%u usage=%u flags=0x%X target=%p",d.usUsagePage,d.usUsage,d.dwFlags,d.hwndTarget);}}}
     else{C.reg_raw_failed++;Log("RegisterRawInputDevices failed error=%lu count=%u size=%u",nativeError,count,size);}
     SetLastError(nativeError);return result; // logging must not erase the caller's native error
 }
@@ -1013,6 +1020,7 @@ PFN_DIGDD o_DILGetDeviceData[kDiLegacySets] = {};
 PFN_DIACQ o_DILAcquire[kDiLegacySets] = {};
 bool g_diHooked = false;
 int DevType(void* self) {
+    g_padApiLastDiType=~0u;
     // COM addresses can be recycled after Release. Query the current object's
     // metadata instead of reusing a type belonging to an earlier lifetime.
     DIDEVCAPS caps = {}; caps.dwSize = sizeof(caps);
@@ -1020,12 +1028,22 @@ int DevType(void* self) {
     int t = 0;
     HRESULT chr = gc(self, &caps);
     if (FAILED(chr)) { caps = {}; caps.dwSize = 24; chr = gc(self, &caps); } // DX3 DIDEVCAPS
-    if (SUCCEEDED(chr)) { BYTE dt = GET_DIDEVICE_TYPE(caps.dwDevType); t = (dt == DI8DEVTYPE_KEYBOARD || dt == 3) ? 1 : (dt == DI8DEVTYPE_MOUSE || dt == 2) ? 2 : 0; }
-    if(FAILED(chr))return -1; // unknown is not a proven other device, and must be retried
+    if (SUCCEEDED(chr)) { BYTE dt = GET_DIDEVICE_TYPE(caps.dwDevType); g_padApiLastDiType=dt; t = (dt == DI8DEVTYPE_KEYBOARD || dt == 3) ? 1 : (dt == DI8DEVTYPE_MOUSE || dt == 2) ? 2 : 0; }
+    if(FAILED(chr)){g_padApiLastDiType=~0u;return -1;} // outer failed query must not retain nested callback metadata
     return t;
 }
+#include "vi_claimed_di.inl"
 HRESULT DIAcquireImpl(PFN_DIACQ orig, void* self) {
     C.di_acq++;
+    ClaimNativeOperation operation;
+    if(!operation){
+        const int type=ClaimedDiProtectedType(self);
+        if(type==-2)return DIERR_OTHERAPPHASPRIO;
+        if(type<0){++g_claimDiUnknownRefused;return DIERR_NOTINITIALIZED;}
+        // No cooperative-mode getter/lifetime-owned registry exists. Even a
+        // recently normalized mouse cannot safely authorize a later Acquire.
+        if(type==2){++g_claimDiAcquireBlocked;return DIERR_OTHERAPPHASPRIO;}
+    }
     HRESULT hr = orig(self);
     if (FAILED(hr) && Faking()) { C.di_fake++; return DI_OK; }
     return hr;
@@ -1050,6 +1068,7 @@ const BYTE* DiScanMap() {
 }
 HRESULT DIGetDeviceStateImpl(PFN_DIGDS orig, void* self, DWORD cb, LPVOID data) {
     const bool mask=ReaderMask(ReaderDiState);const int type=DevType(self);
+    PadApiRecordDiRead(g_padApiLastDiType,false);
     if(type==0)return orig(self,cb,data); // proven other devices keep their native state format/policy
     const bool kbd=cb==256,mouse=cb==sizeof(DIMOUSESTATE)||cb==sizeof(DIMOUSESTATE2);
     const bool kbMouse=type==1||type==2||kbd||mouse;
@@ -1097,7 +1116,8 @@ HRESULT DIGetDeviceStateImpl(PFN_DIGDS orig, void* self, DWORD cb, LPVOID data) 
     return hr;
 }
 HRESULT DIGetDeviceDataImpl(PFN_DIGDD orig,void* self,DWORD cbObj,LPDIDEVICEOBJECTDATA rg,LPDWORD inout,DWORD flags){
-    const int type=DevType(self);const bool mask=ReaderMask(ReaderDiBuffer);
+    const int type=DevType(self);const unsigned observedType=g_padApiLastDiType;const bool mask=ReaderMask(ReaderDiBuffer);
+    PadApiRecordDiRead(observedType,true);
     if(type==0||!inout)return orig(self,cbObj,rg,inout,flags);
     if(type==1)C.di_data_kbd++;else if(type==2)C.di_data_mouse++;
     DWORD req=0;
@@ -1170,22 +1190,23 @@ std::atomic<int> g_padSetMask{0};
 #include "vi_pad_readiness_state.inl"
 DWORD XGSCommon(int i, DWORD user, XST* s) {
     C.xinput++;
+    PadApiStateCall observed((unsigned)i,user);
     // This branch previously discarded every native result field. Do not enter
     // a cold device-enumeration call while an isolated virtual press is active.
     if(user==0&&s){
         std::lock_guard<std::mutex> stateLock(g_padStateMx);
         if(g_padActive&&Isolating()){
             XST result{};PadMergeLocked(i,result);
-            if(!ReaderBufferStore(s,&result,sizeof(result)))return ERROR_BAD_ARGUMENTS;
-            PadRecordReturnLocked(i,result,true);return ERROR_SUCCESS;
+            if(!ReaderBufferStore(s,&result,sizeof(result)))return observed.Finish((DWORD)ERROR_BAD_ARGUMENTS);
+            PadRecordReturnLocked(i,result,true);return observed.Finish((DWORD)ERROR_SUCCESS);
         }
     }
     DWORD r=o_XGS[i](user,s);
-    if(user!=0||!s)return r;
-    std::lock_guard<std::mutex> stateLock(g_padStateMx);if(!g_padActive)return r;
+    if(user!=0||!s)return observed.Finish(r);
+    std::lock_guard<std::mutex> stateLock(g_padStateMx);if(!g_padActive)return observed.Finish(r);
     if(r!=ERROR_SUCCESS){memset(s,0,sizeof(*s));r=ERROR_SUCCESS;}
     if(Isolating())memset(&s->gp,0,sizeof(s->gp));
-    PadMergeLocked(i,*s);PadRecordReturnLocked(i,*s,false);return r;
+    PadMergeLocked(i,*s);PadRecordReturnLocked(i,*s,false);return observed.Finish(r);
 }
 template <int I> DWORD WINAPI h_XGS(DWORD user, XST* s) { return XGSCommon(I, user, s); }
 void* kXgsDetours[8] = {(void*)&h_XGS<0>, (void*)&h_XGS<1>, (void*)&h_XGS<2>, (void*)&h_XGS<3>,
@@ -1476,9 +1497,9 @@ void InstallUser32Hooks() {
     keyboardSafe=g_translationInstalled.load()&&keyboardSafe;
     InstallCursorHooks();
     HookApi(u, "WindowFromPoint", &h_WindowFromPoint, &o_WindowFromPoint);
-    HookApi(u, "GetRawInputData", &h_GetRawInputData, &o_GetRawInputData);
+    g_padApiRawDataInstalled=HookApi(u, "GetRawInputData", &h_GetRawInputData, &o_GetRawInputData)&&o_GetRawInputData;
     HookApi(u, "GetRawInputBuffer", &h_GetRawInputBuffer, &o_GetRawInputBuffer);
-    HookApi(u, "RegisterRawInputDevices", &h_RegisterRawInputDevices, &o_RegisterRawInputDevices);
+    g_padApiRawRegistrationInstalled=HookApi(u, "RegisterRawInputDevices", &h_RegisterRawInputDevices, &o_RegisterRawInputDevices)&&o_RegisterRawInputDevices;
     InstallSelfRawHooks(); // raw envelope remains optional; posted Dispatch scope is required
     keyboardSafe=g_postedDispatchReady.load()&&keyboardSafe;
     // Optional graphics/raw/device APIs may fail without disarming keyboard readiness.
@@ -1522,7 +1543,9 @@ void InstallDxgiHooks() {
     if (ctx) ctx->Release(); if (dev) dev->Release(); if (sc) sc->Release();
     DestroyWindow(hw); UnregisterClassW(wc.lpszClassName, wc.hInstance);
 }
+#include "vi_claimed_di_hooks.inl"
 void TryHookDInput() {
+    TryClaimedDi8();
     if (g_diHooked) return;
     HMODULE h = GetModuleHandleW(L"dinput8.dll"); if (!h) return;
     g_diHooked = true;
@@ -1534,7 +1557,7 @@ void TryHookDInput() {
     IDirectInputDevice8W* dev = nullptr;
     if (SUCCEEDED(di->CreateDevice(GUID_SysKeyboard, &dev, nullptr)) && dev) {
         void** vt = *(void***)dev;
-        HookAddr("IDirectInputDevice8::Acquire", vt[7], (void*)&h_DIAcquire, (void**)&o_DIAcquire);
+        ClaimDiHookKnownAcquire("IDirectInputDevice8::Acquire", vt[7], (void*)&h_DIAcquire, &o_DIAcquire);
         HookAddr("IDirectInputDevice8::GetDeviceState", vt[9], (void*)&h_DIGetDeviceState, (void**)&o_DIGetDeviceState);
         HookAddr("IDirectInputDevice8::GetDeviceData", vt[10], (void*)&h_DIGetDeviceData_entry, (void**)&o_DIGetDeviceData);
         dev->Release();
@@ -1546,6 +1569,7 @@ void TryHookDInput() {
 // so dinput8 hooks never see them. Keyboard and mouse may share implementation functions: each distinct one is hooked once.
 bool g_diLegacyHooked = false;
 void TryHookDInputLegacy() {
+    TryClaimedDiLegacy();
     if (g_diLegacyHooked) return;
     HMODULE h = GetModuleHandleW(L"dinput.dll"); if (!h) return;
     g_diLegacyHooked = true;
@@ -1565,10 +1589,10 @@ void TryHookDInputLegacy() {
             seen[nSeen++] = vt[9];
             bool ok = true;
             switch (set) {
-                case 0: ok = HookAddr("IDirectInputDeviceA::Acquire", vt[7], (void*)&h_DILAcquire<0>, (void**)&o_DILAcquire[0])
+                case 0: ok = ClaimDiHookKnownAcquire("IDirectInputDeviceA::Acquire", vt[7], (void*)&h_DILAcquire<0>, &o_DILAcquire[0])
                           && HookAddr("IDirectInputDeviceA::GetDeviceState", vt[9], (void*)&h_DILGetDeviceState<0>, (void**)&o_DILGetDeviceState[0])
                           && HookAddr("IDirectInputDeviceA::GetDeviceData", vt[10], (void*)&h_DILGetDeviceData<0>, (void**)&o_DILGetDeviceData[0]); break;
-                case 1: ok = HookAddr("IDirectInputDeviceA#2::Acquire", vt[7], (void*)&h_DILAcquire<1>, (void**)&o_DILAcquire[1])
+                case 1: ok = ClaimDiHookKnownAcquire("IDirectInputDeviceA#2::Acquire", vt[7], (void*)&h_DILAcquire<1>, &o_DILAcquire[1])
                           && HookAddr("IDirectInputDeviceA#2::GetDeviceState", vt[9], (void*)&h_DILGetDeviceState<1>, (void**)&o_DILGetDeviceState[1])
                           && HookAddr("IDirectInputDeviceA#2::GetDeviceData", vt[10], (void*)&h_DILGetDeviceData<1>, (void**)&o_DILGetDeviceData[1]); break;
             }
@@ -1579,15 +1603,17 @@ void TryHookDInputLegacy() {
     di->Release();
     Log("dinput (legacy) hooks installed: %d vtable set(s)", set);
 }
+#include "vi_pad_api_census_exports.inl"
 void TryHookXInput() {
+    TryHookPadApiCensus();
     for (int i = 0; i < 4; i++) {
         if (g_xHooked[i]) continue;
         HMODULE h = GetModuleHandleW(kXinputDlls[i]); if (!h) continue;
         g_xHooked[i] = true;
         char nm[64]; sprintf_s(nm, "XInputGetState[%d]", i);
-        HookAddr(nm, (void*)GetProcAddress(h, "XInputGetState"), kXgsDetours[i], (void**)&o_XGS[i]);
+        if(HookAddr(nm, (void*)GetProcAddress(h, "XInputGetState"), kXgsDetours[i], (void**)&o_XGS[i])&&o_XGS[i])g_padApiStateInstalled.fetch_or(1u<<i);
         void* ex = (void*)GetProcAddress(h, MAKEINTRESOURCEA(100));   // XInputGetStateEx (xinput1_3 / 1_4 only)
-        if (ex) { sprintf_s(nm, "XInputGetStateEx[%d]", i); HookAddr(nm, ex, kXgsDetours[i + 4], (void**)&o_XGS[i + 4]); }
+        if (ex) { sprintf_s(nm, "XInputGetStateEx[%d]", i); if(HookAddr(nm, ex, kXgsDetours[i + 4], (void**)&o_XGS[i + 4])&&o_XGS[i+4])g_padApiStateInstalled.fetch_or(1u<<(i+4)); }
     }
 }
 
@@ -1909,9 +1935,14 @@ std::string ClaimGate(const std::string& cmd, const JObj& j) {
         double ttl = JNum(j, "ttl", 300);
         if (!(ttl >= 1 && ttl <= 86400)) return ErrJ("claim ttl must be 1..86400 s");
         if (active && g_claimOwner != owner && !force) { g_claimRefused++; return ClaimRefusal("claim refused"); }
+        ClaimNativeAdmission nativeAdmission;
+        if(!nativeAdmission)return ClaimNativeAdmissionRefusal();
         if (!active || g_claimOwner != owner) { Log("CLAIM %s by '%s' (ttl %g s)%s", active ? "TAKEN OVER" : "set", owner.c_str(), ttl, active ? (" from '" + g_claimOwner + "'").c_str() : ""); g_claimSince = now; }
         if(!active||g_claimOwner!=owner)JobsEpochChange();
-        g_claimOwner = owner; g_claimTtlMs = (DWORD)(ttl * 1000); g_claimExpiry = now + g_claimTtlMs;g_jobClaimExpiry=g_claimExpiry;
+        g_claimOwner = owner; g_claimTtlMs = (DWORD)(ttl * 1000);
+        const ULONGLONG committedNow=HousekeepingNow();g_claimExpiry = committedNow + g_claimTtlMs;g_jobClaimExpiry=g_claimExpiry;
+        NativeClipScopeChanged(); // Flag only; conditional cleanup remains outside claim/input locks.
+        // nativeAdmission ends AFTER the live expiry is published.
         return std::string();
     }
     if (cmd == "unclaim") {
@@ -1921,7 +1952,17 @@ std::string ClaimGate(const std::string& cmd, const JObj& j) {
         return std::string();
     }
     if (IsOpenCommand(cmd) || !active) return std::string();
-    if (g_claimOwner == owner) { g_claimExpiry = now + g_claimTtlMs;g_jobClaimExpiry=g_claimExpiry; return std::string(); }
+    if (g_claimOwner == owner) {
+        ClaimNativeAdmission nativeAdmission;
+        if(!nativeAdmission){
+            // Safety cleanup stays available, but cannot revive an expired claim over an in-flight native call.
+            const bool cleanup=cmd=="release"||cmd=="up"||cmd=="mouseup"||cmd=="job-cancel"||(cmd=="pad"&&PadIsOff(JStr(j,"buttons")));
+            if(cleanup){++g_claimCleanupRenewalSkipped;return std::string();}
+            return ClaimNativeAdmissionRefusal();
+        }
+        const ULONGLONG committedNow=HousekeepingNow();g_claimExpiry=committedNow+g_claimTtlMs;g_jobClaimExpiry=g_claimExpiry;
+        NativeClipScopeChanged();return std::string();
+    }
     if (force) { Log("CLAIM bypassed by '%s' (--force-claim) for '%s'", owner.c_str(), cmd.c_str()); return std::string(); }
     g_claimRefused++;
     return ClaimRefusal(("'" + cmd + "' refused").c_str());
@@ -1933,10 +1974,15 @@ bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_readiness.inl"
 #include "vi_cursor_status.inl"
 #include "vi_wndproc_status.inl"
+#include "vi_claimed_di_status.inl"
+#include "vi_pad_api_census_json.inl"
+#include "vi_d3d9_diagnostics_json.inl"
 
 std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
     o.num("key_sequence_version",1);
+    o.num("pad_api_census_version",1);o.raw("pad_api_census",PadApiCensusJson());
+    o.num("claimed_di_guard_version",1);o.raw("claimed_di_guard",ClaimedDiStatusJson());
     o.num("cursor_guard_version",1);o.raw("cursor_guard",CursorGuardStatus());
     o.num("pad_timeline_version",2);o.num("pad_readiness_version",1);o.raw("virtual_pad",PadReadinessStatusJson());
 #ifdef _WIN64
@@ -2001,7 +2047,7 @@ std::string StatusJson() {
         d12.num("submits", (double)g_c12.submits); d12.num("releases", (double)g_c12.releases); d12.num("leaks", (double)g_c12.leaks); d12.num("resizes", (double)g_resizes.load());
         o.raw("d3d12", d12.done());
         o.bol("gl_hooked", o_wglSwapBuffers != nullptr);
-        {JOut d;d.bol("hooked",o_D9Factory||o_D9FactoryEx);d.num("requests",g_d9Requests);d.num("emulated",g_d9Emulated);d.num("refused",g_d9Refused);d.num("failed",g_d9Failed);d.bol("blocked_before_first_present",D9BlockedBeforePresent());d.num("last_hresult",(double)(unsigned long)g_d9LastResult.load());o.raw("d3d9",d.done());}
+        {JOut d;d.bol("hooked",o_D9Factory||o_D9FactoryEx);d.num("requests",g_d9Requests);d.num("emulated",g_d9Emulated);d.num("refused",g_d9Refused);d.num("failed",g_d9Failed);d.bol("blocked_before_first_present",D9BlockedBeforePresent());d.num("last_hresult",(double)(unsigned long)g_d9LastResult.load());d.raw("diagnostics",D9DiagnosticsJson());o.raw("d3d9",d.done());}
         {JOut d;d.bol("hooked",o_DdCreate||o_DdCreateEx);d.num("cooperative_requests",g_ddCoop);d.num("mode_requests",g_ddModes);d.num("emulated",g_ddEmulated);d.num("refused",g_ddRefused);d.num("failed",g_ddFailed);d.num("presented",g_ddPresented);d.num("deferred_for_palette",g_ddDeferredPalette);d.num("objects",g_ddRecordCount);d.num("versions",g_ddVersionMask);d.bol("blocked",g_ddBlocked);d.bol("blocked_before_first_present",DdBlockedBeforePresent());d.num("last_hresult",(double)(unsigned long)g_ddLastResult.load());
          std::shared_ptr<DdDevice> device;{std::lock_guard<std::mutex> lock(g_ddLastMx);device=g_ddLastDevice.lock();}auto mode=DdSnapshot(device);d.bol("mode_active",mode.active);d.num("width",mode.width);d.num("height",mode.height);d.num("bpp",mode.bpp);d.num("refresh",mode.refresh);o.raw("ddraw",d.done());}
         {

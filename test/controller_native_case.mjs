@@ -12,7 +12,7 @@ const root=realpathSync(spec.repo_root),mcp=realpathSync(spec.mcp_root),exe=real
 if(!Number.isSafeInteger(spec.pid)||spec.pid<1||!Number.isSafeInteger(spec.case_token)||spec.case_token<1)throw Error("invalid owned identity token");
 const under=p=>resolve(p).toLowerCase().startsWith((root+sep).toLowerCase());
 for(const p of [mcp,exe,spec.target_log,spec.png_path])if(!under(p))throw Error("case path escaped private repository");
-if(!["pad","pad_move","pad_look","pad_rotate"].includes(spec.tool))throw Error("controller case tool outside narrow allowlist");
+if(!["pad","pad_move","pad_look","pad_rotate","pad_drive"].includes(spec.tool))throw Error("controller case tool outside narrow allowlist");
 const req=createRequire(pathToFileURL(join(mcp,"package.json")));
 const {Client}=await import(pathToFileURL(req.resolve("@modelcontextprotocol/sdk/client/index.js")).href);
 const {StdioClientTransport}=await import(pathToFileURL(req.resolve("@modelcontextprotocol/sdk/client/stdio.js")).href);

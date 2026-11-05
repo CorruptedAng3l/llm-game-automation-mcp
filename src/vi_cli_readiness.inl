@@ -1,6 +1,7 @@
 // Unlike legacy Request, readiness includes a bounded receive deadline. A hung
 // pipe peer cannot make the injector claim success or wait indefinitely.
 #include "vi_ready_json.h"
+#include "vi_launch_injection_failure.h"
 static bool InjectHooksOnly(const Args& args,bool& value,std::string& error) {
  value=false;unsigned seen=0;
  for(const auto& option:args.opt)if(option.first=="hooks-only") {
@@ -36,6 +37,6 @@ static int ReportInputReady(FILE* output,DWORD pid,const std::wstring& dll,bool 
  std::string response;const bool received=RequestInputReady(pid,hooksOnly,response,target);
  const auto reply=vi_ready_json::Parse(response);const bool supported=received&&reply.supported;
  const bool ok=supported&&reply.ok&&reply.hooks&&CursorGuardHandshakeReady(response)&&(hooksOnly||(reply.window&&reply.queue));
- if(captured||!quiet||!ok)EmitInjectReply(output,captured,"{\"ok\":%s,\"pid\":%lu,\"injected\":true,\"%s\":\"%s\",\"already_injected\":%s,\"readiness\":%s%s%s}\n",ok?"true":"false",pid,already?"requested_dll":"dll",JEsc(W2U(dll)).c_str(),already?"true":"false",supported?response.c_str():"null",already?",\"note\":\"already injected\"":"",ok?"":received?(supported?",\"error\":\"DLL loaded but input infrastructure readiness failed; inspect readiness\"":",\"error\":\"DLL pipe exists but readiness v1 is unsupported; restart the owned target with the matching updated DLL\""):",\"error\":\"DLL loaded but readiness transport/deadline failed; input readiness is unconfirmed\"");
+ if(captured||!quiet||!ok)EmitInjectReply(output,captured,"{\"ok\":%s,\"pid\":%lu,\"injected\":true,\"ready\":%s,\"readiness_scope\":\"%s\",\"hooks_ready\":%s,\"%s\":\"%s\",\"already_injected\":%s,\"readiness\":%s%s%s}\n",ok?"true":"false",pid,vi_launch_injection::ReadyValue(hooksOnly,ok),hooksOnly?"hooks":"window_queue",supported?(reply.hooks?"true":"false"):"null",already?"requested_dll":"dll",JEsc(W2U(dll)).c_str(),already?"true":"false",supported?response.c_str():"null",already?",\"note\":\"already injected\"":"",ok?"":received?(supported?",\"error\":\"DLL loaded but input infrastructure readiness failed; inspect readiness\"":",\"error\":\"DLL pipe exists but readiness v1 is unsupported; restart the owned target with the matching updated DLL\""):",\"error\":\"DLL loaded but readiness transport/deadline failed; input readiness is unconfirmed\"");
  return ok?0:2;
 }

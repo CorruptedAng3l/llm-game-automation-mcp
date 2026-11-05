@@ -146,6 +146,7 @@ static Reply CmdDoctor(DWORD pid, const Args& a) {
     if (unreportedCapturePath) { capturePath = "null"; suggestions.push_back("The target reports capture activity but no path. Failed attempts or an older build that omits PrintWindow can cause this; inspect the capture command result. No successful capture is inferred from this counter."); }
     if (available && capturePath == "\"none\"") suggestions.push_back("No capture has completed yet. capture_path is the last successful path, not a guarantee that native capture is available.");
     if (available && frameApi == "\"none\"") suggestions.push_back("No intercepted game Present has been observed. PrintWindow may work; native capture needs a supported renderer and a presenting game window.");
+    if(const char* hint=vi_launch_injection::ActivationHint(available,Field(st,"app_active"),frameApi))suggestions.push_back(hint);
     if (appContainer == "true") suggestions.push_back("AppContainer keyboard events may bypass window messages. Use pad for games that read XInput; captures are staged in an accessible directory by the CLI.");
     if (available && Field(counters, "wm_input_dropped") != "null" && strtod(Field(counters, "wm_input_dropped").c_str(), nullptr) > 0)
         suggestions.push_back("Background isolation dropped external WM_INPUT. Another in-process tool's own synthetic raw handles can be dropped too; use a controlled isolate=false test only when appropriate.");

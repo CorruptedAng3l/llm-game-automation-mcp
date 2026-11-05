@@ -31,6 +31,15 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_d3d9_windowed.cpp" /F
   $text=Log $log;$s=Vi $p.Id @('status')
   $caseEvidence=@{arch=$arch;api=$api;policy=$policy;native_context=[bool]$NativeContext;target_pid=$p.Id;log_path=$log;dll=$dll;status=$s;target_log=$text;desktop_before=$desktop;desktop_after=$null;desktop_snapshot_error=$null;check_index_before_case_assertions=$checks.Count}
   $evidence.Add($caseEvidence)
+  $diagnostics=$s.d3d9.diagnostics
+  Check ($diagnostics.version-eq1-and@($diagnostics.operations).Count-eq5) "$arch D3D$api $policy actual native status exposes the versioned five-operation diagnostics"
+  $createName=if($api-eq'ex'){'CreateDeviceEx'}else{'CreateDevice'}
+  $create=$diagnostics.operations|Where-Object method -eq $createName|Select-Object -First 1
+  if($policy-eq'refuse'){
+   Check ($create.wrapper_entries-match'^[1-9][0-9]*$'-and$create.wrapper_failures-match'^[1-9][0-9]*$'-and$create.native_calls-eq'0'-and$create.native_returns-eq'0'-and$null-eq$create.last_native_hresult) "$arch D3D$api refusal diagnostics distinguish wrapper failure from an uncalled native create"
+  }else{
+   Check ($create.native_calls-match'^[1-9][0-9]*$'-and$create.native_returns-match'^[1-9][0-9]*$'-and$create.native_success_returns-match'^[1-9][0-9]*$'-and$null-ne$create.last_native_hresult) "$arch D3D$api $policy diagnostics retain successful original create returns"
+  }
   try{$caseEvidence.desktop_after=[ViD9Test]::Desktop()}catch{$caseEvidence.desktop_snapshot_error=$_.Exception.Message}
   if($policy-eq'refuse'){
    Check ($text-match'EXIT 10'-and$text-match'NATIVE_BOUNDARY blocked=0 normal=0 bad_mode=0'-and$s.d3d9.refused-eq1-and$s.d3d9.blocked_before_first_present) "$arch D3D$api explicit refusal stops before native fullscreen"

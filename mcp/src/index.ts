@@ -3,7 +3,7 @@
 // through vinput. Vinput-backed tools return CLI JSON with "ok" surfaced as isError; wait uses only a host timer.
 // Offline games only: vinput injects a DLL and refuses targets with a known anti-cheat (see DISCLAIMER.md).
 import { sizeMismatchWarning } from "./launchsize.js";
-import { MOVE_DIRECTIONS, moveVector, smoothMoveStates, calibratedLook, rotateStick } from "./controller.js";
+import { MOVE_DIRECTIONS, moveVector, smoothMoveStates, calibratedLook, rotateStick, driveStates } from "./controller.js";
 import { closeSync, fstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -17,8 +17,9 @@ import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 import { completedJobView, isCompletedJobOutcome } from "./completedjob.js";
 import { burstImage } from "./burstimage.js";
+import { requireSequenceWait, sequenceWaitError, waitSequence } from "./sequencewait.js";
 
-const VERSION = "0.2.2";
+const VERSION = "0.2.3";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -102,9 +103,13 @@ const region = (r?: { x: number; y: number; w: number; h: number }) => (r ? ["--
 const opt = (flag: string, v: unknown) => (v === undefined || v === null || v === false ? [] : v === true ? [flag] : [flag, String(v)]);
 
 const pid = z.number().int().positive().describe("Process id of the game, as returned by launch / attach / list_targets.");
-const regionSchema = z.object({
+const regionRect = z.object({
   x: z.number().int().min(0), y: z.number().int().min(0), w: z.number().int().positive(), h: z.number().int().positive(),
-}).describe("Rectangle in client pixels (same as capture pixels): x, y = top-left corner, w, h = size.");
+});
+const regionSchema = z.union([regionRect,
+  z.tuple([regionRect.shape.x, regionRect.shape.y, regionRect.shape.w, regionRect.shape.h])
+    .transform(([x, y, w, h]) => ({ x, y, w, h })),
+]).describe("Rectangle in client pixels: {x,y,w,h} or [x,y,w,h]. Integer top-left x/y >=0 and positive integer width/height; both forms are identical.");
 const button = z.enum(["left", "right", "middle", "x1", "x2"]);
 const timeoutMs = (def: number) => z.number().int().min(0).max(600000).optional().describe(`How long to keep looking, in ms (default ${def}).`);
 
@@ -141,7 +146,18 @@ function tool<S extends z.ZodRawShape>(name: string, title: string, description:
         const out = await run(a);
         if (p !== undefined && out.isError) {
           const ex = await confirmExit(p);
-          if (ex) return exitedReply(p, ex.code);
+          if (ex) {
+            if (name === "key_sequence" && a.wait === true) {
+              try {
+                const j = JSON.parse((out.content[0] as { text: string }).text);
+                if (j.sequence_input && j.sequence_wait) {
+                  out.content[0] = { type: "text", text: JSON.stringify({ ...j, target_exited: true, pid: p, exit_code: ex.code }) };
+                  return out;
+                }
+              } catch { /* Pre-action or malformed replies keep the existing exit behavior. */ }
+            }
+            return exitedReply(p, ex.code);
+          }
         }
         return out;
       } catch (e) { return fail(`${name}: ${(e as Error).message}`); }
@@ -576,7 +592,7 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
   }
   return out;
   } catch (e) {
-    if (!observe) throw e; // Keep non-pad exception behavior unchanged.
+    if (!observe) throw e; // Legacy action callers without observation options keep their exception behavior.
     let j: Record<string, unknown> = {};
     try { j = JSON.parse((out.content[0] as { text: string }).text); } catch { /* action replies normally contain JSON */ }
     const error = e instanceof Error ? e.message : String(e);
@@ -585,6 +601,33 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
     return out; // The action already ran; never repeat it because its observation failed.
   }
 }
+
+const actionCaptureArgs = {
+  ...captureImageArgs,
+  max_width: captureImageArgs.max_width.describe("Action image width cap (default 960 unless scale is explicit); never upscales. Same image-to-client mapping as capture."),
+  scale: captureImageArgs.scale.describe("Action image factor: PNG 0.05..8 (MCP enlargement), JPEG 0.05..1; give only one of scale and max_width."),
+  format: captureImageArgs.format.describe("png (default, exact pixels) or jpeg (lossy observation, requires native capture output support). quality applies only to jpeg."),
+  region: captureImageArgs.region.describe("Pre-scale client-pixel rectangle for the action observation, not coordinates in a previous image."),
+  capture_after: captureAfterSchema,
+  capture_settle_ms: z.number().int().min(0).max(5000).optional().describe(
+    "Extra timer delay after a successful CLI reply, before capture_after (default 0). Requires capture_after. Async jobs may still run and hold:true remains held; this does not wait for their completion."),
+};
+function actionCaptureError(a: CaptureImageOptions & { capture_after?: boolean | number; capture_settle_ms?: number }): string | undefined {
+  const disabled = a.capture_after === undefined || a.capture_after === false;
+  if (a.capture_settle_ms !== undefined && disabled) return "capture_settle_ms requires capture_after";
+  if (disabled && [a.region, a.max_width, a.scale, a.format, a.quality].some((v) => v !== undefined))
+    return "action image options require enabled capture_after";
+  if (a.scale !== undefined && a.max_width !== undefined) return "give only one of scale, max_width";
+  if (a.format === "jpeg" && a.scale !== undefined && a.scale > 1) return "JPEG action images support scale <= 1; use PNG for MCP enlargement";
+  return validateFormat(a);
+}
+const actionObservation = (a: CaptureImageOptions & { pid: number; capture_settle_ms?: number; async?: boolean; hold?: boolean }): PostActionObservation => ({
+  settle_ms_requested: a.capture_settle_ms ?? 0, attachment_epoch: captureSessionEpoch.get(a.pid) ?? 0,
+  action_state: a.async ? "async_job_may_be_running" : a.hold ? "held_until_changed" : "action_reply",
+  image_options: { region: a.region, max_width: a.max_width ?? (a.scale === undefined ? 960 : undefined),
+    scale: a.scale, format: a.format, quality: a.quality },
+});
+
 
 tool("ocr", "Read text on screen",
   "OCR the current frame with the built-in Windows OCR engine. Returns text and lines[] with boxes [x,y,w,h] in client " +
@@ -620,9 +663,15 @@ tool("click_text", "Click text on screen",
   "the text matches more than once and nth is not given. Verify the result with wait_text / capture.",
   { pid, ...textMatch, timeout_ms: timeoutMs(5000), button: button.optional(),
     optional: z.boolean().optional().describe("Succeed with skipped:true if the text never appears (for dialogs that may not show)."),
-    capture_after: captureAfterSchema },
-  async (a) => look(a.pid, reply(await runVinput([...at(a.pid), "click-text", ...textArgs(a), ...opt("--timeout", a.timeout_ms), ...opt("--button", a.button),
-    ...opt("--optional", a.optional)], (a.timeout_ms ?? 5000) + 60000)), a.capture_after));
+    ...actionCaptureArgs, region: captureImageArgs.region.describe("Client-pixel OCR search region; also bounds an enabled post-action image.") },
+  async (a) => {
+    const captureError = actionCaptureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region });
+    if (captureError) return fail(captureError);
+    const observation = actionObservation(a);
+    const r = await runVinput([...at(a.pid), "click-text", ...textArgs(a), ...opt("--timeout", a.timeout_ms), ...opt("--button", a.button),
+      ...opt("--optional", a.optional)], (a.timeout_ms ?? 5000) + 60000);
+    return look(a.pid, reply(r), a.capture_after, observation);
+  });
 
 tool("wait_text", "Wait for text",
   "Block until text appears on screen (or, with gone:true, disappears). Times out with timed_out:true and ocr_saw.",
@@ -803,8 +852,11 @@ tool("click", "Click",
       "N = require both reads within N extra ms each (error if not seen); 0 = do not wait. The reply's evidence " +
       "{di_poll_confirmed, di_release_confirmed} says what was observed; a read is not proof the game acted."),
     di_release_timeout_ms: z.number().int().min(0).max(5000).optional().describe("Separate cap for the release read (0 = do not wait for it)."),
-    ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema },
+    ...coordArgs, ...edgeArgs, ...parkArg, ...actionCaptureArgs },
   async (a) => {
+    const captureError = actionCaptureError(a);
+    if (captureError) return fail(captureError);
+    const observation = actionObservation(a);
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     let pos: string[] = a.x === undefined ? [] : [String(a.x), String(a.y)];
     let mappedInfo: Record<string, unknown> | undefined;
@@ -823,27 +875,36 @@ tool("click", "Click",
       60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0) + ((a.di_poll_timeout_ms ?? 1000) + (a.di_release_timeout_ms ?? 1000)) * (a.count ?? 1));
     const parked = a.park_cursor && cr.ok ? await parkCursor(a.pid) : undefined;
     const evidence = inputEvidence(cr.json);
-    return look(a.pid, reply(cr, { ...mappedInfo, ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after);
+    return look(a.pid, reply(cr, { ...mappedInfo, ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after, observation);
   });
 
 tool("move", "Move the cursor",
   "Move the game's virtual cursor to an absolute position (hover). The real cursor is not touched.",
-  { pid, ...xy, steps: z.number().int().min(1).max(200).optional().describe("Intermediate moves (default 1)."), ...coordArgs, ...edgeArgs, capture_after: captureAfterSchema },
+  { pid, ...xy, steps: z.number().int().min(1).max(200).optional().describe("Intermediate moves (default 1)."), ...coordArgs, ...edgeArgs, ...actionCaptureArgs },
   async (a) => {
+    const captureError = actionCaptureError(a);
+    if (captureError) return fail(captureError);
+    const observation = actionObservation(a);
     const m = mapPoints(a.pid, a, [[a.x, a.y]]);
     if ("error" in m) return fail(m.error);
     const warnings = await edgeWarnings(a.pid, [{ label: "move target", x: m.pts[0][0], y: m.pts[0][1] }], a.edge_margin, a.norm);
     const mr = await runVinput([...at(a.pid), "mouse", String(m.pts[0][0]), String(m.pts[0][1]), ...opt("--norm", a.norm),
       ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000);
     const evidence = inputEvidence(mr.json);
-    return look(a.pid, reply(mr, { ...(m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : {}), ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}) }), a.capture_after);
+    return look(a.pid, reply(mr, { ...(m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : {}), ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}) }), a.capture_after, observation);
   });
 
 tool("move_relative", "Relative mouse motion",
   "Relative mouse motion (raw input / DirectInput deltas) for mouse-look / camera control in 3D games.",
   { pid, dx: z.number().int(), dy: z.number().int(), steps: z.number().int().min(1).max(200).optional(),
-    raw: z.boolean().optional().describe("Do not clamp the virtual cursor to the window (games that re-centre the cursor).") },
-  async (a) => reply(await runVinput([...at(a.pid), "move", String(a.dx), String(a.dy), ...opt("--steps", a.steps), ...opt("--raw", a.raw)], 60000)));
+    raw: z.boolean().optional().describe("Do not clamp the virtual cursor to the window (games that re-centre the cursor)."), ...actionCaptureArgs },
+  async (a) => {
+    const captureError = actionCaptureError(a);
+    if (captureError) return fail(captureError);
+    const observation = actionObservation(a);
+    const r = await runVinput([...at(a.pid), "move", String(a.dx), String(a.dy), ...opt("--steps", a.steps), ...opt("--raw", a.raw)], 60000);
+    return look(a.pid, reply(r), a.capture_after, observation);
+  });
 
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const DEFAULT_DRAG_HOLD_START_MS = 150, DEFAULT_DRAG_HOLD_END_MS = 250;
@@ -941,13 +1002,16 @@ tool("key", "Press a key",
   "DirectInput, GetAsyncKeyState). hold_ms keeps it down longer (e.g. walking).",
   { pid, key: keyCombo, hold_ms: z.number().int().min(1).max(60000).optional().describe("How long the key stays down (default ~80)."),
     count: z.number().int().min(1).max(100).optional(), gap_ms: z.number().int().min(0).max(10000).optional().describe("Pause between repeats."),
-    async: asyncArg, replace: replaceArg, capture_after: captureAfterSchema },
+    async: asyncArg, replace: replaceArg, ...actionCaptureArgs },
   async (a) => {
+    const captureError = actionCaptureError(a);
+    if (captureError) return fail(captureError);
+    const observation = actionObservation(a);
     if (a.async && !a.hold_ms) return fail("async needs hold_ms (a bounded hold)");
     if (a.async && (a.count ?? 1) > 1) return fail("async holds one press; count is not supported with async");
     const r = await runVinput([...at(a.pid), "key", a.key, ...(a.hold_ms ? [String(a.hold_ms)] : []), ...opt("--count", a.count), ...opt("--gap", a.gap_ms),
       ...opt("--async", a.async), ...opt("--replace", a.replace)], a.async ? 60000 : (a.hold_ms ?? 0) * (a.count ?? 1) + (a.gap_ms ?? 0) * (a.count ?? 1) + 60000);
-    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after);
+    return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after, observation);
   });
 
 tool("key_down", "Hold a key down", "Press a key (or mouse button name like 'rbutton') and keep it down until key_up or release.",
@@ -967,31 +1031,9 @@ tool("type_text", "Type text",
     return reply(await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], (a.delay_ms ?? 30) * a.text.length + 60000));
   });
 
-const padCaptureArgs = {
-  ...captureImageArgs,
-  max_width: captureImageArgs.max_width.describe("Action image width cap (default 960 unless scale is explicit); never upscales. Same image-to-client mapping as capture."),
-  scale: captureImageArgs.scale.describe("Action image factor: PNG 0.05..8 (MCP enlargement), JPEG 0.05..1; give only one of scale and max_width."),
-  format: captureImageArgs.format.describe("png (default, exact pixels) or jpeg (lossy observation, requires native capture output support). quality applies only to jpeg."),
-  region: captureImageArgs.region.describe("Pre-scale client-pixel rectangle for the action observation, not coordinates in a previous image."),
-  capture_after: captureAfterSchema,
-  capture_settle_ms: z.number().int().min(0).max(5000).optional().describe(
-    "Extra timer delay after a successful CLI reply, before capture_after (default 0). Requires capture_after. Async jobs may still run and hold:true remains held; this does not wait for their completion."),
-};
-function padCaptureError(a: CaptureImageOptions & { capture_after?: boolean | number; capture_settle_ms?: number }): string | undefined {
-  const disabled = a.capture_after === undefined || a.capture_after === false;
-  if (a.capture_settle_ms !== undefined && disabled) return "capture_settle_ms requires capture_after";
-  if (disabled && [a.region, a.max_width, a.scale, a.format, a.quality].some((v) => v !== undefined))
-    return "action image options require enabled capture_after";
-  if (a.scale !== undefined && a.max_width !== undefined) return "give only one of scale, max_width";
-  if (a.format === "jpeg" && a.scale !== undefined && a.scale > 1) return "JPEG action images support scale <= 1; use PNG for MCP enlargement";
-  return validateFormat(a);
-}
-const padObservation = (a: CaptureImageOptions & { pid: number; capture_settle_ms?: number; async?: boolean; hold?: boolean }): PostActionObservation => ({
-  settle_ms_requested: a.capture_settle_ms ?? 0, attachment_epoch: captureSessionEpoch.get(a.pid) ?? 0,
-  action_state: a.async ? "async_job_may_be_running" : a.hold ? "held_until_changed" : "action_reply",
-  image_options: { region: a.region, max_width: a.max_width ?? (a.scale === undefined ? 960 : undefined),
-    scale: a.scale, format: a.format, quality: a.quality },
-});
+const padCaptureArgs = actionCaptureArgs;
+const padCaptureError = actionCaptureError;
+const padObservation = actionObservation;
 
 tool("pad", "Gamepad (XInput)",
   "Drive virtual XInput pad 0. buttons: '+'-joined names from a b x y lb rb start back up down left right ls rs guide, " +
@@ -1152,6 +1194,38 @@ tool("pad_look", "Turn using an angular calibration",
       opposite_rate_assumed: a.degrees < 0, scope: "caller angular rate times quantized duration; calibration and game response are unverified" } }), a.capture_after, observation);
   });
 
+const drivePhase = z.object({ ms: z.number().int().min(1).max(60000),
+  throttle: trigV.optional().describe("RT throttle0..255; omitted=0."),
+  brake: trigV.optional().describe("LT0..255; often brake/reverse, game-specific. Omitted=0."),
+  steer: stickV.optional().describe("LX steering -32768..32767; omitted=0. Calibrate direction/strength in the game."),
+}).strict();
+tool("pad_drive", "Drive through bounded control phases",
+  "One time-paced owned XInput timeline for throttle(RT), steering(LX) and brake/reverse(LT). Give ms plus controls, OR phases " +
+  "with per-phase ms/controls, up to16 phases and60000ms total including any brake_after tail. Every phase is a complete snapshot, " +
+  "all other controls neutral. No process-start gaps between phases; native completion/cancel clears the job. This is requested input, " +
+  "not autopilot, collision detection, measured heading/speed or proof of stopping. Inspect a fresh image and use short calibrated legs.",
+  { pid, ms: drivePhase.shape.ms.optional(), throttle: drivePhase.shape.throttle, steer: drivePhase.shape.steer, brake: drivePhase.shape.brake,
+    phases: z.array(drivePhase).min(1).max(16).optional(),
+    brake_after: z.union([z.boolean(), z.object({ amount: trigV, ms: z.number().int().min(1).max(5000) }).strict()]).optional()
+      .describe("Default false. true explicitly requests LT255 for250ms after motion; or give {amount,ms}. LT may reverse instead of stopping."),
+    async: asyncArg, replace: replaceArg, ...padCaptureArgs,
+    capture_after: captureAfterSchema.default(0),
+    capture_settle_ms: padCaptureArgs.capture_settle_ms.describe("Post-reply observation delay, default100ms; async image does not prove job completion."), },
+  async (a) => {
+    const captureError = padCaptureError(a);
+    if (captureError) return fail(captureError);
+    if (a.phases && [a.ms, a.throttle, a.steer, a.brake].some((v) => v !== undefined)) return fail("give phases OR top-level ms/controls; nothing was sent");
+    if (!a.phases && a.ms === undefined) return fail("give bounded ms/controls or phases; nothing was sent");
+    const plan = driveStates(a.phases ?? [{ ms: a.ms!, throttle: a.throttle, steer: a.steer, brake: a.brake }], a.brake_after);
+    if (plan.error !== undefined) return fail(plan.error);
+    const cmd = { cmd: "pad-timeline", states_json: JSON.stringify(plan.states), ms: plan.total_ms, end_hold_ms: 0, pacing: "time",
+      ...(a.async ? { async: true } : {}), ...(a.replace ? { replace: true } : {}) };
+    const r = await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], a.async ? 60000 : plan.total_ms! + 60000);
+    return look(a.pid, reply(r, { ...(a.async ? jobExtra(r) : {}), pad_drive: { total_ms: plan.total_ms,
+      phase_count: a.phases?.length ?? 1, brake_after: plan.brake_after, game_movement_verified: false, stopped_verified: false } }),
+      a.capture_after, padObservation({ ...a, capture_settle_ms: a.capture_settle_ms ?? 100 }));
+  });
+
 tool("pad_rotate", "Rotate a stick for a prompt",
   "Rotate one stick using a single time-paced timeline: 0 deg=up, 90 deg=right; clockwise increases the angle. About 24 segments per turn " +
   "(25 points for a full circle), constant normalized radius, all other controls neutral. ms is rotation time; end_dwell_ms holds the " +
@@ -1193,9 +1267,17 @@ tool("key_sequence", "Run a keyboard sequence",
   "Run a validated keyboard sequence as ONE background job inside the game: each step presses a key or chord for ms (hold / key) " +
   "or waits (wait), e.g. [{action:'hold',key:'w+space',ms:1500},{action:'wait',ms:100},{action:'key',key:'d',ms:300}]. Returns a job_id at once; " +
   "follow it with job_status (current step) or stop it with job_cancel, which releases the active chord. Keys of later steps are reserved, " +
-  "so pressing one of them by hand cancels the rest. Limits: 1024 steps, 118000 ms of declared timing. Needs a vinput DLL with key sequences.",
-  { pid, steps: z.array(seqStep).min(1).max(1024), replace: replaceArg },
+  "so pressing one of them by hand cancels the rest. Limits: 1024 steps, 118000 ms of declared timing. Needs a vinput DLL with key sequences. Default is asynchronous; wait:true observes this exact native job until completed or another terminal outcome. capture_after follows successful completion when waiting, otherwise it observes the queued/running job. Native completion does not prove game consumption.",
+  { pid, steps: z.array(seqStep).min(1).max(1024), replace: replaceArg, ...actionCaptureArgs,
+    wait: z.boolean().optional().describe("Wait for this exact generation-bound native sequence job. Default false; does not replay input or prove game consumption."),
+    wait_timeout_ms: z.number().int().min(1).max(120000).optional().describe("Only with wait:true: completion-observation budget AFTER the scheduling reply, at most120000ms. Default native requested_ms+5000 capped120000. Timeout leaves the job running; use job_cancel explicitly. Long waits require a sufficient MCP client timeout.") },
   async (a) => {
+    const captureError = actionCaptureError(a);
+    if (captureError) return fail(captureError);
+    if (a.wait_timeout_ms !== undefined && !a.wait) return fail("wait_timeout_ms requires wait:true");
+    const observation = actionObservation({ ...a, async: true });
+    const context = { pid: a.pid, owner: OWNER, prefix: at(a.pid), epoch: observation.attachment_epoch,
+      currentEpoch: () => captureSessionEpoch.get(a.pid) ?? 0 };
     const lines: string[] = [];
     for (const [i, st] of a.steps.entries()) {
       if (st.action === "wait") { if (st.key !== undefined) return fail(`step ${i + 1}: wait takes no key`); lines.push(`wait ${st.ms}`); continue; }
@@ -1203,12 +1285,27 @@ tool("key_sequence", "Run a keyboard sequence",
       if (/\s/.test(st.key)) return fail(`step ${i + 1}: key names cannot contain spaces`);
       lines.push(`${st.action} ${st.key} ${st.ms}`);
     }
+    if (a.wait) {
+      const unsupported = await requireSequenceWait(context);
+      if (unsupported) return reply(unsupported);
+    }
     const dir = mkdtempSync(join(tmpdir(), "vinput-seq-"));
     const file = join(dir, "sequence.vin");
     try {
       writeFileSync(file, lines.join("\n") + "\n");
       const r = await runVinput([...at(a.pid), "seq", file, ...(a.replace ? ["--replace=true"] : [])], 60000);
-      return reply(r, jobExtra(r));
+      if (!a.wait) return look(a.pid, reply(r, jobExtra(r)), a.capture_after, observation);
+      if (!r.ok) {
+        const input = r.json as { input_injected?: unknown; error?: unknown } | null;
+        const refused = input?.input_injected === false;
+        return reply(sequenceWaitError(r, refused ? "scheduling_refused" : "ack_unavailable",
+          `sequence scheduling ${refused ? "refused" : "unconfirmed"}; no input was retried: ${String(input?.error ?? "scheduling response unavailable")}`, 0, a.wait_timeout_ms));
+      }
+      let observed: CliResult;
+      try { observed = await waitSequence(r, context, a.wait_timeout_ms); }
+      catch (error) { observed = sequenceWaitError(r, "observation_error", `sequence observation failed; no input was retried: ${String(error)}`, 0, a.wait_timeout_ms); }
+      return look(a.pid, reply(observed), a.capture_after,
+        { ...observation, action_state: "native_sequence_completed_game_consumption_unmeasured" });
     } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
   });
 

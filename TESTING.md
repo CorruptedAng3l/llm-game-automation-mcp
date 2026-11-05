@@ -155,6 +155,14 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   images, trigger/stick ranges in tool fields, `launch` `arm_pad` + `claim_ttl_s` and a `claim` tool, pad returns in
   compact `status`, bounded previews for oversized bursts, and a read-only `doctor` tool. Gate: `mcp` `npm test`
   34 files PASS; `doctor` against a real, uninjected process returned `status_available:false` and did not inject.
+- Batch 7ab27ff..a8bc5e2 (2026-11-04): while a game is claimed, its cursor writes, clips and exclusive DirectInput
+  mouse acquisition stay virtual (the GTA IV mouse trap); an opt-in `escape-host` hotkey (Ctrl+Alt+Shift+End);
+  `pad_drive`; capture options shared by keyboard and mouse actions; a bounded `wait` for `key_sequence`; launch
+  readiness and D3D9 negotiation diagnostics; a controller API census. Gate: `build.bat` x64 + x86 OK; `mcp` `npm test`
+  38 files PASS; background plan (89 cases, now including `startup_activation` and `claimed_cursor_writer`): 70 passed
+  on the first run, and the 19 failed or not-run cases (`di_type_lifetime` under load, `owner_input` with the desk in
+  use, and the cases queued behind them) all passed on a rerun, so 89 / 89. Real-desktop hotkey delivery and a real
+  game cursor trap are not measured in the background suites.
 
 ## Real games
 

@@ -810,6 +810,7 @@ static Reply WaitChange(DWORD pid, const Args& a) {
 #include "vi_cli_launch_options.inl"
 #include <limits>
 #include "vi_cli_launch_selection.inl"
+#include "vi_launch_injection_failure.h"
 
 static int Launch(const Args& a) {
     std::string injectReply,earlyInjectReply,dialogInjectReply,launchReadiness;
@@ -984,7 +985,7 @@ static int Launch(const Args& a) {
             if (!g_acLastRefusal.empty()) { printf("%s\n", g_acLastRefusal.c_str()); rc = 4; break; }
             std::string exitedReply;
             if(PrintInjectionExit(nullptr,injectionTarget,pid,"inject",0,&exitedReply))launchResult("%s",exitedReply.c_str());
-            else launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"inject failed\"}\n",pid);
+            else {const auto failure=vi_launch_injection::Failure(pid,injectReply);launchResult("%s",failure.c_str());}
             break;
         }
         // wait until vinput has adopted a main window, then let the game settle before giving up the lock;
@@ -1074,6 +1075,8 @@ static int ListPipes() {
     printf("]\n"); return 0;
 }
 
+#include "vi_cli_escape_host.inl"
+
 static void Usage() {
     const char* usage =
         "vinput - per-process virtual input + capture for automating offline games\n"
@@ -1131,6 +1134,7 @@ static void Usage() {
         "      Owned polled placement; drag --placement is equivalent. config edge_margin=8 guards pointer paths (0 disables).\n"
         "      click --di-poll-timeout-ms N requires down/up reads; --di-release-timeout-ms N sets a separate up cap.\n"
         "  vinput --pid N script <file>       one command per line (any command above), '#' comments, sleep <ms>, echo <text>; stops at the first failing line (--continue to go on)\n"  //@script
+        "  vinput --pid N escape-host [--timeout-ms N]  opt-in Ctrl+Alt+Shift+End host; streams receipts; no automatic start\n"
         "  vinput --pid N foreground          VERIFY/HANDOFF ONLY: really bring the game to the front\n"
         "  vinput sysinput <vk>               VERIFY ONLY: OS-level SendInput key (= the shared physical keyboard)\n";
     if (g_jsonOutput) printf("{\"ok\":true,\"help\":\"%s\"}\n", JEsc(usage).c_str()); else printf("%s", usage);
@@ -1163,6 +1167,7 @@ int wmain(int argc, wchar_t** wargv) {
     if (rest.empty()) { Usage(); return 1; }
     const std::string cmd = rest[0];
     Args a = SplitArgs(std::vector<std::string>(rest.begin() + 1, rest.end()),cmd=="capture-burst");
+    if(cmd=="escape-host")return vi_escape_cli::Run(av);
     if((HasOpt(a,"for")||HasOpt(a,"for-ms")||HasOpt(a,"for_ms"))&&cmd!="config"){printf("{\"ok\":false,\"configuration_changed\":false,\"error\":\"--for applies only to config isolate=false\"}\n");return 2;}
     if(HasOpt(a,"stagger-ms")&&cmd!="pad-timeline"){printf("{\"ok\":false,\"input_injected\":false,\"error\":\"--stagger-ms is only implemented for pad-timeline\"}\n");return 2;}
     if (HasExpectationOptions(a) && cmd != "key" && cmd != "hold") {

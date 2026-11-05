@@ -42,6 +42,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'nativecapture' 'run_nativecapture.ps1'
  New-VinputSuiteCase 'capture_timing' 'run_capturetimingtest.ps1'
  New-VinputSuiteCase 'capture_diagnostics' 'run_capturediagnosticssurrogatetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
+ New-VinputSuiteCase 'startup_activation' 'run_startupactivationtest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'xinput' 'run_xinputtest.ps1'
  New-VinputSuiteCase 'pad_readiness' 'run_padreadinessnativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'unit' 'run_unittests.ps1'
@@ -57,6 +58,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'overlay' 'run_overlaytest.ps1'
  New-VinputSuiteCase 'recenterguard' 'run_recenterguardtest.ps1'
  New-VinputSuiteCase 'cursor_guard' 'run_cursorguardtest.ps1'
+ New-VinputSuiteCase 'claimed_cursor_writer' 'run_claimedcursorwritetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'physical_readers' 'run_physicalreaderstest.ps1'
  New-VinputSuiteCase 'character_translation' 'run_chartranslatetest.ps1'
  New-VinputSuiteCase 'di_type_lifetime' 'run_ditypelifetimetest.ps1'

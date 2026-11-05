@@ -95,7 +95,7 @@ try {
   t.clearCalls(); r = await t.call("capture", { pid }); im = decode(r);
   check(!r.isError && im?.width === 1280 && flag(t.callsOf("capture")[0], "--max-width") === undefined, "standalone capture keeps its full-size default");
   t.clearCalls(); r = await t.call("key", { pid, key: "return", capture_after: 0 }); im = decode(r);
-  check(!r.isError && im?.width === 1280 && flag(t.callsOf("capture")[0], "--max-width") === undefined, "non-pad action images keep their full-size default");
+  check(!r.isError && im?.width === 960 && flag(t.callsOf("capture")[0], "--max-width") === "960", "key action images share the bounded 960px observation default");
 
   t.setScenario(scenario({ png: { w: 1280, h: 720 }, replies: { pad: completed } }));
   t.clearCalls();

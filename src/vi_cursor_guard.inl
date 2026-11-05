@@ -58,7 +58,7 @@ vi_cursor_guard::Owner CursorOwnerSnapshot(){
  const auto now=GetTickCount64();{std::lock_guard<std::mutex> lock(g_cursorOwnershipMx);const bool same=owner.windowReady&&g_cursorHumanWindow==target&&g_cursorHumanGeneration==g_inputReadyGeneration;
  owner.humanHolding=vi_cursor_guard::ReaderAllowed(owner)&&same&&g_cursorArbitration.Holding();owner.humanFresh=owner.humanHolding&&g_cursorHumanAt&&now>=g_cursorHumanAt&&now-g_cursorHumanAt<=300;
  owner.agentPosition=owner.windowReady&&g_cursorAgentWindow==target&&g_cursorAgentGeneration==g_inputReadyGeneration&&g_cursorArbitration.Automation();owner.humanEpoch=g_cursorArbitration.takeover;owner.agentEpoch=g_cursorArbitration.automation;}
- owner.lease=now<g_fgLeaseUntil.load();owner.forcedVirtual=g_cfg.cursor==1;return owner;
+ owner.lease=now<g_fgLeaseUntil.load();owner.forcedVirtual=g_cfg.cursor==1;owner.agentClaimLive=AgentClaimLive();return owner;
 }
 bool PhysicalForegroundOwned(){return vi_cursor_guard::ReaderAllowed(CursorOwnerSnapshot());}
 bool CursorNativeAllowed(){return vi_cursor_guard::NativeWriteAllowed(CursorOwnerSnapshot());}
