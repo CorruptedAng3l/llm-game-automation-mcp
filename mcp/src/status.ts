@@ -91,7 +91,15 @@ export function mouseMessageHealth(s: Obj): Obj | undefined {
   const out: Obj = { received: total, dropped, drop_ratio: ratio };
   const known = owned !== undefined && delivered !== undefined && ownedDropped !== undefined && unrecognizedDropped !== undefined && delivered + ownedDropped <= owned && owned <= total && delivered <= total-dropped && ownedDropped <= dropped && unrecognizedDropped <= dropped && ownedDropped + unrecognizedDropped <= dropped && unrecognizedDropped <= total-owned;
   Object.assign(out, known ? { owned_received: owned, owned_delivered: delivered, owned_dropped: ownedDropped, unrecognized_dropped: unrecognizedDropped } : { owned_received: null, owned_delivered: null, owned_dropped: null, unrecognized_dropped: null });
-  if (total >= 20 && ratio >= 0.5) out.warning = `Mouse message isolation suppressed ${dropped} of ${total} messages (${Math.round(ratio * 100)}%). ` +
+  if(known&&s.mouse_message_unrecognized_types&&typeof s.mouse_message_unrecognized_types==='object'&&!Array.isArray(s.mouse_message_unrecognized_types)){
+    const types=Object.entries(s.mouse_message_unrecognized_types as Obj);
+    if(types.length<=15&&types.every(([k,v])=>/^WM_(?:MOUSEMOVE|[LMR]BUTTON(?:DOWN|UP|DBLCLK)|XBUTTON(?:DOWN|UP|DBLCLK)|MOUSE(?:H?WHEEL))$/.test(k)&&typeof v==='number'&&Number.isSafeInteger(v)&&v>=0)&&types.reduce((sum,[,v])=>sum+(v as number),0)<=unrecognizedDropped)
+      out.unrecognized_types=Object.fromEntries(types);
+  }
+  if (known && unrecognizedDropped > 0) out.note = "unrecognized_dropped counts mouse messages without vinput-owned provenance that isolation suppressed. " +
+    "They can arrive during startup, before any agent input, from real input or application-generated window traffic; their exact source is unknown. " +
+    "This count does not prove a vinput action was dropped. Check owned_delivered / owned_dropped and the resulting picture for that action.";
+  if (total >= 20 && ratio >= 0.25) out.warning = `Mouse message isolation suppressed ${dropped} of ${total} messages (${Math.round(ratio * 100)}%). ` +
     (known ? `${delivered} vinput-owned messages reached the window callback; ${ownedDropped} owned messages were dropped. ` : "This DLL does not separate owned and unrecognized mouse delivery. ") +
     "Unrecognized sources include real input and application-generated messages; this ratio alone does not identify why a click had no effect. Check capture and trace before retrying.";
   return out;
@@ -212,6 +220,7 @@ export function compactStatus(s: Obj): Obj {
         .filter(k => d9[k] !== undefined).map(k => [k, d9[k]]));
   }
   if (mouse) out.directinput_mouse = mouse;
+  if(s.framework_input&&typeof s.framework_input==='object'&&!Array.isArray(s.framework_input)&&(s.framework_input as Obj).version===1)out.framework_input=s.framework_input;
   if (messages) out.mouse_messages = messages;
   out.warnings = warnings;
   return out;

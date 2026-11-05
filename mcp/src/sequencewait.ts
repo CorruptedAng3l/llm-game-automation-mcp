@@ -2,7 +2,7 @@
 // This is cooperative protocol identity, not OS process-creation proof.
 import { type CliResult, runVinput } from "./vinput.js";
 
-export type SequenceWaitContext = { pid: number; owner: string; prefix: string[]; epoch: number; currentEpoch: () => number };
+export type SequenceWaitContext = { pid: number; owner: string; prefix: string[]; epoch: number; currentEpoch: () => number; signal?: AbortSignal };
 export type Job = Record<string, unknown> & { job_id: string; job_state: string; job_complete: boolean; requested_ms: number };
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

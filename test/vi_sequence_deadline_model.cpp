@@ -68,6 +68,12 @@ int main(){
  Check(job.done&&job.qpcAnchor==500000&&job.qpcFirst==500050&&edges.size()==2,"event-based deadlines and first-apply receipt retain observed QPC timeline");
  job={};job.sequence=plan.steps;job.duration=plan.duration;job.qpcAnchor=600000;job.qpcNext=600050;job.latenessLimit=10;clockTick=600061;edges.clear();JobRunSequence(job,clockTick);
  Check(job.done&&job.state=="cancelled"&&job.reason=="sequence_max_lateness_exceeded"&&edges.empty(),"overdue edge aborts the whole sequence explicitly before any press");
+ clockTick=700000;job=Run("retap w+shift shift 1500 300 10\n",1);
+ const auto retapCount=std::count_if(edges.begin(),edges.end(),[](const Edge& e){return e.key==VK_SHIFT;});
+ const auto wCount=std::count_if(edges.begin(),edges.end(),[](const Edge& e){return e.key=='W';});
+ Check(job.done&&job.state=="completed"&&edges.size()==12&&job.transitions==12&&retapCount==10&&wCount==2,"retap repeats only the selected key while movement has one down/up pair");
+ Check(edges.size()==12&&edges[2].key==VK_SHIFT&&!edges[2].down&&edges[2].at==700315&&edges[3].down&&edges[3].at==700325&&edges[10].key==VK_SHIFT&&!edges[10].down&&edges[10].at==701515&&edges[11].key=='W'&&edges[11].at==701530,"retap gaps and chord release retain one exact anchored timeline");
+ Check(job.sequenceEdges.edges.size()==12&&job.sequenceEdges.dropped==0,"every re-tap edge retains the standard finite native timing receipt");
  vi_sequence_edges::Trace limited;for(unsigned n=0;n<vi_sequence_edges::Limit+2;n++)vi_sequence_edges::Record(limited,n,1,VK_SPACE,true,n,0);
  Check(limited.edges.size()==vi_sequence_edges::Limit&&limited.dropped==2,"edge telemetry has a finite cap with exact dropped count");
  printf("sequence deadline model: %u PASS / %u FAIL\n",passed,failed);return failed?1:0;

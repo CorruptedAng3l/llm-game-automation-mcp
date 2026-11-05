@@ -2,6 +2,7 @@ import { z } from "zod";
 import { resolve } from "node:path";
 import { type CliResult } from "./vinput.js";
 import {motionSample,motionDifference} from './motion.js';
+import {cameraCreation,loadAngleProfile,saveAngleProfile,type AngleProfile} from './camerastorage.js';
 
 type Obj = Record<string, unknown>;
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -219,21 +220,24 @@ async function scopedMove(ctx: CameraContext, a: TargetOptions, epoch: number, b
 }
 type Matrix = { xx: number; xy: number; yx: number; yy: number };
 type Calibration = { matrix: Matrix; capture_scope: unknown };
-export type LookCalibrateOptions = TargetOptions & { counts?: number };
+export type LookCalibrateOptions = Omit<TargetOptions,'template'> & { template?:string;counts?: number;mode?:'visual'|'counts';counts_per_degree?:number;pitch_counts_per_degree?:number;yaw_counts?:number;observed_yaw_deg?:number;game?:string };
 export async function lookCalibrate(ctx: CameraContext, a: LookCalibrateOptions): Promise<Reply> {
+  if(a.mode==='counts')return calibrateAngles(ctx,a);
   const invalid = captureValidation(ctx, a);if (invalid) return response({ ok: false, error: invalid });
+  if(!a.template||[a.counts_per_degree,a.pitch_counts_per_degree,a.yaw_counts,a.observed_yaw_deg,a.game].some(v=>v!==undefined))return response({ok:false,input_injected:false,error:'visual calibration requires template; use mode:counts to save signed counts per degree'});
+  const probe=a as TargetOptions;
   const epoch = ctx.epoch(a.pid), started = performance.now(), observations: Obj[] = [], motions: Obj[] = [];
   const deadline = started + (a.timeout_ms ?? 15000), count = a.counts ?? 80;
   try {
     await preflight(ctx, a.pid, epoch, "motion");const baseline = await hashFrame(ctx, a.pid, a.region, 1500,(a.max_change_pct??0)>0);
     const initial = await settle(ctx, a, epoch, baseline, Math.min(deadline, performance.now() + (a.settle_timeout_ms ?? 1500)));observations.push(settleView(initial));
     if (!initial.stable) throw new Error("region was not stable before calibration; no calibration motion was sent");
-    let last = await target(ctx, a, epoch, baseline, deadline);const origin = { x: last.x, y: last.y }, responses: { x: number; y: number }[] = [];
+    let last = await target(ctx, probe, epoch, baseline, deadline);const origin = { x: last.x, y: last.y }, responses: { x: number; y: number }[] = [];
     for (const axis of ["x", "y"] as const) {
-      const before = last;motions.push(await scopedMove(ctx, a, epoch, baseline, axis === "x" ? count : 0, axis === "y" ? count : 0, deadline));
+      const before = last;motions.push(await scopedMove(ctx, probe, epoch, baseline, axis === "x" ? count : 0, axis === "y" ? count : 0, deadline));
       const after = await settle(ctx, a, epoch, baseline, Math.min(deadline, performance.now() + (a.settle_timeout_ms ?? 1500)));observations.push(settleView(after));
       if (!after.stable) throw new Error("region kept changing after the calibration probe; camera smoothing or other animation may still be active");
-      last = await target(ctx, a, epoch, baseline, deadline);responses.push({ x: (last.x - before.x) / count, y: (last.y - before.y) / count });
+      last = await target(ctx, probe, epoch, baseline, deadline);responses.push({ x: (last.x - before.x) / count, y: (last.y - before.y) / count });
     }
     const matrix = { xx: responses[0].x, xy: responses[1].x, yx: responses[0].y, yy: responses[1].y }, determinant = matrix.xx * matrix.yy - matrix.xy * matrix.yx;
     if (!Number.isFinite(determinant) || Math.abs(determinant) < 0.000001) throw new Error("visual response was absent, clamped or singular; no usable two-axis calibration was established");
@@ -256,6 +260,83 @@ export async function lookTurn(ctx:CameraContext,a:LookTurnOptions):Promise<Repl
     if(dx)receipt=await scopedMove(ctx,{...a,template:''},epoch,baseline,dx,0,deadline);
     return ctx.finish(a.pid,response({ok:true,pid:a.pid,requested_yaw_deg:a.yaw_deg,submitted_dx:dx,counts_per_degree:a.counts_per_degree,calibration_source:'caller_supplied',actual_yaw_deg:null,camera_angle_measured:false,input_injected:dx?null:false,input_receipt:receipt??null,scope:'one scoped raw relative move using caller-supplied counts per degree; submitted counts do not establish the resulting camera angle'}),a,epoch);
   }catch(e){return ctx.finish(a.pid,response({ok:false,pid:a.pid,input_receipt:receipt??null,...motionFailure(e),error:e instanceof Error?e.message:String(e),camera_angle_measured:false}),a,epoch);}
+}
+type AngleOptions=CaptureOptions&{game?:string;timeout_ms?:number};
+const angleGain=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v)&&v!==0&&Math.abs(v)<=10000;
+async function angleContext(ctx:CameraContext,a:AngleOptions,epoch:number){
+  const status=await preflight(ctx,a.pid,epoch,'motion'),created=cameraCreation(status);
+  if(!created)throw new Error('exact native process creation identity is unavailable; no camera input was sent');
+  const baseline=await hashFrame(ctx,a.pid,a.region,1500);sameScope(ctx,a.pid,epoch,baseline);
+  const confirm=await preflight(ctx,a.pid,epoch,'motion');
+  if(cameraCreation(confirm)!==created)throw new Error('process identity changed before camera input');
+  return {baseline,created};
+}
+export async function calibrateAngles(ctx:CameraContext,a:LookCalibrateOptions):Promise<Reply>{
+  const invalid=captureValidation(ctx,a);if(invalid)return response({ok:false,error:invalid,input_injected:false});
+  const observed=a.yaw_counts!==undefined||a.observed_yaw_deg!==undefined;
+  const gain=observed?(a.yaw_counts??NaN)/(a.observed_yaw_deg??NaN):a.counts_per_degree;
+  if(!angleGain(gain)||(a.pitch_counts_per_degree!==undefined&&!angleGain(a.pitch_counts_per_degree))||
+    observed&&(a.counts_per_degree!==undefined||!Number.isSafeInteger(a.yaw_counts)||!a.yaw_counts||!Number.isFinite(a.observed_yaw_deg)||!a.observed_yaw_deg)||
+    a.template!==undefined||a.counts!==undefined||a.game!==undefined&&(!a.game.trim()||a.game.length>128))return response({ok:false,input_injected:false,error:'counts mode needs one signed counts_per_degree or yaw_counts/observed_yaw_deg pair; optional pitch gain must be nonzero and bounded; visual probe options are separate'});
+  const epoch=ctx.epoch(a.pid);
+  try{
+    const {baseline,created}=await angleContext(ctx,a,epoch);
+    const profile:AngleProfile={version:1,pid:a.pid,created,scope:baseline.scope,...(a.game?{game:a.game}:{}),yaw:gain,
+      ...(a.pitch_counts_per_degree!==undefined?{pitch:a.pitch_counts_per_degree}:{}),source:observed?'caller_observed_angle':'caller_supplied'};
+    const path=saveAngleProfile(profile);
+    return ctx.finish(a.pid,response({ok:true,pid:a.pid,input_injected:false,calibration:{mode:'counts',counts_per_degree:profile.yaw,pitch_counts_per_degree:profile.pitch??null,
+      source:profile.source,process_created:created,game:profile.game??null,capture_scope:baseline.receipt.capture_scope,path},camera_angle_measured:false,
+      note:'Saved caller-provided angular reference for this process/window. Recalibrate after changing sensitivity/FOV/input settings; image pixel displacement alone cannot establish degrees.'}),a,epoch);
+  }catch(e){return response({ok:false,pid:a.pid,input_injected:false,error:String(e)});}
+}
+export type LookAnglesOptions=AngleOptions&{yaw:number;pitch?:number};
+async function savedAngles(ctx:CameraContext,a:AngleOptions,epoch:number){
+  const current=await angleContext(ctx,a,epoch),profile=loadAngleProfile(a.pid,current.created,current.baseline.scope,a.game);
+  if(!profile)throw new Error('no matching angular calibration for this process/window/game; use look_calibrate mode:counts first');
+  return {...current,profile};
+}
+export async function lookAngles(ctx:CameraContext,a:LookAnglesOptions):Promise<Reply>{
+  const invalid=captureValidation(ctx,a);if(invalid)return response({ok:false,error:invalid,input_injected:false});
+  const epoch=ctx.epoch(a.pid),deadline=performance.now()+(a.timeout_ms??5000);let receipt:Obj|undefined;
+  try{
+    if(!Number.isFinite(a.yaw)||Math.abs(a.yaw)>720||!Number.isFinite(a.pitch??0)||Math.abs(a.pitch??0)>180)throw new Error('yaw must fit +/-720 degrees and pitch +/-180');
+    const {baseline,profile}=await savedAngles(ctx,a,epoch);
+    if(a.pitch&&!profile.pitch)throw new Error('saved pitch calibration is unavailable; no input was sent');
+    const dx=Math.round(a.yaw*profile.yaw),dy=Math.round((a.pitch??0)*(profile.pitch??0));
+    if(![dx,dy].every(v=>Number.isSafeInteger(v)&&Math.abs(v)<=1000000))throw new Error('angular request exceeds one-million-count bound');
+    if(dx||dy)receipt=await scopedMove(ctx,{...a,template:''},epoch,baseline,dx,dy,deadline);
+    return ctx.finish(a.pid,response({ok:true,pid:a.pid,requested_yaw_deg:a.yaw,requested_pitch_deg:a.pitch??0,submitted_dx:dx,submitted_dy:dy,
+      counts_per_degree:profile.yaw,calibration_source:profile.source,calibration:{mode:'counts',process_created:profile.created,game:profile.game??null},
+      actual_yaw_deg:null,actual_pitch_deg:null,camera_angle_measured:false,input_receipt:receipt??null,input_injected:dx||dy?null:false,
+      scope:'one scope-fenced relative move from a saved caller angular reference; actual camera angles and gameplay response are unmeasured'}),a,epoch);
+  }catch(e){return ctx.finish(a.pid,response({ok:false,pid:a.pid,input_receipt:receipt??null,...motionFailure(e),error:String(e),camera_angle_measured:false}),a,epoch);}
+}
+export type UnstickOptions=AngleOptions&{degrees?:number;backup_ms?:number;retry_ms?:number;jump?:boolean};
+export async function unstickCamera(ctx:CameraContext,a:UnstickOptions):Promise<Reply>{
+  const invalid=captureValidation(ctx,a);if(invalid)return response({ok:false,error:invalid,input_injected:false});
+  const epoch=ctx.epoch(a.pid),deadline=performance.now()+12000,steps:Obj[]=[];
+  try{
+    const degrees=a.degrees??60,backup=a.backup_ms??250,retry=a.retry_ms??350;
+    if(!Number.isFinite(degrees)||Math.abs(degrees)<45||Math.abs(degrees)>90||![backup,retry].every(v=>Number.isInteger(v)&&v>=50&&v<=1000))throw new Error('unstick needs a signed 45..90 degree turn and bounded 50..1000ms keys');
+    const {baseline,profile}=await savedAngles(ctx,a,epoch);
+    const key=async(name:string,ms:number)=>{
+      await preflight(ctx,a.pid,epoch,'hold');const current=await hashFrame(ctx,a.pid,a.region,deadline-performance.now());sameScope(ctx,a.pid,epoch,baseline,current);
+      if(performance.now()>=deadline)throw new Error('unstick deadline expired; no further action was sent');
+      const step:Obj={key:name,ms,input_receipt:null,input_injection_unknown:true};steps.push(step);
+      const r=await ctx.run([...ctx.at(a.pid),'json',JSON.stringify({cmd:'key',key:name,ms,expected_capture_scope:JSON.stringify(current.receipt.capture_scope)})],ms+2000);
+      step.input_receipt=r.json;step.input_injection_unknown=!r.ok&&object(r.json)?.input_injected!==false;
+      const job=holdJob(r.json,ctx,a.pid,ms,false);
+      if(ctx.epoch(a.pid)!==epoch||!r.ok||!job||job.job_state!=='completed'||!job.job_complete){step.input_injection_unknown=object(r.json)?.input_injected!==false;throw new Error('unstick key completion unavailable; bounded native key deadline remains active and no action was replayed');}
+    };
+    await key('s',backup);
+    const dx=Math.round(degrees*profile.yaw);
+    if(!Number.isSafeInteger(dx)||Math.abs(dx)>1000000)throw new Error('saved turn exceeds bounded counts');
+    const move=await scopedMove(ctx,{...a,template:''},epoch,baseline,dx,0,deadline);steps.push({requested_yaw_deg:degrees,submitted_dx:dx,input_receipt:move});
+    if(a.jump!==false)await key('space',100);
+    await key('w',retry);
+    return ctx.finish(a.pid,response({ok:true,pid:a.pid,steps,displacement:'UNKNOWN',camera_angle_measured:false,
+      note:'One deliberate s/turn/space/w recipe completed. These are default movement keys; check your game bindings. Inspect the image before another attempt; recovery is unverified.'}),a,epoch);
+  }catch(e){return ctx.finish(a.pid,response({ok:false,pid:a.pid,steps,input_injection_unknown:steps.some(s=>s.input_injection_unknown===true)||(e instanceof MotionObservationError&&e.mayHaveApplied),...motionFailure(e),error:String(e),displacement:'UNKNOWN',camera_angle_measured:false}),a,epoch);}
 }
 export async function lookAt(ctx: CameraContext, a: LookAtOptions): Promise<Reply> {
   const invalid = captureValidation(ctx, a);if (invalid) return response({ ok: false, error: invalid });
@@ -306,8 +387,18 @@ export function registerCameraHelpers(register: Register, ctx: CameraContext, ac
     observe, async a => observeSettle(ctx, a as SettleOptions), true);
   const targetArgs = { ...observe, template: z.string().min(1).max(32768).describe("PNG template of a unique static visual landmark, reidentified after every probe; ambiguity/missing target stops motion."),
     threshold: z.number().min(0.01).max(1).optional(), settle_timeout_ms: z.number().int().min(100).max(10000).optional().describe("Per-probe pixel-stability observation budget, default 1500 ms; the overall deadline still bounds the helper.") };
-  register("look_calibrate", "Calibrate visual mouse response", "Submit two small raw relative mouse probes, wait for selected-region hash stability, and reidentify one unique visual landmark. Returns a local signed 2x2 pixel-per-count matrix and settle observations for look_at. It moves the view; camera angles and raw queue drain are not measured. Requires native relative_scope_version support.",
-    { ...targetArgs, counts: z.number().int().min(10).max(200).optional() }, async a => lookCalibrate(ctx, a as LookCalibrateOptions));
+  const game=z.string().min(1).max(128).optional().describe('Optional exact game/settings label for saved angular calibration; it never auto-applies to another process.');
+  const gain=z.number().finite().min(-10000).max(10000).refine(v=>v!==0,'nonzero signed counts per degree');
+  register("look_calibrate", "Calibrate mouse response", "Default visual mode submits two small raw probes and returns a landmark pixel-per-count matrix for look_at. mode:counts saves a caller-provided signed counts_per_degree (optional pitch gain), or derives it from yaw_counts/observed_yaw_deg from a compass/known turn. Counts mode sends no camera input, needs no stable image, and persists across MCP restarts for this exact native process/window/game label. It does not infer degrees from visual pixels. Recalibrate after sensitivity/FOV/input changes.",
+    { ...targetArgs,template:targetArgs.template.optional(),mode:z.enum(['visual','counts']).optional(), counts: z.number().int().min(10).max(200).optional(),
+      counts_per_degree:gain.optional(),pitch_counts_per_degree:gain.optional(),yaw_counts:z.number().int().min(-1000000).max(1000000).optional(),observed_yaw_deg:z.number().finite().min(-720).max(720).optional(),game }, async a => lookCalibrate(ctx, a as LookCalibrateOptions));
+  const angular={...actionCaptureArgs,pid:z.number().int().positive(),game,timeout_ms:z.number().int().min(1000).max(15000).optional()};
+  register('turn','Turn using saved mouse counts','Submit one bounded relative yaw move using look_calibrate mode:counts saved for this exact process/window. Positive degrees use the supplied signed yaw gain; actual angle remains unmeasured.',
+    {...angular,degrees:z.number().finite().min(-720).max(720)},async a=>lookAngles(ctx,{...a,yaw:a.degrees} as LookAnglesOptions));
+  register('look','Look using saved mouse counts','Submit yaw and optional pitch together using saved signed angular gains. Missing pitch calibration refuses before either axis moves. No stable landmark is needed; actual angle remains unmeasured.',
+    {...angular,yaw:z.number().finite().min(-720).max(720).default(0),pitch:z.number().finite().min(-180).max(180).optional()},async a=>lookAngles(ctx,a as LookAnglesOptions));
+  register('unstick','Try one navigation recovery','One deliberate default-key recipe: bounded S backup, saved 45..90 degree yaw, optional Space jump and bounded W retry. Stops on the first uncertain input/scope result; never automatically repeats. Inspect capture_after before another attempt. Game recovery/displacement is unverified; use only when these are your movement bindings.',
+    {...angular,degrees:z.number().finite().min(-90).max(90).optional(),backup_ms:z.number().int().min(50).max(1000).optional(),retry_ms:z.number().int().min(50).max(1000).optional(),jump:z.boolean().optional()},async a=>unstickCamera(ctx,a as UnstickOptions));
   register('look_turn','Turn by supplied mouse counts','Submit one scoped raw yaw move using your supplied signed counts per degree. Works without a stable landmark or calibration image, including animated scenes. Returns submitted counts; actual camera angle and game response remain unmeasured.',
     {...actionCaptureArgs,pid:z.number().int().positive(),yaw_deg:z.number().finite().min(-720).max(720),counts_per_degree:z.number().finite().min(-10000).max(10000),timeout_ms:z.number().int().min(1000).max(15000).optional()},async a=>lookTurn(ctx,a as LookTurnOptions));
   register("look_at", "Center a visual landmark", "Reidentify a unique template and iteratively center it using a same-window look_calibrate matrix. Every raw move is scope-fenced, bounded to max_counts_per_step, followed by settle/target checks, and stops on missing target, no visual progress, timeout or step limit. This centers an image landmark; it does not establish aim or gameplay progress.",

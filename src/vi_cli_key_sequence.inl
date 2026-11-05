@@ -18,6 +18,7 @@ static Reply CmdKeySequence(DWORD pid,const Args& args) {
  vi_key_sequence::Plan plan;std::string error;if(!vi_key_sequence::Parse(script,plan,error))return Fail(error);
  std::string status;if(!Request(pid,"{\"cmd\":\"status\"}",status)||JsonNum(status,"key_sequence_version")<1)return Fail("target lacks key sequence jobs; restart the owned target with the matching updated DLL; no input was injected");
  if(plan.absolute&&JsonNum(status,"sequence_timing_version")<1)return Fail("absolute at schedules require sequence_timing_version >=1; no input was injected");
+ if(plan.retap&&JsonNum(status,"sequence_retap_version")<1)return Fail("retap steps require sequence_retap_version >=1; no input was injected");
  if((guard||!scope.empty()||lateness||anchored)&&JsonNum(status,"sequence_guard_version")<1)return Fail("conditional sequences require sequence_guard_version >=1; no input was injected");
  if(!scope.empty()&&JsonNum(status,"input_scope_version")<1)return Fail("conditional sequences require input_scope_version >=1; no input was injected");
  if(frameAnchor&&JsonNum(status,"sequence_frame_anchor_version")<1)return Fail("Present frame anchor requires sequence_frame_anchor_version >=1; no input was injected");

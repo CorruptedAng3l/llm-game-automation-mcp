@@ -41,6 +41,16 @@ static std::string Field(const std::string& j, const std::string& key) {
     return "null";
 }
 static std::string String(const std::string& s) { return "\"" + JEsc(s) + "\""; }
+static std::string ControllerCoverage(bool available,const std::string& counters,const std::string& pad){
+    auto count=available?Field(counters,"xinput"):"null";
+    if(count.empty()||count.size()>10||!std::all_of(count.begin(),count.end(),[](char c){return c>='0'&&c<='9';})||strtoull(count.c_str(),nullptr,10)>2147483647ULL)count="null";
+    auto returns=available?Field(pad,"virtual_returns"):"null";bool valid=returns.size()>=3&&returns.size()<=22&&returns.front()=='\"'&&returns.back()=='\"';
+    std::string digits=valid?returns.substr(1,returns.size()-2):std::string();
+    valid=valid&&!digits.empty()&&std::all_of(digits.begin(),digits.end(),[](char c){return c>='0'&&c<='9';})&&(digits=="0"||digits.front()!='0')&&(digits.size()<20||(digits.size()==20&&digits<="18446744073709551615"));
+    if(!valid)returns="null";
+    return "{\"virtual_backend\":\"XInput\",\"xinput_calls_since_injection\":"+count+",\"virtual_returns\":"+returns+",\"virtual_return_observed\":"+(valid?(digits=="0"?"false":"true"):"null")+
+        ",\"GameInput\":{\"instrumented\":false},\"RawInputHID\":{\"instrumented\":false},\"actual_gamepad_api\":null,\"note\":\"XInput call counts include initialization. Only virtual_returns proves this virtual pad was returned. GameInput and RawInput HID gamepads are not instrumented by this backend, so absent XInput returns cannot identify the game's controller API.\"}";
+}
 static bool Query(DWORD pid, const std::string& command, std::string& reply, std::string& error) {
     HANDLE pipe = OpenPipe(pid, 400);
     if (pipe == INVALID_HANDLE_VALUE) { error = "no reachable vinput pipe (not injected, unavailable, or process gone)"; return false; }
@@ -169,7 +179,7 @@ static Reply CmdDoctor(DWORD pid, const Args& a) {
     std::string j = "{\"ok\":" + std::string(available ? "true" : "false") + ",\"command\":\"doctor\",\"pid\":" + std::to_string(pid) +
         ",\"process_alive\":" + alive + ",\"process_query_error\":" + std::to_string(processError) + ",\"arch\":" + String(arch) + ",\"bits\":" + bits +
         ",\"app_container\":" + appContainer + ",\"status_available\":" + (available ? "true" : "false") +
-        ",\"input_channels\":" + channels + ",\"observed_channels\":" + observed + ",\"capture_path\":" + capturePath + ",\"capture_path_reported\":" + captureReported + ",\"frame_api\":" + frameApi +
+        ",\"input_channels\":" + channels + ",\"observed_channels\":" + observed + ",\"controller_coverage\":"+ControllerCoverage(available,counters,available?Field(st,"virtual_pad"):"null")+",\"capture_path\":" + capturePath + ",\"capture_path_reported\":" + captureReported + ",\"frame_api\":" + frameApi +
         ",\"foreground\":{\"really_foreground\":" + (foreground ? "true" : "false") + ",\"blockfocus\":" + (available ? Field(st, "blockfocus") : "null") +
         ",\"user_took_foreground\":"+humanIntent+",\"guard\":"+guard+"},\"cursor\":{\"configured\":"+cursorConfigured+",\"configured_mode\":"+(available?Field(st,"cursor_mode"):"null")+",\"effective\":"+cursorEffective+"},\"claim\":" + claim + ",\"owner\":" + Field(claim, "owner") + ",\"log_path\":" + log +
         ",\"raw_registration\":"+rawRegistration+",\"raw_delivery\":"+rawDelivery+",\"trace_key\":" + (key ? std::to_string(key) : "null") + ",\"key_trace\":" + trace + ",\"suggestions\":[";

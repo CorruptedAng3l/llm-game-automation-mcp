@@ -3,6 +3,8 @@ import {resolve} from 'node:path';
 import type {CliResult} from './vinput.js';
 import {canonicalSequenceScope} from './sequenceconditions.js';
 import {motionSample,motionDifference} from './motion.js';
+import {frameworkClickTiming} from './frameworkclick.js';
+import type {MappingUsed} from './capturemapping.js';
 type Obj=Record<string,unknown>;
 type Reply={content:({type:'text';text:string}|{type:'image';data:string;mimeType:string})[];isError?:boolean};
 type Rect={x:number;y:number;w:number;h:number};type Point={x:number;y:number};
@@ -10,7 +12,7 @@ type Mapping={scale:number;offset_x:number;offset_y:number};
 type Runtime={signal?:AbortSignal};
 type Options={pid:number;coord_space?:'client'|'capture';mapping?:Mapping;capture_after?:boolean|number;capture_settle_ms?:number;region?:Rect;max_width?:number;scale?:number;upscale?:boolean;save_path?:string;out_dir?:string;format?:'png'|'jpeg';quality?:number};
 export type LoopContext={owner:string;at:(pid:number)=>string[];run:(argv:string[],budget:number)=>Promise<CliResult>;epoch:(pid:number)=>number;
- map:(pid:number,options:Options,points:[number,number][],expectedScope:unknown)=>{pts:[number,number][];mapped:boolean}|{error:string}|Promise<{pts:[number,number][];mapped:boolean}|{error:string}>;
+ map:(pid:number,options:Options,points:[number,number][],expectedScope:unknown)=>{pts:[number,number][];mapped:boolean;mapping_used?:MappingUsed}|{error:string}|Promise<{pts:[number,number][];mapped:boolean;mapping_used?:MappingUsed}|{error:string}>;
  captureError:(options:Options)=>string|undefined;finish:(pid:number,out:Reply,options:Options,epoch:number)=>Promise<Reply>;qualifyInput?:(r:CliResult)=>CliResult};
 type Register=<S extends z.ZodRawShape>(name:string,title:string,description:string,shape:S,run:(a:z.objectOutputType<S,z.ZodTypeAny>,runtime?:Runtime)=>Promise<Reply>,readOnly?:boolean)=>void;
 const obj=(v:unknown):Obj|undefined=>v&&typeof v==='object'&&!Array.isArray(v)?v as Obj:undefined;
@@ -22,7 +24,7 @@ const inputGenerations=new Map<number,number>();
 export function noteOtherInput(pid:number){inputGenerations.set(pid,(inputGenerations.get(pid)??0)+1);}
 class NativeFailure extends Error{constructor(message:string,readonly receipt:unknown){super(message);}}
 const failureView=(e:unknown):Obj=>e instanceof NativeFailure?{failure_receipt:e.receipt,...(obj(e.receipt)?.anticheat_refused===true?{anticheat_refused:true}:{})}:{};
-type Session={pid:number;epoch:number;generation:number;deadline:number;signal?:AbortSignal;scope?:string;nativeDeadline?:string;frequency?:string;ownerCount?:number;id:string};
+type Session={pid:number;epoch:number;generation:number;deadline:number;signal?:AbortSignal;scope?:string;nativeDeadline?:string;frequency?:string;ownerCount?:number;id:string;mapping_used?:MappingUsed};
 function check(ctx:LoopContext,s:Session){if(s.signal?.aborted)throw new Error('request_cancelled');if(ctx.epoch(s.pid)!==s.epoch)throw new Error('attachment_changed');if((inputGenerations.get(s.pid)??0)!==s.generation)throw new Error('other_input_command_started');if(performance.now()>=s.deadline)throw new Error('session_deadline');}
 function budget(ctx:LoopContext,s:Session,maximum=1000){check(ctx,s);return Math.max(1,Math.min(maximum,Math.floor(s.deadline-performance.now())));}
 async function json(ctx:LoopContext,s:Session,request:Obj,maximum=1000){return ctx.run([...ctx.at(s.pid),'json',JSON.stringify(request)],budget(ctx,s,maximum));}
@@ -49,6 +51,7 @@ const nativeFields=(s:Session)=>({expected_capture_scope:s.scope,admit_before_qp
 const qualified=(ctx:LoopContext,r:CliResult)=>ctx.qualifyInput?.(r)??r;
 async function points(ctx:LoopContext,s:Session,a:Options,input:Point[]):Promise<Point[]>{
  const mapped=await ctx.map(a.pid,a,input.map(p=>[p.x,p.y]),JSON.parse(s.scope!));check(ctx,s);if('error' in mapped)throw new Error(mapped.error);
+ if(mapped.mapping_used)s.mapping_used=mapped.mapping_used;
  const scope=JSON.parse(s.scope!) as {client_w:number;client_h:number};
  if(mapped.pts.length!==input.length||mapped.pts.some(p=>p.length!==2||!Number.isFinite(p[0])||!Number.isFinite(p[1])||p[0]<0||p[1]<0||p[0]>=scope.client_w||p[1]>=scope.client_h))throw new Error('point_outside_current_client');
  const result=mapped.pts.map(([x,y])=>({x:Math.round(x),y:Math.round(y)}));if(result.some(p=>p.x>=scope.client_w||p.y>=scope.client_h))throw new Error('rounded_point_outside_current_client');return result;
@@ -72,18 +75,19 @@ export async function clickMany(ctx:LoopContext,a:ClickManyOptions,runtime:Runti
   await status(ctx,s,buttons[a.button??'left']);await idleJobs(ctx,s);baseline=(await sample(ctx,s)).receipt;const client=await points(ctx,s,a,a.points);
   for(const [index,p] of client.entries()){
    await status(ctx,s,buttons[a.button??'left']);await idleJobs(ctx,s);
-   const hold=a.hold_ms??140,hover=a.hover_ms??80,hoverTimeout=a.hover_timeout_ms??1000,required=hold+hover+hoverTimeout+2500;
+   const timing=frameworkClickTiming(a.hold_ms,a.hover_ms,true),hold=timing.hold,hover=timing.hover,hoverTimeout=a.hover_timeout_ms??1000,required=timing.budgetHold+timing.budgetHover+hoverTimeout+2500;
    if(s.deadline-performance.now()<required)throw new Error('insufficient_budget_for_next_bounded_click');
    const before=a.verify_change?await sample(ctx,s,a.verify_region,true):undefined;
    if(before&&!motionSample(before.receipt))throw new Error('region_motion_sample_unavailable_before_click');
-   const native=await json(ctx,s,{cmd:'click',button:a.button??'left',x:p.x,y:p.y,count:1,ms:hold,settle_ms:hover,hover_timeout_ms:hoverTimeout,...nativeFields(s)},required);
+   if(s.deadline-performance.now()<required)throw new Error('insufficient_budget_for_next_bounded_click');
+   const native=await json(ctx,s,{cmd:'click',button:a.button??'left',x:p.x,y:p.y,count:1,ms:hold,settle_ms:hover,hover_timeout_ms:hoverTimeout,...timing.native,...nativeFields(s)},required);
    const result=qualified(ctx,native),confirmed=clickAck(result,p,s);const point:Obj={index,requested:a.points[index],client:p,confirmed,delivery_confirmed:confirmed,placement_confirmed:null,confirmation_scope:'native_delivery_only',receipt:native.json,...(result.json!==native.json?{qualified_receipt:result.json}:{})};receipts.push(point);
    if(!confirmed)throw new Error('click_acknowledgement_unconfirmed_no_retry');check(ctx,s);
    if(before){if(a.verify_settle_ms)await nap(Math.min(a.verify_settle_ms,budget(ctx,s)));const after=await sample(ctx,s,a.verify_region,true),diff=motionDifference(motionSample(before.receipt),motionSample(after.receipt),a.pixel_tolerance??8);if(!diff)throw new Error('region_motion_sample_unavailable_after_delivered_click');point.region_diff={...diff,changed:diff.changed_pct>(a.min_change_pct??0),before:before.receipt,after:after.receipt,metric:'coarse_grid_area_average_RGB',application_response:null};if(diff.changed_pct<=(a.min_change_pct??0))throw new Error('point_region_unchanged_after_delivered_click');}
    if(index<client.length-1&&(a.interval_ms??0)>0)await nap(Math.min(a.interval_ms!,budget(ctx,s)));
   }
  }catch(e){error=e instanceof Error?e.message:String(e);failure=failureView(e);}
- const out=reply({ok:!error,pid:a.pid,input_session:{id:s.id,kind:'bounded_mcp_loop',native_batch:false,timeout_ms:a.timeout_ms??30000,admission_deadline_qpc_ticks:s.nativeDeadline??null,stop_reason:error??'all_points_acknowledged'},requested_points:a.points.length,completed_points:receipts.filter(r=>r.confirmed).length,completed_injected_points:receipts.filter(r=>r.confirmed).length,game_accepted_points:null,do_not_repeat_delivered_points:true,points:receipts,baseline_observation:baseline??null,input_injected:receipts.length?null:false,...failure,...(error?{error}:{}),game_response_measured:false,scope:'completed_points/completed_injected_points count native delivered clicks only; optional region diff does not prove placement or causality; no failed or uncertain point is replayed',hint:'Use wait_text for any-of banners or observe_settle for scoped stable frames; capture_after is one image after the entire batch.'});
+ const out=reply({ok:!error,pid:a.pid,...(s.mapping_used?{mapping_used:s.mapping_used}:{}),input_session:{id:s.id,kind:'bounded_mcp_loop',native_batch:false,timeout_ms:a.timeout_ms??30000,admission_deadline_qpc_ticks:s.nativeDeadline??null,stop_reason:error??'all_points_acknowledged'},requested_points:a.points.length,completed_points:receipts.filter(r=>r.confirmed).length,completed_injected_points:receipts.filter(r=>r.confirmed).length,game_accepted_points:null,do_not_repeat_delivered_points:true,points:receipts,baseline_observation:baseline??null,input_injected:receipts.length?null:false,...failure,...(error?{error}:{}),game_response_measured:false,scope:'completed_points/completed_injected_points count native delivered clicks only; optional region diff does not prove placement or causality; no failed or uncertain point is replayed',hint:'Use wait_text for any-of banners or observe_settle for scoped stable frames; capture_after is one image after the entire batch.'});
  return finish(ctx,a,out,s);
 }
 export async function clickGrid(ctx:LoopContext,a:ClickGridOptions,runtime:Runtime={}):Promise<Reply>{try{return await clickMany(ctx,{...a,points:gridPoints(a)},runtime);}catch(e){return reply({ok:false,error:String(e),input_injected:false});}}
@@ -103,7 +107,7 @@ export async function hoverMany(ctx:LoopContext,a:HoverManyOptions,runtime:Runti
    if(a.ocr){const r=await ctx.run([...ctx.at(a.pid),'ocr','--lines-only','--observation-only=true',...(a.probe_region?['--region',`${a.probe_region.x},${a.probe_region.y},${a.probe_region.w},${a.probe_region.h}`]:[])],budget(ctx,s));check(ctx,s);const text=obj(r.json);if(!r.ok||!text||typeof text.text!=='string'||canonicalSequenceScope(text.capture_scope)!==s.scope||text.capture_space_updated!==false||text.timing_clock!=='QueryPerformanceCounter'||text.qpc_frequency!==s.frequency||!u64(text.capture_qpc_ticks))throw new NativeFailure('scoped_hover_ocr_unavailable',r.json);point.tooltip_ocr=text;}
   }
  }catch(e){error=e instanceof Error?e.message:String(e);failure=failureView(e);}
- return finish(ctx,a,reply({ok:!error,pid:a.pid,input_session:{id:s.id,kind:'bounded_hover_probe',native_batch:false},requested_points:a.points.length,observed_points:receipts.filter(p=>p.observation&&(!a.ocr||p.tooltip_ocr)).length,points:receipts,game_response_measured:false,...failure,...(error?{error}:{}),scope:'one scoped ordinary mouse move per point, bounded tooltip dwell, hash and optional OCR with separate capture/QPC provenance; no clicks or placement claim; uncertain moves never replayed'}),s);
+ return finish(ctx,a,reply({ok:!error,pid:a.pid,...(s.mapping_used?{mapping_used:s.mapping_used}:{}),input_session:{id:s.id,kind:'bounded_hover_probe',native_batch:false},requested_points:a.points.length,observed_points:receipts.filter(p=>p.observation&&(!a.ocr||p.tooltip_ocr)).length,points:receipts,game_response_measured:false,...failure,...(error?{error}:{}),scope:'one scoped ordinary mouse move per point, bounded tooltip dwell, hash and optional OCR with separate capture/QPC provenance; no clicks or placement claim; uncertain moves never replayed'}),s);
 }
 
 export type DeltaCursorOptions=Options&{x:number;y:number;cursor_template:string;counts_per_pixel_x:number;counts_per_pixel_y:number;hotspot_dx?:number;hotspot_dy?:number;threshold?:number;tolerance_px?:number;max_steps?:number;max_counts_per_step?:number;settle_ms?:number;timeout_ms?:number;button?:keyof typeof buttons;hold_ms?:number};
@@ -177,7 +181,7 @@ export async function clickToMove(ctx:LoopContext,a:ClickToMoveOptions,runtime:R
   if(admitted&&!job?.job_complete&&ctx.epoch(a.pid)===s.epoch){const cancelled=await ctx.run([...ctx.at(a.pid),'job-cancel',admitted.job_id],1500).catch(()=>undefined),terminal=holdJob(obj(cancelled?.json)?.job,ctx,s,duration,false,admitted.job_id);release=cancelled?.ok===true&&terminal?.job_complete===true;cleanup={attempted:true,job_id:admitted.job_id,confirmed:release,receipt:cancelled?.json??null};if(release&&terminal){job=terminal;if(terminal.job_state==='failed'||terminal.job_state==='cancelled'&&terminal.job_reason!=='explicit_cancel')error??='native_hold_ended_before_verified_cleanup';}}
   else if(admitted&&!job?.job_complete)cleanup={attempted:false,reason:'attachment_changed; native bounded duration remains active'};
  }
- const ok=changed&&stable&&release&&!error,out=reply({ok,pid:a.pid,input_session:{id:s.id,kind:'one_bounded_native_mouse_hold',timeout_ms:a.timeout_ms??10000,admission_deadline_qpc_ticks:s.nativeDeadline??null},move_receipt:move?.json??null,hold_input:initial?.json??null,job_id:admitted?.job_id??null,final_job:job??null,completed_input_read_receipt:completedReadReceipt??null,release_confirmed:release,hold_may_still_be_active:!!initial&&!release&&obj(initial.json)?.input_injected!==false,cleanup,changed,stable,samples,displacement:'UNKNOWN',displacement_px:null,baseline_observation:baseline?.receipt??null,final_observation:last?.receipt??null,input_injected:inputAttempted?null:false,...failure,...(!ok?{error:error??(!changed?'selected_region_did_not_change':!stable?'selected_region_did_not_stabilize':'exact_hold_release_unconfirmed')}:{}),scope:'selected-region change followed by identical hashes during one bounded hold; displacement and causal game movement are not measured; no repeated or indefinite button-down',hint:'Choose a region tracking the character/world rather than an animated HUD. Use observe_settle for observation-only stability.'});
+ const ok=changed&&stable&&release&&!error,out=reply({ok,pid:a.pid,...(s.mapping_used?{mapping_used:s.mapping_used}:{}),input_session:{id:s.id,kind:'one_bounded_native_mouse_hold',timeout_ms:a.timeout_ms??10000,admission_deadline_qpc_ticks:s.nativeDeadline??null},move_receipt:move?.json??null,hold_input:initial?.json??null,job_id:admitted?.job_id??null,final_job:job??null,completed_input_read_receipt:completedReadReceipt??null,release_confirmed:release,hold_may_still_be_active:!!initial&&!release&&obj(initial.json)?.input_injected!==false,cleanup,changed,stable,samples,displacement:'UNKNOWN',displacement_px:null,baseline_observation:baseline?.receipt??null,final_observation:last?.receipt??null,input_injected:inputAttempted?null:false,...failure,...(!ok?{error:error??(!changed?'selected_region_did_not_change':!stable?'selected_region_did_not_stabilize':'exact_hold_release_unconfirmed')}:{}),scope:'selected-region change followed by identical hashes during one bounded hold; displacement and causal game movement are not measured; no repeated or indefinite button-down',hint:'Choose a region tracking the character/world rather than an animated HUD. Use observe_settle for observation-only stability.'});
  return finish(ctx,a,out,s);
 }
 export function registerAgentLoops(register:Register,ctx:LoopContext,capture:z.ZodRawShape,region:z.ZodType<Rect,z.ZodTypeDef,unknown>,coord:z.ZodRawShape){

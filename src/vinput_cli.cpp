@@ -550,7 +550,7 @@ static int Inject(DWORD pid, std::wstring dll, bool quiet = false, bool hooksOnl
     auto ll = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
     if(!CliBudget(1)){VirtualFreeEx(hp,mem,0,MEM_RELEASE);CloseHandle(hp);EmitInjectReply(output,captured,"{\"ok\":false,\"pid\":%lu,\"injected\":null,\"error\":\"launch deadline expired before LoadLibrary was requested\"}",pid);return 2;}
     HANDLE th = CreateRemoteThread(hp, nullptr, 0, ll, mem, 0, nullptr);
-    if (!th) {const auto error=GetLastError();VirtualFreeEx(hp,mem,0,MEM_RELEASE);EmitInjectReply(output,captured, "{\"ok\":false,\"error\":\"CreateRemoteThread failed %lu\"}\n",error); CloseHandle(hp); return 2; }
+    if (!th) {const auto error=GetLastError();FILETIME created{},exited{},kernel{},user{};ULARGE_INTEGER stamp{};if(GetProcessTimes(hp,&created,&exited,&kernel,&user)){stamp.LowPart=created.dwLowDateTime;stamp.HighPart=created.dwHighDateTime;}VirtualFreeEx(hp,mem,0,MEM_RELEASE);EmitInjectReply(output,captured,"{\"ok\":false,\"pid\":%lu,\"process_created\":\"%llu\",\"injected\":false,\"loader_thread_started\":false,\"failure_stage\":\"create_remote_thread\",\"win32_error\":%lu,\"error\":\"CreateRemoteThread failed %lu\"}\n",pid,stamp.QuadPart,error,error);CloseHandle(hp);return 2;}
     const DWORD waited=WaitForSingleObject(th,CliBudget(20000));const bool completed=waited==WAIT_OBJECT_0;
     DWORD code=0;const bool codeKnown=completed&&GetExitCodeThread(th,&code)!=FALSE;CloseHandle(th);
     if(vi_cli_deadline::RemoteStorageMayBeFreed(true,completed))VirtualFreeEx(hp,mem,0,MEM_RELEASE);
@@ -844,10 +844,11 @@ static Reply WaitChange(DWORD pid, const Args& a) {
 #include "vi_cli_launch_selection.inl"
 #include "vi_launch_injection_failure.h"
 #include "vi_cli_launch_follow.inl"
+#include "vi_cli_launch_retry.inl"
 #include "vi_cli_hidden_window.inl"
 
 static int Launch(const Args& a) {
-    std::string injectReply,earlyInjectReply,dialogInjectReply,launchReadiness;
+    std::string injectReply,earlyInjectReply,dialogInjectReply,launchReadiness,preFollowInject,injectionFollowReason;bool injectionFollowAttempted=false;
     std::string finalCommandLine,appliedAffinity,hiddenProbeInject,hiddenReason,showHiddenReply,showHiddenStatus;DWORD spawnedPid=0;bool affinityApplied=false,showHidden=false;
     bool windowHiddenKnown=false,windowHidden=false,windowAdopted=false,showHiddenConfirmed=false,startupSplashSeen=false;
     DWORD guardAppliedMs=0,settleAppliedMs=0,guardRequestedMs=0,settleRequestedMs=0;const DWORD finalReserveMs=1500;
@@ -864,6 +865,7 @@ static int Launch(const Args& a) {
         result+=",\"launch_readiness\":"+(launchReadiness.empty()?std::string("null"):launchReadiness);
         result+=",\"early_inject\":"+(earlyInjectReply.empty()?std::string("null"):earlyInjectReply);
         result+=",\"dialog_inject\":"+(dialogInjectReply.empty()?std::string("null"):dialogInjectReply)+"}";
+        result.pop_back();result+=",\"pre_follow_inject\":"+(preFollowInject.empty()?std::string("null"):preFollowInject)+",\"injection_follow_attempted\":"+(injectionFollowAttempted?"true":"false")+",\"injection_follow_reason\":"+(injectionFollowReason.empty()?std::string("null"):"\""+JEsc(injectionFollowReason)+"\"")+"}";
         result.pop_back();
         result+=",\"startup_splash_observed\":"+std::string(startupSplashSeen?"true":"false");
         result+=",\"followed_from\":"+(followedFrom?std::to_string(followedFrom):"null");
@@ -1106,7 +1108,7 @@ static int Launch(const Args& a) {
         }
         InjectChildHandle launchTarget;launchTarget.Reset(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid));
         HANDLE injectionTarget=launchTarget.value;
-        const bool exactDialogTarget=(allowDialog||launcherPid==pid)&&(WindowClass(w)=="#32770"||OwnedPopupWindow(w));
+        auto injectSelected=[&](){const bool exactDialogTarget=(allowDialog||launcherPid==pid)&&(WindowClass(w)=="#32770"||OwnedPopupWindow(w));
         int injectionResult = Inject(pid,dll,true,exactDialogTarget,&injectReply);
         if(injectionResult==0&&exactDialogTarget) {
             dialogInjectReply=injectReply;
@@ -1128,6 +1130,17 @@ static int Launch(const Args& a) {
                 fprintf(stderr,"[vinput] explicit dialog target adoption failed; no full readiness was established\n");
                 injectionResult=2;
             }else injectionResult=ReportInputReady(stderr,pid,dll,true,false,true,injectionTarget,&injectReply);
+        }
+        return injectionResult;};
+        int injectionResult=injectSelected();
+        if(injectionResult!=0&&g_acLastRefusal.empty()&&vi_launch_injection::MayFollowPreLoader(pid,selectedCreated,injectReply)){
+            preFollowInject=injectReply;injectionFollowAttempted=true;vi_launch_follow::Process child{};HWND childWindow=nullptr;
+            if(LaunchFailedLoaderChild(pid,selectedCreated,injectionTarget,processHandles,child,childWindow,injectionFollowReason)){
+                HANDLE retained=nullptr;if(DuplicateHandle(GetCurrentProcess(),processHandles.Find(child.pid,child.born),GetCurrentProcess(),&retained,0,FALSE,DUPLICATE_SAME_ACCESS)){
+                    followedFrom=pid;pid=child.pid;selectedCreated=child.born;g_launchPid=pid;w=childWindow;earlyInjected=false;launcherPid=0;waitingFor.clear();launchTarget.Reset(retained);injectionTarget=retained;
+                    injectionResult=injectSelected(); // One DIFFERENT child only; never retry an original/uncertain load.
+                }else injectionFollowReason="descendant_handle_duplication_failed";
+            }
         }
         bool liveReadinessUnconfirmed=false;
         if(injectionResult!=0&&g_acLastRefusal.empty()){

@@ -1,5 +1,6 @@
 #pragma once
 #include "vi_di_keyboard_format.h"
+#include "vi_di_mouse_format.h"
 #include <atomic>
 #include <map>
 #include <memory>
@@ -7,7 +8,7 @@
 #include <set>
 struct DiFormatLifetime {
     void* identity=nullptr;bool live=true;unsigned long long revision=0;
-    std::shared_ptr<const vi_di_format::Plan> format;bool mouseStandard=false;int deviceType=-1;
+    std::shared_ptr<const vi_di_format::Plan> format;std::shared_ptr<const vi_di_mouse_format::Plan> mouseFormat;bool mouseStandard=false;int deviceType=-1;
 };
 std::mutex g_diFormatMx;std::map<void*,std::shared_ptr<DiFormatLifetime>> g_diFormatAliases;
 std::set<void*> g_diFormatRetiredAliases;bool g_diFormatLegacyUncertain=false;

@@ -40,13 +40,15 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_keysequenceconsumer.c
   Stop-ViOwnedProcess $process
  }
  $peerFile="$Out\peer.vin";[IO.File]::WriteAllText($peerFile,"key w 100`n")
- foreach($mode in @('disconnect','partial','refuse','invalid_bool','nested_id')){
+ foreach($mode in @('disconnect','partial','refuse','invalid_bool','nested_id','unsupported_retap')){
+  [IO.File]::WriteAllText($peerFile,$(if($mode-eq'unsupported_retap'){"retap w+shift shift 1500 300 10`n"}else{"key w 100`n"}))
   $peerLog="$Out\peer_$mode.log";$shell=(Get-Command pwsh).Source;$peer=Start-Process $shell -ArgumentList "-NoProfile -File `"$PSScriptRoot\vi_sequence_ack_peer.ps1`" -Log `"$peerLog`" -Mode $mode" -WindowStyle Hidden -PassThru;$owned+=$peer;$script:targetId=$peer.Id
   $deadline=[Environment]::TickCount64+3000;do{if((Get-Content $peerLog -Raw -ErrorAction SilentlyContinue)-match'READY'){break};Start-Sleep -Milliseconds 10}while([Environment]::TickCount64-lt$deadline)
   $reply=Call @('seq',$peerFile);$peer.WaitForExit(3000)|Out-Null
-  if($mode-eq'refuse'){Check (-not$reply.ok-and$reply.input_injected-eq$false-and-not$reply.delivery_unknown-and$reply.error-eq'synthetic definite refusal') 'definite valid refusal remains definite and preserves error'}
+  if($mode-eq'unsupported_retap'){Check (-not$reply.ok-and$reply.error-match'sequence_retap_version'-and-not$reply.delivery_unknown) 'old target retap capability refuses before scheduling any sequence'}
+  elseif($mode-eq'refuse'){Check (-not$reply.ok-and$reply.input_injected-eq$false-and-not$reply.delivery_unknown-and$reply.error-eq'synthetic definite refusal') 'definite valid refusal remains definite and preserves error'}
   else{Check (-not$reply.ok-and$reply.delivery_unknown-and$reply.may_have_started-and$null-eq$reply.input_injected) "$mode scheduling acknowledgement becomes valid uncertain-input JSON"}
-  Check (@(Get-Content $peerLog|Where-Object {$_-match'REQUEST .*"cmd":"sequence"'}).Count-eq1) "$mode scheduling request is never retried"
+  Check (@(Get-Content $peerLog|Where-Object {$_-match'REQUEST .*"cmd":"sequence"'}).Count-eq$(if($mode-eq'unsupported_retap'){0}else{1})) "$mode scheduling request is never retried or sent to an unsupported target"
   Check (@(Get-Content $peerLog|Where-Object {$_-match'REQUEST .*"cmd":"readiness"'}).Count-eq1-and@(Get-Content $peerLog|Where-Object {$_-match'REQUEST .*"cmd":"status"'}).Count-eq1) "$mode synthetic armed-cursor readiness and sequence support are each probed once"
   Stop-ViOwnedProcess $peer
  }

@@ -200,3 +200,78 @@ Generic and factual; check each against your build of the game.
 - Capture region uses client pixels before scaling. Read image scale/scale_y and
   offsets to map the preview, or use coord_space:"capture". upscale:true plus
   max_width explicitly enlarges small PNG crops; save_path/out_dir select files.
+
+## Playtest notes (session 10)
+
+- Menu steps fit one key_sequence call: steps:[{action:"key",key:"down",ms:80},
+  {action:"wait",ms:100},{action:"key",key:"enter",ms:80}], wait:true,
+  capture_settle_ms:150, capture_after:0, region:{x:100,y:40,w:320,h:180},
+  max_width:320. Adjust keys and region to the observed menu. wait:true observes
+  this native job's completion before the settle delay and one image; it does
+  not prove the menu consumed the keys. Default async capture can precede them.
+- wm_mouse_unrecognized_dropped counts isolated mouse messages without owned
+  provenance, including startup/window traffic before any agent action. Its
+  source is unknown. Inspect owned_delivered/owned_dropped and the image to
+  assess an agent action; the aggregate drop count cannot establish that.
+- Use compact:true on input/capture tools, or VINPUT_MCP_COMPACT=1 on the server.
+  Native job state, reader summary, warnings and image paths remain available.
+  compact:false restores full receipts. OCR also accepts text_only:true when
+  boxes are unnecessary; ordinary OCR defaults to lines without word boxes.
+- capture_after numbers are FRAME COUNTS. For a timer delay use
+  capture_settle_ms:300 with capture_after:0; capture_after:300 asks for 300
+  future target Presents. PrintWindow has no measured rendered-frame age.
+- For a timed chase use key_sequence with wait:true, abort_on:{kind:"text",
+  text:"MISSION FAILED",region:{x:0,y:0,w:800,h:180},poll_ms:100},
+  capture_every_ms:500, capture_max_frames:16, capture_max_width:640 and a
+  capture_out_dir. Review sequence_captures.frames and its row-major sheet;
+  each frame has job/QPC/scope receipts. Use an image template or a quiet
+  region-change condition when OCR is unreliable. Observer latency is bounded
+  but can miss a short-lived screen. Frames are observations, not game actions.
+- wait:true belongs on the original key_sequence call. An admitted async reply's
+  next_action follows that exact job with job_status. Never resubmit the sequence
+  to wait for it. Cancel only its job_id when you want to stop it.
+- Refresh a modifier while retaining movement with steps:[{action:"retap",
+  key:"w+shift",retap_key:"shift",ms:1500,every_ms:300,gap_ms:10}], wait:true.
+  W stays held; Shift gets fresh edges. Choose a gap the game can poll and check
+  the resulting scene. Other steps still release their full chord at completion.
+- To approach a visible target: capture, turn toward a world landmark, then make
+  short 300..800ms moves and re-capture. move_until_stuck with key:"w", a small
+  world region, timeout_ms:2000 and still_ms:500 stops the exact hold when those
+  pixels stay quiet. stopped:"no_motion" does not distinguish a wall, a pause or
+  ignored input. Avoid animated HUD/hand regions and inspect the final image.
+- Save an angular reference using look_calibrate {mode:"counts",yaw_counts:300,
+  observed_yaw_deg:45,game:"my-current-settings"}, substituting your own compass
+  or known-turn measurement. Or supply signed counts_per_degree and an optional
+  pitch_counts_per_degree. turn {degrees:60} and look {yaw:30,pitch:10} reuse it
+  across MCP restarts for the exact process/window/settings label. Recalibrate
+  after sensitivity/FOV changes. Collision/smoothing can invalidate the angle;
+  actual degrees remain unknown. look_at can close the loop on a unique image
+  landmark using the separate visual pixel calibration.
+- After checking that S/Space/W are your bindings, unstick {degrees:60,
+  capture_after:0} tries one bounded backup/turn/jump/forward recipe using saved
+  counts. Inspect before another attempt. Avoid Ctrl or other movement modifier
+  chords unless the game binds them; Ctrl can toggle crouch instead of holding it.
+- Recognized live Chrome_WidgetWin_0/1 windows automatically use legacy UI input
+  and 400ms hold/350ms hover defaults. Explicit input modes and click timings
+  override them; relative raw mouse-look keeps its usual policy. A hold-to-skip
+  control can need a longer explicit hold_ms, for example 2000. Verify once;
+  don't blindly retry a delivered click. click_many accepts one final capture.
+- Repeated PrintWindow hashes may mean static UI, cached output or a stalled
+  renderer. capture_observation reports identical captures and elapsed unchanged
+  time, with rendered_frame_age_ms:null. Auto already tries an observed native
+  renderer first; a Chromium GPU child/window is not automatically an input
+  target or a supported native capture route.
+- After a popup click, observe_settle {region:<popup>,poll_ms:300,
+  stable_samples:5,timeout_ms:8000,capture_after:0,max_width:640} observes a
+  longer quiet window and returns one image. Use wait_text for the expected
+  next state when possible. A stale/cached image can also be quiet; do not
+  re-click a potentially claimed item just because the first capture is old.
+- Keep review sheets readable: capture_burst {frames:4,columns:2,max_width:640,
+  region:<relevant panel>,interval_ms:500}. max_width is per tile; fewer cropped
+  tiles beat many full-client frames. The saved original keeps its native tile
+  geometry; an attachment preview can be smaller.
+- coord_space:"capture" action replies include mapping_used: the actual scale,
+  offsets, source window scope and capture_map_id used for conversion. That ID
+  is a geometry-map token, not a GPU frame ID. capture_after has its own mapping.
+  To deliberately reuse an older screenshot's geometry, pass its mapping
+  explicitly and verify that the UI still matches before input.

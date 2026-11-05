@@ -48,6 +48,7 @@
 #include "vi_trace.h"
 #include "vi_vision.h"
 #include "vi_motion.h"
+#include "vi_framework_input.h"
 #include "vi_image_encode.h"
 #include "vi_paths.h"
 #include "vi_capture_fence.h"
@@ -195,6 +196,12 @@ struct Counters {
     std::atomic<long> act_swallowed{0}, act_synth{0}, act_leaked{0}, act_refresh_posted{0}, act_refresh_delivered{0}, act_refresh_cancelled{0}, act_refresh_failed{0}, act_cbt_blocked{0}, act_cbt_installed{0}, act_cbt_failed{0}, act_cbt_unhook_failed{0}, present{0}, present_ours{0}, captures{0};
     std::atomic<long> posted{0}, raw_posted{0}, raw_queued{0}, post_target_rejected{0}, last_post_target_error{0};
 } C;
+std::atomic<unsigned long long> g_unrecognizedMouseTypes[WM_MOUSELAST-WM_MOUSEFIRST+1]{};
+void RecordUnrecognizedMouseType(UINT message){if(message>=WM_MOUSEFIRST&&message<=WM_MOUSELAST)++g_unrecognizedMouseTypes[message-WM_MOUSEFIRST];}
+std::string UnrecognizedMouseTypesJson(){
+    static const char* names[]={"WM_MOUSEMOVE","WM_LBUTTONDOWN","WM_LBUTTONUP","WM_LBUTTONDBLCLK","WM_RBUTTONDOWN","WM_RBUTTONUP","WM_RBUTTONDBLCLK","WM_MBUTTONDOWN","WM_MBUTTONUP","WM_MBUTTONDBLCLK","WM_MOUSEWHEEL","WM_XBUTTONDOWN","WM_XBUTTONUP","WM_XBUTTONDBLCLK","WM_MOUSEHWHEEL"};
+    std::string out="{";for(unsigned i=0;i<sizeof(names)/sizeof(names[0]);++i){const auto count=g_unrecognizedMouseTypes[i].load();if(count){if(out.size()>1)out+=',';out+='\"';out+=names[i];out+="\":"+std::to_string(count);}}return out+"}";
+}
 #include "vi_pad_api_census.h"
 
 std::string g_hooksOk, g_hooksFail;
@@ -495,13 +502,13 @@ WPARAM MouseKeyFlags() {
 }
 LPARAM ClientLParam() { return MAKELPARAM((SHORT)g_vcurX.load(), (SHORT)g_vcurY.load()); }
 
-bool MsgsWanted(bool kbd, const RawReg& rr) {
-    int m = g_cfg.msgmode; if (m == 1) return true; if (m == 2) return false;
-    return kbd ? !(rr.kbd && rr.kbdNoLegacy) : !(rr.mouse && rr.mouseNoLegacy);
+struct FrameworkWindow {HWND window=nullptr;unsigned long long generation=0;bool chromium=false;wchar_t className[128]{};};
+FrameworkWindow FrameworkProfileForCurrent();
+bool MsgsWanted(bool kbd, const RawReg& rr,bool ui=true) {
+    return vi_framework_input::Legacy(g_cfg.msgmode,kbd?rr.kbd:rr.mouse,kbd?rr.kbdNoLegacy:rr.mouseNoLegacy,ui&&FrameworkProfileForCurrent().chromium,ui);
 }
-bool RawWanted(bool kbd, const RawReg& rr) {
-    int m = g_cfg.rawmode; if (m == 3) return false; if (m == 1 || m == 2) return true;
-    return kbd ? rr.kbd : rr.mouse;
+bool RawWanted(bool kbd, const RawReg& rr,bool ui=true) {
+    return vi_framework_input::Raw(g_cfg.rawmode,g_cfg.msgmode,kbd?rr.kbd:rr.mouse,ui&&FrameworkProfileForCurrent().chromium,ui);
 }
 
 void MouseButton(int vk, bool down);
@@ -598,7 +605,7 @@ AppliedMouse MouseMoveTo(LONG x, LONG y, bool relativeOrigin, LONG rdx, LONG rdy
     if(AddDiDelta(g_diDX,dx))a.accounting.di_state_dx=dx;else a.accounting.di_state_rejected=true;
     if(AddDiDelta(g_diDY,dy))a.accounting.di_state_dy=dy;else a.accounting.di_state_rejected=true;
     RawReg rr = QueryRawReg();
-    a.accounting.raw_query_failed=!rr.queryOk;const bool raw=RawWanted(false,rr);if(g_cfg.rawmode==3)a.accounting.raw_backend=3;
+    a.accounting.raw_query_failed=!rr.queryOk;const bool raw=RawWanted(false,rr,!relativeOrigin);if(g_cfg.rawmode==3)a.accounting.raw_backend=3;
     long long leftX=dx,leftY=dy;
     do {LONG chunkX=(LONG)(std::max)(-2147483648LL,(std::min)(2147483647LL,leftX)),chunkY=(LONG)(std::max)(-2147483648LL,(std::min)(2147483647LL,leftY));
         int queuedX=DiPush(false,DIMOFS_X,(DWORD)chunkX),queuedY=DiPush(false,DIMOFS_Y,(DWORD)chunkY);
@@ -608,7 +615,7 @@ AppliedMouse MouseMoveTo(LONG x, LONG y, bool relativeOrigin, LONG rdx, LONG rdy
             if(backend==1){a.accounting.raw_posted_dx+=chunkX;a.accounting.raw_posted_dy+=chunkY;}else if(backend==2){a.accounting.raw_queued_dx+=chunkX;a.accounting.raw_queued_dy+=chunkY;}else{++a.accounting.raw_failures;a.accounting.raw_failed_dx+=chunkX;a.accounting.raw_failed_dy+=chunkY;}}
         leftX-=chunkX;leftY-=chunkY;
     }while(leftX||leftY);
-    bool attempted = MsgsWanted(false, rr) && g_hwnd;
+    bool attempted = MsgsWanted(false, rr,!relativeOrigin) && g_hwnd;
     bool accepted = attempted && PostOurs(g_hwnd, WM_MOUSEMOVE, MouseKeyFlags(), ClientLParam());
     a.dx=(long long)nx-ox;a.dy=(long long)ny-oy;a.message_attempted=attempted;a.message_accepted=accepted;return a;
 }
@@ -875,6 +882,7 @@ BOOL WINAPI h_RegisterRawInputDevices(PCRAWINPUTDEVICE devices,UINT count,UINT s
 // window subclass: fake focus + isolation of real mouse/raw input in the background
 // ----------------------------------------------------------------------------------------------
 #include "vi_wndproc_binding.inl"
+#include "vi_framework_window.inl"
 #include "vi_raw_buffer_routing.inl"
 #include "vi_present_window.inl"
 // Read-only lifetime witness for native confinement; no input lock or callback.
@@ -1015,8 +1023,8 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         C.wm_mouse++;
         bool ours = RingConsume(h, m, w, l);
         if(ours)++C.wm_mouse_owned;
-        if(!WndBindingLive(callback.binding)){WndBindingRecordInputRefusal();C.wm_mouse_dropped++;if(ours)++C.wm_mouse_owned_dropped;else ++C.wm_mouse_unrecognized_dropped;return 0;}
-        if (!ours && MouseKeyboardIsolating()) { C.wm_mouse_dropped++;++C.wm_mouse_unrecognized_dropped;return 0; }
+        if(!WndBindingLive(callback.binding)){WndBindingRecordInputRefusal();C.wm_mouse_dropped++;if(ours)++C.wm_mouse_owned_dropped;else {++C.wm_mouse_unrecognized_dropped;RecordUnrecognizedMouseType(m);}return 0;}
+        if (!ours && MouseKeyboardIsolating()) { C.wm_mouse_dropped++;++C.wm_mouse_unrecognized_dropped;RecordUnrecognizedMouseType(m);return 0; }
         if(ours)++C.wm_mouse_owned_delivered;
         if (!ours && fg) NoteOwnerInput(m != WM_MOUSEMOVE);
         if (ours && m == WM_MOUSEMOVE) g_mouseMovesDelivered++;
@@ -2066,7 +2074,7 @@ bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_raw_buffer_json.inl"
 std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
-    o.num("key_sequence_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("sequence_abort_image_version",1);o.num("sequence_frame_anchor_version",1);o.num("input_scope_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
+    o.num("key_sequence_version",1);o.num("sequence_retap_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("sequence_abort_image_version",1);o.num("sequence_frame_anchor_version",1);o.num("input_scope_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
     o.num("relative_scope_version",1);o.num("pointer_scope_version",1);o.num("input_admission_version",1);o.num("relative_scope_refused",(double)g_relativeScopeRefused.load());
     o.num("pad_api_census_version",1);o.raw("pad_api_census",PadApiCensusJson());o.raw("directinput_readers",DiReaderStatusJson());
     o.num("claimed_di_guard_version",1);o.raw("claimed_di_guard",ClaimedDiStatusJson());
@@ -2084,6 +2092,7 @@ std::string StatusJson() {
     PresentWindowFields(o,reportedWindow);HiddenShowFields(o);
     o.raw("retarget_quiescence",RetargetQuiescenceStatusJson());
     o.raw("wndproc_binding",WndBindingStatusJson(g_hwnd));o.bol("wndproc_binding_ready",WndBindingReady(g_hwnd));o.num("wndproc_adoption_refused",(double)g_wndBindingRefused.load());o.num("wndproc_unbound_callbacks",(double)g_wndBindingMissing.load());
+    {const auto profile=FrameworkProfileForCurrent();JOut f;f.num("version",1);f.str("profile",profile.chromium?"chromium_ui":"none");f.bol("recognized",profile.chromium);char window[32];sprintf_s(window,"0x%llX",(unsigned long long)(ULONG_PTR)profile.window);f.str("hwnd",window);f.str("window_generation",std::to_string(profile.generation));f.str("class",W2U(profile.className));f.bol("auto_legacy_ui",profile.chromium&&g_cfg.msgmode==0);f.bol("auto_raw_ui_suppressed",profile.chromium&&g_cfg.msgmode==0&&g_cfg.rawmode==0);f.bol("relative_raw_policy_unchanged",true);if(profile.chromium){f.num("default_click_hold_ms",400);f.num("default_click_hover_ms",350);}f.str("scope","fresh current owned live-bound exact Chrome_WidgetWin_0/1; keyboard/absolute pointer/button/wheel UI route only, not universal CEF detection; explicit modes and relative mouse-look retain their policy");o.raw("framework_input",f.done());}
     if (g_hwnd) {
         wchar_t cls[128] = {0}, title[256] = {0}; GetClassNameW(g_hwnd, cls, 127); GetWindowTextW(g_hwnd, title, 255);
         RECT rc; GetClientRect(g_hwnd, &rc);
@@ -2171,13 +2180,15 @@ std::string StatusJson() {
     CN(posted); CN(raw_posted); CN(raw_queued); CN(post_target_rejected); CN(last_post_target_error);
 #undef CN
     c.num("fs_refused", (double)(g_fsRefused.load() + g_fsFailed.load()));   // public alias of fullscreen.refused + fullscreen.failures
-    o.raw("counters", c.done());
+    o.raw("counters", c.done());o.raw("mouse_message_unrecognized_types",UnrecognizedMouseTypesJson());
     { std::lock_guard<std::mutex> lk(g_hookStrMx); o.str("hooks_ok", g_hooksOk); o.str("hooks_failed", g_hooksFail); }
     o.num("uptime_ms", GetTickCount() - g_t0);
     ClaimFields(o);
     return o.done();
 }
 
+#include "vi_capture_history.h"
+vi_capture_history::History g_captureHistory;
 std::string DoCapture(const JObj& j) {
     CaptureDiagReset();
     std::string path = JStr(j, "path");
@@ -2317,6 +2328,18 @@ std::string DoCapture(const JObj& j) {
     if(format=="jpeg")o.num("quality",qualityValue);
     o.num("frame", used == "printwindow" ? (double)C.present_ours.load() : (double)g_capturedPresent.load());
     o.str("hash", hashText); o.num("present_before", frameBefore); o.num("captured_present", g_capturedPresent);
+    if(!hashOnly){
+        const auto frequency=vi_qpc::Frequency();const auto history=g_captureHistory.Observe(CaptureScopeJson(captureScope)+"|"+used+"|"+path_+"|"+std::to_string((ULONG_PTR)g_captureDiagnostic.source.window)+":"+std::to_string(g_captureDiagnostic.source.lifetime)+"|"+JStr(j,"region")+"|"+std::to_string(g_capW)+"x"+std::to_string(g_capH),hash,captureQpc,frequency);
+        JOut observed;observed.num("version",1);observed.bol("measured",history.measured);
+        if(history.comparable)observed.bol("pixel_hash_changed",history.changed);else observed.raw("pixel_hash_changed","null");
+        observed.num("identical_captures",(double)history.identical);observed.num("unchanged_for_ms",history.unchangedMs);
+        const auto frameQpc=g_capturedFrameQpc.load();
+        observed.raw("rendered_frame_age_ms","null");
+        if(used!="printwindow"&&frequency&&frameQpc&&frameQpc<=captureQpc)observed.num("frame_hook_age_ms",(double)(captureQpc-frameQpc)*1000.0/(double)frequency);else observed.raw("frame_hook_age_ms","null");
+        observed.str("frame_freshness",used=="printwindow"?"unmeasured_printwindow":"native_hook_timestamp");observed.bol("native_alternative_present_observed",C.present_ours>0);
+        observed.str("scope","successful source-region pixel hashes in this exact window lifetime; unchanged pixels cannot distinguish static UI, cached PrintWindow output or a stalled renderer");o.raw("capture_observation",observed.done());
+        if(used=="printwindow"&&history.identical>=3)o.str("capture_freshness_warning","PrintWindow returned repeated identical source-region hashes. Rendered frame age is unknown: this may be static content, cached output or a stalled renderer. Auto already tries an observed native renderer first; request method:native only when a target Present route is available. Input was not repeated.");
+    }
     if(retainChanged){o.bol("observation_frame_saved",observationSaved);if(observationSaved)o.str("observation_frame_path",path);}
     if(!motionSample.empty()){o.num("motion_sample_version",1);o.num("motion_sample_w",motionW);o.num("motion_sample_h",motionH);o.str("motion_sample_rgb",motionSample);o.str("motion_sample_scope","area-averaged 16x16 RGB grid of the selected source region; coarse pixel change, not optical flow or gameplay movement");}
     o.num("after_frames", requestedFrames); o.num("origin_x", mapOx); o.num("origin_y", mapOy);
@@ -2602,7 +2625,8 @@ std::string Exec(const std::string& line) {
             upCleanup.Run();hoverWaitReason=reason;JOut o;o.bol("ok",false);o.str("error",message);o.num("button_down_count",0);if(cmd=="mouseup")o.bol("button_released",!g_vk[vk]);hoverFields(o);return o.done();
         };
         // Validate every static press/release option before any positioned hover is published.
-        const double countValue=JNum(j,"count",1),ms=cmd=="click"?JNum(j,"ms",60):0,gap=JNum(j,"gap",80),pollCapValue=JNum(j,"di_poll_timeout_ms",1000);
+        const auto clickFramework=FrameworkProfileForCurrent();
+        const double countValue=JNum(j,"count",1),ms=cmd=="click"?vi_framework_input::Hold(JNum(j,"ms",60),!JHas(j,"ms")||JBool(j,"framework_default_hold",false),clickFramework.chromium):0,gap=JNum(j,"gap",80),pollCapValue=JNum(j,"di_poll_timeout_ms",1000);
         if(cmd=="click" && (!(ms>=0&&ms<=120000)||!(gap>=0&&gap<=60000)||!(countValue>=1&&countValue<=1000&&countValue==std::floor(countValue))))return hoverError("click duration/count/gap out of range; no button was pressed","invalid_click_timing");
         if(JHas(j,"di_poll_timeout_ms") && (cmd!="click" || j.find("di_poll_timeout_ms")->second.t!=2 || !(pollCapValue>=0&&pollCapValue<=5000&&pollCapValue==std::floor(pollCapValue)))) {
             if(cmd=="mouseup"){if(captureScopeChecked)upCleanup.Run();else MouseButton(vk,false);JOut o;o.bol("ok",false);o.str("error","mouse-up cleanup attempted; di_poll_timeout_ms applies only to timed click");o.bol("button_released",!g_vk[vk]);o.num("button_down_count",0);return o.done();}
@@ -2617,7 +2641,7 @@ std::string Exec(const std::string& line) {
         POINT resolved{g_vcurX,g_vcurY},expected=resolved,applied=resolved,lastPress=resolved;
         int presses=0;
         if (positioned) {
-            double timeoutValue = JNum(j, "hover_timeout_ms", 1500), framesValue = JNum(j, "hover_frames", 3), settleValue = JNum(j, "settle_ms", -1);
+            double timeoutValue = JNum(j, "hover_timeout_ms", 1500), framesValue = JNum(j, "hover_frames", 3), settleValue = vi_framework_input::Hover(JNum(j, "settle_ms", -1),!JHas(j,"settle_ms")||JBool(j,"framework_default_hover",false),clickFramework.chromium);
             if (!(timeoutValue >= 1 && timeoutValue <= 120000 && timeoutValue == std::floor(timeoutValue)) ||
                 !(framesValue >= 0 && framesValue <= 3600 && framesValue == std::floor(framesValue)) ||
                 !((!JHas(j, "settle_ms") && settleValue == -1) || (settleValue >= 0 && settleValue <= 60000))) return hoverError("hover timeout/frames/settle timing out of range","invalid_hover_timing");

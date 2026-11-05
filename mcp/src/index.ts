@@ -27,16 +27,20 @@ import { presentMouseDiagnostics } from "./actiondiagnostics.js";
 import {verifiedClick,clickScopeCapability} from './clickverify.js';
 import { CaptureMappings, nativeMapping } from "./capturemapping.js";
 import { registerCameraHelpers } from "./camerahelpers.js";
+import { registerNavigationMotion } from "./navigationmotion.js";
+import { frameworkClickTiming } from "./frameworkclick.js";
 import { waitTextQuery, presentWaitTextAny } from "./waittextany.js";
 import { registerAgentLoops, noteOtherInput } from "./agentloops.js";
-import { loadedLaunchFailure } from "./launchstate.js";
+import { loadedLaunchFailure,launchReadinessNote } from "./launchstate.js";
 import { launcherFollowAction } from "./launcherfollow.js";
 import {captureDestination,destinationError,type CaptureDestination} from './capturedestination.js';
 import {compactRenderBackends} from './backendview.js';
 import {measureTimedInput} from './holdmotion.js';
 import { prepareSequenceConditions, guardSequence, type PreparedConditions } from "./sequenceconditions.js";
+import { compactEnabled, compactReply } from "./compactreply.js";
+import {prepareCapturePlan,sequenceFollowAction} from './sequencecaptures.js';
 
-const VERSION = "0.2.9";
+const VERSION = "0.3.0";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -152,37 +156,43 @@ const server = new McpServer(
 function tool<S extends z.ZodRawShape>(name: string, title: string, description: string, shape: S,
   run: (a: z.objectOutputType<S, z.ZodTypeAny>, runtime?: {signal?:AbortSignal}) => Promise<ToolReply>, readOnly = false) {
   if(name==='type_text')tool('type',title,'Alias of type_text. '+description,shape,run,readOnly);
-  server.registerTool(name, { title, description, inputSchema: shape, annotations: { title, readOnlyHint: readOnly, openWorldHint: false } },
+  server.registerTool(name, { title, description, inputSchema: { ...shape,
+    compact: z.boolean().optional().describe("Return a short presentation: action/job state, observed reader channels, warnings and image path. Images are retained; application response stays unknown. Defaults to VINPUT_MCP_COMPACT; false requests full detail.") }, annotations: { title, readOnlyHint: readOnly, openWorldHint: false } },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (async (a: any, extra: {signal?:AbortSignal}) => {
+      const terse = compactEnabled(a?.compact);
+      const present = (out: ToolReply) => compactReply(out, terse, name);
+      // Presentation never reaches native requests or changes handler decisions.
+      const { compact: _compact, ...input } = a ?? {};
+      a = input;
       const p: number | undefined = typeof a?.pid === "number" ? a.pid : undefined;
       try {
         if (p !== undefined) {
           watchTarget(p);
           if (name === "attach" || name === "detach") advanceCaptureSession(p);
           const k = name === "attach" ? undefined : knownExit(p);   // attach may be a reused pid number
-          if (k) return exitedReply(p, k.code);
+          if (k) return present(exitedReply(p, k.code));
           if(!readOnly&&!['click_many','click_grid','click_to_move'].includes(name))noteOtherInput(p);
         }
         const out = await run(a,{signal:extra?.signal});
         if (p !== undefined && out.isError) {
           const ex = await confirmExit(p);
           if (ex) {
-            try {const j=JSON.parse((out.content[0] as {text:string}).text);if(j.input_session||j.input_receipt||j.input_read_observation){out.content[0]={type:'text',text:JSON.stringify({...j,target_exited:true,pid:p,exit_code:ex.code})};return out;}}catch{/* Existing pre-input/malformed replies keep normal exit behavior. */}
+            try {const j=JSON.parse((out.content[0] as {text:string}).text);if(j.input_session||j.input_receipt||j.input_read_observation){out.content[0]={type:'text',text:JSON.stringify({...j,target_exited:true,pid:p,exit_code:ex.code})};return present(out);}}catch{/* Existing pre-input/malformed replies keep normal exit behavior. */}
             if (name === "key_sequence" && a.wait === true) {
               try {
                 const j = JSON.parse((out.content[0] as { text: string }).text);
                 if (j.sequence_input && j.sequence_wait) {
                   out.content[0] = { type: "text", text: JSON.stringify({ ...j, target_exited: true, pid: p, exit_code: ex.code }) };
-                  return out;
+                  return present(out);
                 }
               } catch { /* Pre-action or malformed replies keep the existing exit behavior. */ }
             }
-            return exitedReply(p, ex.code);
+            return present(exitedReply(p, ex.code));
           }
         }
-        return out;
-      } catch (e) { return fail(`${name}: ${(e as Error).message}`); }
+        return present(out);
+      } catch (e) { return present(fail(`${name}: ${(e as Error).message}`)); }
     }) as never);
 }
 
@@ -240,6 +250,7 @@ tool("launch", "Launch a game",
     const candidatePid = (r.json as { pid?: unknown } | null)?.pid;
     const lp = r.ok && typeof candidatePid === "number" && Number.isSafeInteger(candidatePid) && candidatePid > 0 ? candidatePid : undefined;
     const extra: Record<string, unknown> = {};
+    Object.assign(extra,launchReadinessNote(r.json));
     const follow=launcherFollowAction(r.json,a.claim===true,a.claim_ttl_s);if(follow)extra.next_action=follow;
     if (!r.ok) Object.assign(extra, loadedLaunchFailure(r.json, a.claim === true, a.claim_ttl_s));
     let claimOk = true, compoundOk = r.ok;
@@ -498,7 +509,10 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
     if (coreRan && (o.max_width !== undefined || o.scale !== undefined)) scaledBy = "vinput";
   }
   const j0 = (r.json && typeof r.json === "object" ? r.json : {}) as { method?: string; path?: string; error?: string };
-  let extra: Record<string, unknown> = o.region?{requested_region:o.region,region_coordinate_system:'client_pixels'}:{};
+  const captureReceipt=r.json as {capture_observation?:unknown;capture_freshness_warning?:unknown};
+  let extra: Record<string, unknown> = {...(o.region?{requested_region:o.region,region_coordinate_system:'client_pixels'}:{}),
+    ...(captureReceipt.capture_observation&&typeof captureReceipt.capture_observation==='object'?{capture_observation:captureReceipt.capture_observation}:{}),
+    ...(typeof captureReceipt.capture_freshness_warning==='string'?{capture_freshness_warning:captureReceipt.capture_freshness_warning}:{})};
   let stuck = false;
   if (!r.ok || j0.method === "printwindow") {
     const st = await runVinput([...at(pid), "status"], 15000);
@@ -586,7 +600,7 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
 }
 
 const captureAfterSchema = z.union([z.boolean(), z.number().int().min(0).max(3600)]).optional().describe(
-  "Look right after acting: true waits for 3 presented frames, with one explicitly reported fresh PrintWindow fallback if that wait times out and status shows no target Present stream; a number strictly waits for that many frames " +
+  "Look right after acting: true waits for 3 presented frames, with one explicitly reported fresh PrintWindow fallback if that wait times out and status shows no target Present stream; a number is a FRAME COUNT, never milliseconds, and strictly waits for that many frames " +
   "first (0 = capture immediately). Use observe_settle for bounded scoped stable-frame observation after the action; capture_after itself is one image. The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
   "saving a capture round trip. Skipped when the action itself failed.");
 const DEFAULT_LOOK_FRAMES = 3;
@@ -676,7 +690,7 @@ function actionCaptureError(a: CaptureImageOptions & { capture_after?: boolean |
   const disabled = a.capture_after === undefined || a.capture_after === false;
   if (a.capture_settle_ms !== undefined && disabled) return "capture_settle_ms requires capture_after";
   if (disabled && [a.region, a.max_width, a.scale, a.format, a.quality,a.upscale,a.save_path,a.out_dir].some((v) => v !== undefined))
-    return "action image options require enabled capture_after";
+    return "action image options require enabled capture_after; pass capture_after:0 for an immediate image or capture_after:true to request three presented frames";
   if (a.scale !== undefined && a.max_width !== undefined) return "give only one of scale, max_width";
   if (a.format === "jpeg" && a.scale !== undefined && a.scale > 1) return "JPEG action images support scale <= 1; use PNG for MCP enlargement";
   return validateFormat(a);
@@ -943,7 +957,7 @@ tool("click", "Click",
       if ("error" in m) return fail(m.error);
       pos = [String(m.pts[0][0]), String(m.pts[0][1])];
       pointerScope=m.scope;
-      if (m.mapped) mappedInfo = { mapped: { x: m.pts[0][0], y: m.pts[0][1] } };
+      if (m.mapped) mappedInfo = { mapped: { x: m.pts[0][0], y: m.pts[0][1] },mapping_used:m.mapping_used };
     }
     const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "click target", x: Number(pos[0]), y: Number(pos[1]) }], a.edge_margin, a.norm);
     const verificationEpoch=captureSessionEpoch.get(a.pid)??0;
@@ -951,9 +965,10 @@ tool("click", "Click",
     if(capability&&!capability.ok)return reply(capability);
     if(a.verify_change&&(captureSessionEpoch.get(a.pid)??0)!==verificationEpoch)return fail('attachment changed during click preflight; no click or temporary modifier was sent');
     return withMouseModifiers(a.pid,a.modifiers,async()=>{
+    const frameworkTiming=frameworkClickTiming(a.hold_ms,a.hover_ms,a.x!==undefined);
     const sendClick=(scope?:string)=>runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),...opt('--scope-json',scope??pointerScope),
-      ...(a.x === undefined ? [] : ["--settle-ms", String(a.hover_ms ?? DEFAULT_CLICK_HOVER_MS)]),
-      ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS),
+      ...(a.x === undefined ? [] : ["--settle-ms", String(frameworkTiming.hover)]),
+      ...opt("--count", a.count), "--ms", String(frameworkTiming.hold),...frameworkTiming.argv,
       ...(a.di_poll_timeout_ms !== undefined ? ["--di-poll-timeout-ms", String(a.di_poll_timeout_ms)] : []),
       ...(a.di_release_timeout_ms !== undefined ? ["--di-release-timeout-ms", String(a.di_release_timeout_ms)] : [])],
       60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0) + ((a.di_poll_timeout_ms ?? 1000) + (a.di_release_timeout_ms ?? 1000)) * (a.count ?? 1));
@@ -977,7 +992,7 @@ tool("move", "Move the cursor",
     const mr = await runVinput([...at(a.pid), "mouse", String(m.pts[0][0]), String(m.pts[0][1]), ...opt("--norm", a.norm),
       ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps),...opt('--scope-json',m.scope)], 60000);
     const evidence = inputEvidence(mr.json);
-    return look(a.pid, reply(mr, { ...(m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : {}), ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}) }), a.capture_after, observation);
+    return look(a.pid, reply(mr, { ...(m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] },mapping_used:m.mapping_used } : {}), ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}) }), a.capture_after, observation);
   });
 
 tool("move_relative", "Relative mouse motion",
@@ -1023,7 +1038,7 @@ tool("drag", "Drag",
     const btn = a.button ?? "left", ms = a.ms ?? 300;
     const steps = a.steps ?? Math.min(60, Math.max(3, Math.round(ms / 20)));
     const holdStart = a.hold_start_ms ?? DEFAULT_DRAG_HOLD_START_MS, holdEnd = a.hold_end_ms ?? DEFAULT_DRAG_HOLD_END_MS;
-    const where = { ...(m.mapped ? { mapped: { x1, y1, x2, y2 } } : {}), ...(warnings.length ? { warnings } : {}) };
+    const where = { ...(m.mapped ? { mapped: { x1, y1, x2, y2 },mapping_used:m.mapping_used } : {}), ...(warnings.length ? { warnings } : {}) };
     return withMouseModifiers(a.pid,a.modifiers,async()=>{
     let placementFallback: string | undefined;
     if (a.placement) {
@@ -1043,7 +1058,7 @@ tool("drag", "Drag",
         : `${(pr.json as { error?: string }).error ?? "placement drag unsupported"}: used press / move / release instead`;
     }
     const down = await runVinput([...at(a.pid), "mousedown", btn, String(x1), String(y1)], 60000);
-    if (!down.ok) return reply({ ...down, ok: false, json: { ok: false, error: "drag: mouse down failed", down: down.json } });
+    if (!down.ok) return reply({ ...down, ok: false, json: { ok: false, error: "drag: mouse down failed", down: down.json } },where);
     let mv: CliResult | undefined, up: CliResult | undefined;
     try {
       await sleepMs(holdStart);
@@ -1362,9 +1377,12 @@ tool("pad_rotate", "Rotate a stick for a prompt",
   });
 
 const seqStep = z.object({
-  action: z.enum(["hold", "key", "wait"]).describe("hold / key: press the chord for ms; wait: do nothing for ms."),
+  action: z.enum(["hold", "key", "wait", "retap"]).describe("hold / key: press chord for ms; wait: no input; retap: keep the chord held while re-pressing only retap_key at each every_ms interval."),
   key: keyCombo.optional().describe("Key or chord (hold / key only), e.g. 'w' or 'w+space'."),
   ms: z.number().int().min(1).max(118000),
+  retap_key: keyCombo.optional().describe("retap only: one exact member of key to release/repress; other chord keys stay down."),
+  every_ms: z.number().int().min(2).max(118000).optional().describe("retap only: anchored re-tap period, strictly larger than gap_ms."),
+  gap_ms: z.number().int().min(1).max(1000).optional().describe("retap only: requested release gap, default 10ms. A short gap may not be read by the game."),
 }).strict();
 const seqCondition = z.object({kind:z.enum(['frame_change','region_change','text','image']),region:regionRect.optional(),text:z.string().min(1).max(512).optional(),exact:z.boolean().optional(),fuzzy:z.number().min(.01).max(1).optional(),template:z.string().min(1).max(32768).optional(),threshold:z.number().min(.01).max(1).optional(),grace_ms:z.number().int().min(0).max(30000).optional(),
   timeout_ms:z.number().int().min(100).max(60000).optional(),poll_ms:z.number().int().min(20).max(1000).optional(),after_frames:z.number().int().min(1).max(3600).optional(),present_timeout_ms:z.number().int().min(100).max(60000).optional()}).strict();
@@ -1379,23 +1397,35 @@ tool("key_sequence", "Run a keyboard sequence",
     abort_on:seqCondition.omit({timeout_ms:true,after_frames:true,present_timeout_ms:true}).optional().describe('Requires wait:true. Stop the exact job on a scoped hash change, text (optional fuzzy score), or PNG template. Prefer a small region and image/hash for faster observation without OCR. grace_ms arms after the native job starts and rebaselines hash changes after grace. The matched frame is retained when supported. Polling latency and native observer expiry remain bounded, not hard real-time.'),
     progress_check:z.object({region:regionRect.optional(),max_unchanged_ms:z.number().int().min(100).max(20000)}).strict().optional().describe('Requires wait:true. Stop if the selected frame/region hash remains unchanged; choose a meaningful region. This does not establish gameplay success.'),
     max_lateness_ms:z.number().int().min(1).max(5000).optional().describe('Abort the entire native sequence before an overdue key edge exceeds this bound. start_on defaults1000ms. No input edge is silently skipped or replayed.'),
+    capture_every_ms:z.number().int().min(250).max(30000).optional().describe('Requires wait:true. Retain scoped PNGs during THIS same observed native sequence; guarded expiry stays active. First running witness then this interval; missed intervals skipped. Returns frame QPC/job-step brackets and a review sheet, not precise step-to-frame or game-response proof.'),
+    capture_max_frames:z.number().int().min(1).max(32).optional().describe('Periodic retained-image cap, default16; recording stops at the cap while the sequence observer continues.'),
+    capture_region:regionRect.optional().describe('Periodic recording crop in client pixels; separate from final capture_after region.'),
+    capture_max_width:z.number().int().min(16).max(960).optional().describe('Periodic PNG width cap, default640. Per-frame pixel/file and total saved-file budgets also apply.'),
+    capture_out_dir:z.string().optional().describe('Directory for this sequence recording and its review sheet; default capture directory. No duplicate default files.'),
     wait: z.boolean().optional().describe("Wait for this exact generation-bound native sequence job. Default false; does not replay input or prove game consumption."),
     wait_timeout_ms: z.number().int().min(1).max(120000).optional().describe("Only with wait:true: observation budget AFTER scheduling, at most120000ms. Default native requested_ms+5000 capped120000. Unguarded timeout leaves the job running; guarded timeout requests one exact abort. Native guard expiry remains active after observer loss. Long waits require sufficient MCP client timeout.") },
-  async (a) => {
+  async (a,runtime) => {
     const captureError = actionCaptureError(a);
     if (captureError) return fail(captureError);
+    let capturePlan;try{capturePlan=prepareCapturePlan(a);}catch(e){return fail(String(e));}
+    if(capturePlan&&!a.wait)return fail('capture_every_ms requires wait:true; no sequence was sent');
     if (a.wait_timeout_ms !== undefined && !a.wait) return fail("wait_timeout_ms requires wait:true");
     if ((a.abort_on||a.progress_check)&&!a.wait) return fail('abort_on/progress_check require wait:true; no sequence was sent');
     if ((a.steps!==undefined)===(a.schedule!==undefined)) return fail("give exactly one of steps or schedule; no sequence was sent");
     const observation = actionObservation({ ...a, async: true });
     const context = { pid: a.pid, owner: OWNER, prefix: at(a.pid), epoch: observation.attachment_epoch,
-      currentEpoch: () => captureSessionEpoch.get(a.pid) ?? 0 };
+      currentEpoch: () => captureSessionEpoch.get(a.pid) ?? 0,signal:runtime?.signal };
     let lines: string[] = [];
     if(a.schedule){const built=keyScheduleLines(a.schedule);if(built.error!==undefined)return fail(built.error);lines=built.lines;}
     for (const [i, st] of (a.steps??[]).entries()) {
+      if(st.action!=="retap"&&(st.retap_key!==undefined||st.every_ms!==undefined||st.gap_ms!==undefined))return fail(`step ${i+1}: retap options require action:retap; no input was sent`);
       if (st.action === "wait") { if (st.key !== undefined) return fail(`step ${i + 1}: wait takes no key`); lines.push(`wait ${st.ms}`); continue; }
       if (!st.key) return fail(`step ${i + 1}: ${st.action} needs a key`);
       if (/\s/.test(st.key)) return fail(`step ${i + 1}: key names cannot contain spaces`);
+      if(st.action==="retap"){
+        if(!st.retap_key||/\s/.test(st.retap_key)||st.every_ms===undefined||st.every_ms<=(st.gap_ms??10)||st.every_ms+(st.gap_ms??10)>=st.ms)return fail(`step ${i+1}: retap needs retap_key, every_ms > gap_ms and one complete gap before ms; no input was sent`);
+        lines.push(`retap ${st.key} ${st.retap_key} ${st.ms} ${st.every_ms} ${st.gap_ms??10}`);continue;
+      }
       lines.push(`${st.action} ${st.key} ${st.ms}`);
     }
     if (a.wait) {
@@ -1403,19 +1433,20 @@ tool("key_sequence", "Run a keyboard sequence",
       if (unsupported) return reply(unsupported);
     }
     let conditions:PreparedConditions|undefined;
-    if(a.start_on||a.abort_on||a.progress_check){const prepared=await prepareSequenceConditions(context,{start_on:a.start_on,abort_on:a.abort_on,progress_check:a.progress_check});
+    if(a.start_on||a.abort_on||a.progress_check||capturePlan){const prepared=await prepareSequenceConditions(context,{start_on:a.start_on,abort_on:a.abort_on,progress_check:a.progress_check,capture_plan:capturePlan});
       if('ok' in prepared)return reply(prepared);conditions=prepared;}
-    const guarded=!!(a.abort_on||a.progress_check);
+    const guarded=!!(a.abort_on||a.progress_check||capturePlan);
     const startExtra=conditions?.start?{sequence_start:{observed:true,observations:conditions.observations,observed_capture_qpc_ticks:conditions.start.qpc,qpc_frequency:conditions.start.frequency,capture_scope:JSON.parse(conditions.start.scope),native_deadlines_anchor:conditions.presentTarget?'native_present_hook':'observed_capture',present_anchor_target_index:conditions.presentTarget??null,game_event_onset_measured:false,scope:'capture/OCR observation time or explicit future native Present hook; neither measures display scanout/game-event onset; missed frame is never rebased'}}:{};
     const dir = mkdtempSync(join(tmpdir(), "vinput-seq-"));
     const file = join(dir, "sequence.vin");
     try {
       writeFileSync(file, lines.join("\n") + "\n");
+      if(runtime?.signal?.aborted)return fail('sequence request cancelled before admission; no sequence was sent');
       const r = await runVinput([...at(a.pid), "seq", file, ...(a.replace ? ["--replace=true"] : []),...(conditions?.scope?['--scope-json',conditions.scope]:[]),...(guarded?['--guard-ms','4000']:[]),
         ...(conditions?.start?[...(conditions.presentTarget?['--start-hook-frame',conditions.presentTarget,...opt('--start-hook-timeout-ms',a.start_on?.present_timeout_ms)]:['--start-qpc',conditions.start.qpc]),'--start-frequency',conditions.start.frequency]:[]),...opt('--max-lateness-ms',a.max_lateness_ms??(conditions?.start?1000:undefined))], 60000);
       if(conditions?.start&&r.ok){const j=sequenceJob(r.json,context,true);if(!j||j.qpc_frequency!==conditions.start.frequency||j.capture_scope_checked!==true||(conditions.presentTarget?(j.sequence_frame_anchor_version!==1||j.present_anchor_target_index!==conditions.presentTarget||!['pending_present_hook','native_present_hook'].includes(String(j.anchor_source))):j.anchor_source!=='observed_capture'||j.anchor_qpc_ticks!==conditions.start.qpc))
         return reply(sequenceWaitError(r,'event_anchor_ack_unavailable','sequence event-anchor acknowledgement is inconsistent; no input or control was retried',0,a.wait_timeout_ms),startExtra);}
-      if (!a.wait) return look(a.pid, reply(r, {...jobExtra(r),...startExtra}), a.capture_after, observation);
+      if (!a.wait) {const next=sequenceFollowAction(r.json,a.pid);return look(a.pid, reply(r, {...jobExtra(r),...startExtra,...(next?{next_action:next}:{})}), a.capture_after, observation);}
       if (!r.ok) {
         const input = r.json as { input_injected?: unknown; error?: unknown } | null;
         const refused = input?.input_injected === false;
@@ -1426,6 +1457,8 @@ tool("key_sequence", "Run a keyboard sequence",
       try { observed = guarded&&conditions?await guardSequence(r,context,conditions,a.wait_timeout_ms):await waitSequence(r, context, a.wait_timeout_ms); }
       catch (error) { observed = sequenceWaitError(r, "observation_error", `sequence observation failed; no input was retried: ${String(error)}`, 0, a.wait_timeout_ms); }
       const out=reply(observed,startExtra),matchedPath=(observed.json as {sequence_guard?:{matched_frame_path?:unknown}}|undefined)?.sequence_guard?.matched_frame_path;
+      const sheetPath=(observed.json as {sequence_captures?:{contact_sheet?:{path?:unknown}}}|undefined)?.sequence_captures?.contact_sheet?.path;
+      if(typeof sheetPath==='string')try{const info=statSync(sheetPath);if(info.size<=MAX_IMAGE_BYTES)out.content.push({type:'text',text:'Sequence review sheet: row-major tiles match sequence_captures.frames; these are not client coordinates.'},{type:'image',data:readFileSync(sheetPath).toString('base64'),mimeType:'image/png'});else out.content.push({type:'text',text:`Sequence review sheet saved at ${sheetPath}; attachment exceeds image limit.`});}catch(e){out.content.push({type:'text',text:`Retained sequence frames are available; review sheet could not be attached: ${String(e)}`});}
       if(typeof matchedPath==='string')try{const info=statSync(matchedPath);if(info.size<=MAX_IMAGE_BYTES)out.content.push({type:'text',text:'Matched sequence abort observation frame:'},{type:'image',data:readFileSync(matchedPath).toString('base64'),mimeType:'image/png'});else out.content.push({type:'text',text:`Matched observation frame saved at ${matchedPath}; attachment exceeds image limit.`});}catch(e){out.content.push({type:'text',text:`Matched observation frame could not be attached: ${String(e)}`});}
       return look(a.pid, out, a.capture_after,
         { ...observation, action_state: "native_sequence_completed_game_consumption_unmeasured" });
@@ -1500,7 +1533,7 @@ tool("wait", "Wait without input",
   }, true);
 
 tool("run_script", "Run a macro script",
-  "Run a .vin macro on the game: one vinput command per line (no --pid), '#' comments, 'sleep ms'. Stops at the first failing line unless continue_on_error.",
+  "Run a UTF-8 .vin file: one ordinary vinput command per line, without --pid/--owner; quoted arguments work, blank lines and lines starting # are ignored. Special lines: sleep <milliseconds>, echo <text>. Example: key w 300\nmove 120 0 --raw\nsleep 150\ncapture shot.png. Relative paths resolve beside the script. Stops at the first failing line unless continue_on_error; use bounded key holds so a failed later command cannot leave an indefinite key down. Nested script/launch/inject/list/foreground commands are refused. This is serial CLI work; use key_sequence for target-native timed chords and wait:true/abort_on observations.",
   { pid, file: z.string().min(1), continue_on_error: z.boolean().optional(), timeout_s: z.number().min(1).max(3600).optional() },
   async (a) => reply(await runVinput([...at(a.pid), "script", resolve(a.file), ...opt("--continue", a.continue_on_error)], (a.timeout_s ?? 600) * 1000)));
 
@@ -1518,6 +1551,10 @@ tool("detach", "Stop controlling a game",
   });
 
 registerCameraHelpers(tool, { owner: OWNER, at, run: runVinput, epoch: p => captureSessionEpoch.get(p) ?? 0,
+  captureError: actionCaptureError, finish: (p, out, options, epoch) => look(p, out, options.capture_after, { ...actionObservation(options), attachment_epoch: epoch }) },
+  actionCaptureArgs, regionSchema, keyCombo);
+
+registerNavigationMotion(tool, { owner: OWNER, at, run: runVinput, epoch: p => captureSessionEpoch.get(p) ?? 0,
   captureError: actionCaptureError, finish: (p, out, options, epoch) => look(p, out, options.capture_after, { ...actionObservation(options), attachment_epoch: epoch }) },
   actionCaptureArgs, regionSchema, keyCombo);
 

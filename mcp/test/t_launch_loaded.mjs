@@ -1,8 +1,10 @@
-import {loadedLaunchFailure} from '../build/launchstate.js';
+import {loadedLaunchFailure,launchReadinessNote} from '../build/launchstate.js';
 import {fullStatus,makeChecker,startFake} from './lib.mjs';
 const {state,check}=makeChecker(),pid=process.pid;
 const loaded={ok:false,pid,injected:true,ready:false,failure_stage:'readiness',error:'queue_not_progressing',inject:{ok:false,pid,injected:true,readiness:{ok:false,hook_ready:true,window_ready:true,queue_ready:false,readiness_reason:'queue_not_progressing'}}};
 let view=loadedLaunchFailure(loaded,true,7200);
+check(launchReadinessNote({...loaded,ok:true}).readiness_state==='unconfirmed_snapshot'&&/may still be loading/.test(launchReadinessNote(loaded).readiness_note),'unready loaded snapshot explains startup uncertainty without changing native readiness');
+check(!launchReadinessNote({...loaded,injected:false})&&!launchReadinessNote({...loaded,ready:true,inject:{pid,injected:true,readiness:{queue_ready:true}}}),'pre-load and ready launches do not acquire an unconfirmed readiness note');
 check(view?.launched===true&&view.keep_pid===true&&view.launch_ok===false&&view.liveness==='not_verified','loaded failure is retained without asserting liveness/readiness');
 check(view?.claim_pending===true&&view.claim_ttl_s_requested===7200&&view.claim_confirmation==='not_observed','requested claim TTL is retained as pending confirmation');
 check(loadedLaunchFailure(loaded,true)?.claim_ttl_s_requested===3600,'default requested TTL is explicit');
@@ -22,6 +24,7 @@ try{
  const live=await t.call('launch',{exe:'E:/fixture/game.exe',claim:true,claim_ttl_s:123});
  check(!live.isError&&live.json.ok===true&&live.json.input_ready===false&&live.json.queue_ready===false&&live.json.claim_ok===true&&t.callsOf('claim').length===1,'live adopted pending queue keeps launch success and requested claim');
  check(t.callsOf('status').length===0&&live.json.render_health_unmeasured_reason,'pending queue launch avoids a UI-dependent full-status health wait');
+ check(live.json.readiness_state==='unconfirmed_snapshot'&&live.json.inject.ok===false&&live.json.ready===false&&/Keep this PID/.test(live.json.readiness_note),'MCP explains successful spawn versus unconfirmed historical readiness while preserving the original receipt');
 }finally{await t.close();}
 console.log(`LAUNCH_LOADED_RESULT ${JSON.stringify({completed:true,passed:state.passes,failed:state.failures,scope:'pure receipt classification plus actual MCP against a fake CLI; no native process liveness/readiness claim'})}`);
 process.exit(state.failures?1:0);

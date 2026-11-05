@@ -4,6 +4,13 @@
 #include "vi_ready_json.h"
 #include <cstdint>
 namespace vi_launch_injection {
+#define VI_LAUNCH_RETRY_POLICY 1
+inline bool MayFollowPreLoader(std::uint32_t pid,std::uint64_t born,const std::string& raw){
+ if(!pid||!born)return false;vi_ready_json::Reader reply{raw,0,{}};bool ok=true,injected=true,started=true;
+ if(!reply.Parse()||!reply.Bool("ok",ok)||ok||!reply.Bool("injected",injected)||injected||!reply.Bool("loader_thread_started",started)||started)return false;
+ const auto process=reply.fields.find("pid"),created=reply.fields.find("process_created"),stage=reply.fields.find("failure_stage");
+ return process!=reply.fields.end()&&process->second.type=='n'&&process->second.raw==std::to_string(pid)&&created!=reply.fields.end()&&created->second.type=='"'&&created->second.raw=="\""+std::to_string(born)+"\""&&stage!=reply.fields.end()&&stage->second.type=='"'&&stage->second.raw=="\"create_remote_thread\"";
+}
 inline const char* ReadyValue(bool hooksOnly,bool requestedReady){return hooksOnly?"null":requestedReady?"true":"false";}
 inline const char* ActivationHint(bool available,const std::string& appActive,const std::string& frameApi){
  if(!available||frameApi!="\"none\"")return nullptr;

@@ -26,7 +26,6 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'present_window_memory' 'run_presentwindowmemorytest.ps1'
  New-VinputSuiteCase 'hidden_window_native' 'run_hiddenwindowtest.ps1' @{} 'Retained own offscreen hidden HWNDs, synthetic Present proof, and one explicit guarded SW_SHOWNA; all other desktop writers terminal.'
  New-VinputSuiteCase 'userintentstate' 'run_userintentstate.ps1'
- New-VinputSuiteCase 'owner_input' 'run_ownerinputtest.ps1' @{} 'Owner input pass-through in the real foreground, via a fake foreground predicate (VINPUT_TEST_HOOKS); no OS input.'
  New-VinputSuiteCase 'chord' 'run_chordtest.ps1' @{} 'Ctrl/Shift chords reach TranslateMessage-derived WM_CHAR.'
  New-VinputSuiteCase 'profiles' 'run_profiletest.ps1'
  New-VinputSuiteCase 'hover_load' 'run_hoverloadtest.ps1'
@@ -38,7 +37,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'activate' 'run_activatetest.ps1'
  New-VinputSuiteCase 'keys' 'run_keytest.ps1'
  New-VinputSuiteCase 'trace' 'run_tracetest.ps1'
- New-VinputSuiteCase 'mouse_message_health' 'run_mousemessagehealthtest.ps1'
+ New-VinputSuiteCase 'mouse_message_health' 'run_mousemessagehealthtest.ps1' @{} 'Owned versus unrecognized drops, including startup samples below the ratio-warning threshold.'
  New-VinputSuiteCase 'action_diagnostics' 'run_actiondiagnosticstest.ps1'
  New-VinputSuiteCase 'mouse_modifiers' 'run_mousemodifiertest.ps1'
  New-VinputSuiteCase 'capture' 'run_capturetest.ps1'
@@ -60,6 +59,15 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'pointer_widen_model' 'run_pointerwidenmodel.ps1'
  New-VinputSuiteCase 'public_safeguards' 'run_publicsafeguardstest.ps1'
  New-VinputSuiteCase 'job_reader_observation' 'run_jobreadtest.ps1' @{} 'Per-key and per-channel returns distinguish W window dispatch from actual polling, including raw keyboard readers.'
+ New-VinputSuiteCase 'ue4_keyboard_reader' 'run_ue4keyboardtest.ps1' @{} 'Owned deferred-message and RIM_INPUT keyboard consumers behind application/thread focus gates; no retail UE4 verdict.'
+ New-VinputSuiteCase 'navigation_motion' 'run_mcpcontracttest.ps1' @{Test='navigationmotion'} 'Running-hold image motion, exact cleanup and observer/cancellation races.'
+ New-VinputSuiteCase 'navigation_motion_protocol' 'run_mcpcontracttest.ps1' @{Test='navigationmotion_protocol'} 'Actual MCP orchestration of one bounded hold and scoped image-stability observation.'
+ New-VinputSuiteCase 'camera_angles' 'run_mcpcontracttest.ps1' @{Test='camera_angles'} 'Persisted exact-process/window angular reference, one turn/look and bounded recovery with uncertainty retained.'
+ New-VinputSuiteCase 'capture_history' 'run_capturehistorytest.ps1' @{} 'Source-hash history is scoped and bounded; PrintWindow rendered-frame age remains unknown.'
+ New-VinputSuiteCase 'framework_input_native' 'run_frameworkinputtest.ps1' @{} 'Fresh owned Chromium UI routing/timing, explicit modes, stale windows and relative raw boundaries.'
+ New-VinputSuiteCase 'framework_click' 'run_mcpcontracttest.ps1' @{Test='frameworkclick'} 'Omitted click defaults are marked for native framework policy; explicit values and batch budgets remain bounded.'
+ New-VinputSuiteCase 'mapping_used' 'run_mcpcontracttest.ps1' @{Test='mapping_used'} 'Mapped single and batch actions retain the exact transform snapshot/token used before a later capture.'
+ New-VinputSuiteCase 'launch_failed_loader_follow' 'run_launchfailurefollowtest.ps1' @{} 'One different proven same-image descendant after typed pre-loader failure; ambiguity and unrelated siblings refuse.'
  New-VinputSuiteCase 'key_reader_warning' 'run_mcpcontracttest.ps1' @{Test='input_reads'} 'Delivered key messages keep success and capture_after; polling uncertainty is a warning.'
  New-VinputSuiteCase 'capture_mapping' 'run_capturemappingtest.ps1'
  New-VinputSuiteCase 'pointer_capability' 'run_pointercapabilitytest.ps1'
@@ -72,7 +80,12 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'motion_helpers' 'run_mcpcontracttest.ps1' @{Test='motion_helpers'}
  New-VinputSuiteCase 'delta_cursor' 'run_deltacursortest.ps1'
  New-VinputSuiteCase 'drag_scroll_capture' 'run_mcpcontracttest.ps1' @{Test='drag_scroll_capture'}
-  New-VinputSuiteCase 'capture_destinations' 'run_mcpcontracttest.ps1' @{Test='capture_destinations'}
+  New-VinputSuiteCase 'capture_destinations' 'run_mcpcontracttest.ps1' @{Test='capture_destinations'} 'Caller path is returned; explicit captures, action images and bursts add no default copy.'
+ New-VinputSuiteCase 'menu_sequence_recipe' 'run_mcpcontracttest.ps1' @{Test='key_sequence_wait'} 'One menu sequence, exact job completion, bounded settle and one cropped image; game consumption unmeasured.'
+ New-VinputSuiteCase 'compact_reply' 'run_mcpcontracttest.ps1' @{Test='compactreply'} 'Opt-in presentation preserves job continuation, reader uncertainty, diagnostics and images.'
+ New-VinputSuiteCase 'compact_reply_protocol' 'run_mcpcontracttest.ps1' @{Test='compactreply_protocol'} 'Every tool schema accepts compact; actual MCP calls keep one action and honor the environment override.'
+ New-VinputSuiteCase 'sequence_captures' 'run_mcpcontracttest.ps1' @{Test='sequence_captures'} 'Bounded serial same-job recording with native frame/QPC scope and preserved image/input failure boundaries.'
+ New-VinputSuiteCase 'sequence_captures_protocol' 'run_mcpcontracttest.ps1' @{Test='sequence_captures_protocol'} 'Actual MCP guarded sequence, finite review images and no retry after an uncertain observer acknowledgement.'
   New-VinputSuiteCase 'backend_reply_view' 'run_mcpcontracttest.ps1' @{Test='backend_view'}
   New-VinputSuiteCase 'text_context' 'run_textcontexttest.ps1'
   New-VinputSuiteCase 'hold_region_motion' 'run_mcpcontracttest.ps1' @{Test='hold_motion'}
@@ -105,9 +118,9 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'physical_readers' 'run_physicalreaderstest.ps1'
  New-VinputSuiteCase 'character_translation' 'run_chartranslatetest.ps1'
  New-VinputSuiteCase 'di_type_lifetime' 'run_ditypelifetimetest.ps1'
- New-VinputSuiteCase 'di8_mouse' 'run_di8mousetest.ps1'
+ New-VinputSuiteCase 'di8_mouse' 'run_di8mousetest.ps1' @{} 'Actual standard and metadata-proven custom system-mouse state/buffer polling.'
  New-VinputSuiteCase 'di_discovery' 'run_didiscoverytest.ps1'
- New-VinputSuiteCase 'di_keyboard_formats' 'run_diformattest.ps1'
+ New-VinputSuiteCase 'di_keyboard_formats' 'run_diformattest.ps1' @{} 'Bounded keyboard/custom mouse descriptors, lifetimes, native object metadata and failed-copy controls.'
  New-VinputSuiteCase 'di_keyboard_native' 'run_dikeyboardtest.ps1'
  New-VinputSuiteCase 'raw_thread_routing' 'run_rawroutingtest.ps1' @{} 'Destination/thread/generation isolation and bounded lifetime queries during a capacity burst.'
  New-VinputSuiteCase 'clickpoint' 'run_clickpointtest.ps1'
@@ -165,6 +178,8 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'mouse_up_cleanup' 'run_capturemapcleanuptest.ps1'
  New-VinputSuiteCase 'multi' 'run_multitest.ps1'
  New-VinputSuiteCase 'anticheat_refusal' 'run_actest.ps1'
+ New-VinputSuiteCase 'owner_cursor_witness' 'run_ownercursorwitnessmodel.ps1' @{} 'Same-call physical cursor oracle rejects stale snapshots and virtual leakage without mouse-motion tolerance.'
+ New-VinputSuiteCase 'owner_input' 'run_ownerinputtest.ps1' @{} 'Guarded owned fixture compares the exact native cursor return used by the game call; no foreground or desktop-input writes.'
 }
 function Get-VinputSuitePlan {
  param([ValidateSet('background','foreground')][string]$Suite,[switch]$IncludePhysicalInput)

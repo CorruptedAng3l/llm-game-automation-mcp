@@ -74,6 +74,31 @@ int main(int argc,char** argv){
 #else
     Check(false,"status names actual mouse polling channels and clears warning");
 #endif
+    // Menu engines may select a compact/permuted mouse format independently of
+    // their in-game standard DIMOUSESTATE reader. Prove the exact descriptor.
+    IDirectInputDevice8A* custom=nullptr;
+    Check(SUCCEEDED(ansi->CreateDevice(GUID_SysMouse,&custom,nullptr))&&custom,"new real mouse object is discovered after production installation");
+    if(custom){
+        std::vector<DIOBJECTDATAFORMAT> fields(c_dfDIMouse.rgodf,c_dfDIMouse.rgodf+c_dfDIMouse.dwNumObjs);
+        const DWORD offsets[]={8,0,16,5,4,6,7};for(unsigned n=0;n<fields.size();++n)fields[n].dwOfs=offsets[n];
+        DIDATAFORMAT format{sizeof(DIDATAFORMAT),sizeof(DIOBJECTDATAFORMAT),DIDF_RELAXIS,24,(DWORD)fields.size(),fields.data()};
+        const auto formatResult=custom->SetDataFormat(&format);printf("custom format hr=0x%08X observed=%d failures=%llu refused=%llu reason=%s\n",(unsigned)formatResult,DiFormatFind(custom)!=nullptr,g_diDiscoveryFailures.load(),g_diFormatRefused.load(),g_diFormatLastUnsupported.c_str());
+        Check(SUCCEEDED(formatResult),"real permuted relative mouse format accepted by native DirectInput");
+        Check(SUCCEEDED(custom->SetProperty(DIPROP_BUFFERSIZE,&property.diph)),"real custom mouse buffering configured without native acquisition");
+        BYTE output[28];memset(output,0xcc,sizeof(output));g_diDX=123;g_diDY=-45;g_diDZ=240;g_vk[VK_LBUTTON]=1;
+        const auto before=C.di_mouse.load();auto hr=custom->GetDeviceState(24,output);LONG x=0,y=0,z=0;memcpy(&x,output+8,4);memcpy(&y,output,4);memcpy(&z,output+16,4);
+        Check(SUCCEEDED(hr)&&x==123&&y==-45&&z==240&&output[5]==0x80&&output[4]==0&&output[24]==0xcc&&C.di_mouse==before+1,"real custom mouse state maps axes/button at descriptor offsets and counts polling");
+        memset(output,0xcc,sizeof(output));hr=custom->GetDeviceState(24,output);memcpy(&x,output+8,4);memcpy(&y,output,4);memcpy(&z,output+16,4);
+        Check(SUCCEEDED(hr)&&x==0&&y==0&&z==0,"custom relative mouse axes drain exactly once");
+        DIDEVICEOBJECTDATA events[8]{};DWORD count=8;custom->GetDeviceData(sizeof(events[0]),events,&count,0);
+        {std::lock_guard<std::mutex> lock(g_diMx);g_diMouseQ.clear();}
+        Check(DiPush(false,DIMOFS_X,17)==1&&DiPush(false,DIMOFS_BUTTON0,0x80)==1,"custom reader enables production buffered mouse queue");
+        count=8;hr=custom->GetDeviceData(sizeof(events[0]),events,&count,DIGDD_PEEK);printf("custom PEEK hr=0x%08X count=%u queue=%zu offsets=%u/%u\n",(unsigned)hr,count,g_diMouseQ.size(),events[0].dwOfs,events[1].dwOfs);
+        Check(SUCCEEDED(hr)&&count==2&&events[0].dwOfs==8&&events[0].dwData==17&&events[1].dwOfs==5&&g_diMouseQ.size()==2,"custom buffered PEEK maps each descriptor offset and preserves tokens");
+        count=8;hr=custom->GetDeviceData(sizeof(events[0]),events,&count,0);
+        Check(SUCCEEDED(hr)&&count==2&&g_diMouseQ.empty(),"custom buffered mouse tokens drain exactly once");
+        g_vk[VK_LBUTTON]=0;custom->Release();
+    }
     void* stateEntry=(*(void***)a)[9];
     Check(VIMH_DisableHook(stateEntry)==MH_OK,"owned polling hook can be removed for the changed-entry reject control");
     Check(FAILED(((PFN_DIACQ)(*(void***)a)[7])(a))&&lowerAcquireCalls==0,"changed polling entry refuses virtual Acquire without native acquisition");

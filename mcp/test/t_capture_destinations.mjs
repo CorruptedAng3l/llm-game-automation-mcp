@@ -1,4 +1,4 @@
-import {mkdtempSync,existsSync,rmSync} from 'node:fs';
+import {mkdtempSync,existsSync,rmSync,readdirSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {makeChecker,startFake,cmdOf} from './lib.mjs';
@@ -20,5 +20,14 @@ try{
  t.clearCalls();r=await t.call('type',{pid,text:'hello',as_keys:true});check(!r.isError&&t.callsOf('json').length===1&&JSON.parse(cmdOf(t.callsOf('json')[0])[1]).text==='hello','type alias uses the same text handler without replay');
  t.clearCalls();r=await t.call('click',{pid,x:10,y:10,out_dir:dir});check(r.isError&&!t.callsOf('click').length,'action destination requires an enabled capture before input');
  r=await t.call('capture_burst',{pid,frames:1,out_dir:join(dir,'bursts')});check(!r.isError&&existsSync(cmdOf(t.callsOf('capture-burst').at(-1))[1]),'burst uses caller output directory');
+ const defaultsBefore=readdirSync(t.dir).filter(name=>/^pid.*\.(png|jpg)$/i.test(name)).sort();
+ t.clearCalls();const exactNoImage=join(dir,'without-image.png');r=await t.call('capture',{pid,save_path:exactNoImage,include_image:false});
+ check(!r.isError&&!r.image&&r.json.path===exactNoImage&&t.callsOf('capture').length===1&&cmdOf(t.callsOf('capture')[0])[1]===exactNoImage,'explicit path with no attachment is saved once and remains the reply path');
+ await t.call('capture',{pid,out_dir:join(dir,'only-here')});
+ await t.call('scroll',{pid,notches:1,capture_after:0,out_dir:join(dir,'only-here')});
+ await t.call('capture_burst',{pid,frames:1,out_dir:join(dir,'only-here')});
+ check(JSON.stringify(readdirSync(t.dir).filter(name=>/^pid.*\.(png|jpg)$/i.test(name)).sort())===JSON.stringify(defaultsBefore),'explicit capture, action and burst destinations add no default capture copies');
+ t.clearCalls();r=await t.call('capture',{pid});
+ check(!r.isError&&r.json.path.startsWith(t.dir)&&t.callsOf('capture').length===1&&readdirSync(t.dir).filter(name=>/^pid.*\.(png|jpg)$/i.test(name)).length===defaultsBefore.length+1,'omitted destination positive control creates exactly one additional default artifact');
 }finally{await t.close();rmSync(dir,{recursive:true,force:true});}
 console.log(`capture destinations: ${state.passes} PASS / ${state.failures} FAIL`);if(state.failures)process.exitCode=1;

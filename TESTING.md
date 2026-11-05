@@ -194,6 +194,15 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   run shared the box, `owner_input` failed with the desk in use, and 25 cases queued behind them did not run); on
   reruns alone `launch_follow` and every queued case passed, so 139 passed, 3 not_measured (capture_diagnostics,
   cursor_guard, legacy_focus) and `owner_input` still fails while the real mouse is in use (logged as VB6).
+- Batch 0.2.9..0.3.0 (2026-11-05, vinput through c2a3ec9): navigation (`move_until_stuck` with image-motion stop,
+  `look_calibrate`/`turn`/`look` with a persisted angular reference, bounded `unstick`), opt-in `compact` replies on
+  every tool (`VINPUT_MCP_COMPACT=1`), key `retap` to refresh a modifier while a move stays held, `key_sequence`
+  `wait:true` with settle + one cropped image, sequence captures with `abort_on`, Chromium click defaults, UE4-shaped
+  deferred/raw keyboard fixture, launch follow after a pre-loader failure, DI custom mouse formats, capture history,
+  `mapping_used` receipts, and an owner-input test that no longer uses the real cursor. Gate: `build.bat` x64 + x86
+  OK; `mcp` `npm test` PASS (81 files); background plan (158 cases) first run under load from five playtest games:
+  80 passed, 6 failed, 70 queued did not run. Two failures were merge path issues (a test-harness name clash and
+  private MinHook object paths), fixed; on reruns every case passed except capture_diagnostics (not_measured).
 
 ## Real games
 

@@ -8,7 +8,15 @@ check(h.owned_delivered===300&&h.owned_dropped===0&&/2091 of 2408/.test(h.warnin
 check(/unrecognized|Unrecognized/.test(h.warning)&&/does not identify/.test(h.warning),'warning does not attribute every suppressed message to our input or JavaFX');
 check(compactStatus(high).warnings.some(x=>x.includes('Mouse message isolation')),'default compact status surfaces high mouse drop ratio');
 check(!mouseMessageHealth(fullStatus({}, {wm_mouse:10,wm_mouse_dropped:9})).warning,'small sample does not raise ratio warning');
+const startup=fullStatus({}, {wm_mouse:15,wm_mouse_dropped:15,wm_mouse_owned:0,wm_mouse_owned_delivered:0,wm_mouse_owned_dropped:0,wm_mouse_unrecognized_dropped:15});
+const startupHealth=mouseMessageHealth(startup);
+check(!startupHealth.warning&&/without vinput-owned provenance/.test(startupHealth.note)&&/startup/.test(startupHealth.note)&&/does not prove/.test(startupHealth.note),'startup drops explain unrecognized provenance even below the ratio-warning threshold');
+check(compactStatus(startup).mouse_messages.note===startupHealth.note,'default status includes startup counter explanation');
+check(!mouseMessageHealth(fullStatus({}, {wm_mouse:1,wm_mouse_dropped:0,wm_mouse_owned:1,wm_mouse_owned_delivered:1,wm_mouse_owned_dropped:0,wm_mouse_unrecognized_dropped:0})).note,'no unrecognized drops need no provenance note');
 check(!mouseMessageHealth(fullStatus({}, {wm_mouse:100,wm_mouse_dropped:10})).warning,'low drop ratio remains quiet');
+const chromium=fullStatus({mouse_message_unrecognized_types:{WM_MOUSEMOVE:64,WM_LBUTTONDOWN:7}},{wm_mouse:261,wm_mouse_dropped:71,wm_mouse_owned:190,wm_mouse_owned_delivered:190,wm_mouse_owned_dropped:0,wm_mouse_unrecognized_dropped:71});
+check(/27%/.test(mouseMessageHealth(chromium).warning)&&mouseMessageHealth(chromium).unrecognized_types.WM_LBUTTONDOWN===7,'27-percent PR4 sample warns and names observed unrecognized message types');
+check(!mouseMessageHealth({...chromium,mouse_message_unrecognized_types:{WM_MOUSEMOVE:72}}).unrecognized_types,'incoherent histogram cannot invent per-type attribution');
 check(mouseMessageHealth(fullStatus({}, {wm_mouse:100,wm_mouse_dropped:80})).owned_dropped===null,'older DLL source accounting is explicitly unknown');
 check(mouseMessageHealth(fullStatus({}, {wm_mouse:5,wm_mouse_dropped:8}))===undefined,'incoherent counter snapshot does not invent a ratio');
 check(mouseMessageHealth(fullStatus({}, {wm_mouse:'100',wm_mouse_dropped:80}))===undefined,'malformed counter type is not coerced');

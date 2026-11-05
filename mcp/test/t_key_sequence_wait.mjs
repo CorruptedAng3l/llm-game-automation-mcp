@@ -42,6 +42,18 @@ try {
   check(im?.width === 160 && im.height === 90 && r.json?.capture_after?.observation?.action_state === "native_sequence_completed_game_consumption_unmeasured",
     "post-completion capture preserves SF3 sizing and honest boundary label", r.text);
 
+  set(scene());r=await t.call("key_sequence",{pid,steps:[{action:"retap",key:"w+shift",retap_key:"shift",ms:1500,every_ms:300,gap_ms:10}],capture_after:false});
+  check(!r.isError&&t.lastSeqText()==="retap w+shift shift 1500 300 10\n"&&t.callsOf("seq").length===1,"retap serializes one bounded chord hold with exact selected key and gap");
+  for(const badStep of [{action:"wait",ms:100,retap_key:"shift"},{action:"key",key:"w",ms:100,every_ms:50},{action:"retap",key:"w+shift",ms:1000,every_ms:300},{action:"retap",key:"w+shift",retap_key:"shift",ms:300,every_ms:300},{action:"retap",key:"w+shift",retap_key:"shift",ms:1000,every_ms:10,gap_ms:10}]){
+    set(scene());r=await t.call("key_sequence",{pid,steps:[badStep]});check(r.isError&&!t.calls().length,"invalid retap options refuse before any CLI request");
+  }
+
+  set(scene()); r = await t.call("key_sequence", { pid, steps: [{action:"key",key:"down",ms:80},{action:"wait",ms:100},{action:"key",key:"enter",ms:80}],
+    wait:true,capture_settle_ms:50,capture_after:0,region:{x:100,y:40,w:320,h:180},max_width:160 });
+  check(!r.isError&&t.lastSeqText()==="key down 80\nwait 100\nkey enter 80\n"&&t.callsOf("seq").length===1&&t.callsOf("capture").length===1&&
+    r.json.capture_after.observation.action_state==="native_sequence_completed_game_consumption_unmeasured"&&r.json.capture_after.observation.settle_ms_elapsed>=40,
+    "menu recipe sends one sequence, waits for native completion, settles and returns one cropped image without replay",r.text);
+
   set(scene({ sequence_observations: [{ ok: true, job: jobFor(pid, "completed") }] }));
   r = await t.call("key_sequence", { pid, steps, wait: true });
   check(!r.isError && r.json?.sequence_wait?.timeout_ms === 5150 && r.json.sequence_wait.outcome === "completed" && !t.callsOf("capture").length,
@@ -148,5 +160,5 @@ for (const ackFailure of [false, true]) {
       ackFailure ? "confirmed exit cannot discard native uncertain ACK fields" : "confirmed target exit cannot replace the already-scheduled sequence receipt", r.text);
   } finally { await exitTarget.close(); await actorExit; }
 }
-console.log(state.failures ? `key sequence wait: FAIL (${state.failures}), PASS (${state.passes})` : `key sequence wait: PASS (${state.passes})`);
+console.log(`key sequence wait: ${state.passes} PASS / ${state.failures} FAIL`);
 process.exit(state.failures ? 1 : 0);
