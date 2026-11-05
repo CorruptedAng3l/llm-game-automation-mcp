@@ -18,8 +18,9 @@ import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vi
 import { completedJobView, isCompletedJobOutcome } from "./completedjob.js";
 import { burstImage } from "./burstimage.js";
 import { requireSequenceWait, sequenceWaitError, waitSequence } from "./sequencewait.js";
+import { requireTextBoundary } from "./textboundary.js";
 
-const VERSION = "0.2.3";
+const VERSION = "0.2.4";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -649,8 +650,9 @@ const textMatch = {
   fuzzy: z.number().int().min(0).max(3).optional().describe("Also accept whole words within N edits (OCR slips)."),
   region: regionSchema.optional(),
 };
-const textArgs = (a: { text: string; nth?: number; exact?: boolean; fuzzy?: number; region?: z.infer<typeof regionSchema> }) =>
-  [a.text, ...opt("--nth", a.nth), ...opt("--exact", a.exact), ...opt("--fuzzy", a.fuzzy), ...region(a.region)];
+const textArgs = (a: { text: string; nth?: number; exact?: boolean; whole_word?: boolean; fuzzy?: number; region?: z.infer<typeof regionSchema> }) =>
+  [a.text, ...opt("--nth", a.nth), ...opt("--exact", a.exact),
+    ...(a.whole_word === undefined ? [] : [`--whole-word=${a.whole_word}`]), ...opt("--fuzzy", a.fuzzy), ...region(a.region)];
 
 tool("find_text", "Find text on screen",
   "Locate text without clicking. Returns the matched box, centre, match_count and match_score, or ok:false (with what OCR " +
@@ -660,14 +662,20 @@ tool("find_text", "Find text on screen",
 
 tool("click_text", "Click text on screen",
   "Find text with OCR and click the centre of its box (keeps looking for timeout_ms). Refuses and clicks nothing when " +
-  "the text matches more than once and nth is not given. Verify the result with wait_text / capture.",
-  { pid, ...textMatch, timeout_ms: timeoutMs(5000), button: button.optional(),
+  "the text matches more than once and nth is not given. Defaults to case-insensitive whole OCR words, so PLAY does not select Player. Verify the result with wait_text / capture.",
+  { pid, ...textMatch, text: textMatch.text.describe("Text to click; case-insensitive whole OCR words by default, whitespace ignored. exact:true also requires case. Explicit fuzzy may accept different whole words within its edit budget."),
+    whole_word: z.boolean().default(true).describe("Require complete OCR-word boundaries independently of case (default true). false explicitly restores legacy substring matching. exact:true always requires word boundaries. Default mode preflights the CLI capability before input."),
+    timeout_ms: timeoutMs(5000), button: button.optional(),
     optional: z.boolean().optional().describe("Succeed with skipped:true if the text never appears (for dialogs that may not show)."),
     ...actionCaptureArgs, region: captureImageArgs.region.describe("Client-pixel OCR search region; also bounds an enabled post-action image.") },
   async (a) => {
     const captureError = actionCaptureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region });
     if (captureError) return fail(captureError);
     const observation = actionObservation(a);
+    const unsupported = await requireTextBoundary(a.whole_word, a.exact);
+    if (unsupported) return reply(unsupported);
+    if ((captureSessionEpoch.get(a.pid) ?? 0) !== observation.attachment_epoch)
+      return fail("attachment changed during text capability preflight; no click was sent");
     const r = await runVinput([...at(a.pid), "click-text", ...textArgs(a), ...opt("--timeout", a.timeout_ms), ...opt("--button", a.button),
       ...opt("--optional", a.optional)], (a.timeout_ms ?? 5000) + 60000);
     return look(a.pid, reply(r), a.capture_after, observation);

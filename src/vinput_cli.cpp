@@ -1124,7 +1124,7 @@ static void Usage() {
         "  vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true keepvisible=true cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off [for_ms=1..120000 | --for N (isolate=false only)]\n"
         "  vinput --pid N json '{\"cmd\":\"status\"}'\n"
         "  vinput --pid N ocr [--region x,y,w,h] [--lang en-US] [--scale 1] [--preprocess MODE] [--lines-only] [--out file.json]\n"
-        "  vinput --pid N click-text \"text\" [--nth N] [--exact] [--fuzzy N] [--timeout ms] [--button left] [--dry-run] [--optional]\n"  //@text
+        "  vinput --pid N click-text \"text\" [--nth N] [--exact] [--whole-word=true|false] [--fuzzy N] [--timeout ms] [--button left] [--dry-run] [--optional]\n"  //@text
         "  vinput --pid N wait-text \"text\" [--timeout ms] [--gone]        vinput --pid N assert-text \"text\" [--absent]\n"  //@text
         "  vinput --pid N wait-text --any \"a|b\" [--timeout ms] [--gone]\n"
         "  Text search: --preprocess auto|none|gray|contrast|threshold|invert; misses include actual nearest_candidates (suggestions only).\n"
@@ -1137,7 +1137,7 @@ static void Usage() {
         "  vinput --pid N escape-host [--timeout-ms N]  opt-in Ctrl+Alt+Shift+End host; streams receipts; no automatic start\n"
         "  vinput --pid N foreground          VERIFY/HANDOFF ONLY: really bring the game to the front\n"
         "  vinput sysinput <vk>               VERIFY ONLY: OS-level SendInput key (= the shared physical keyboard)\n";
-    if (g_jsonOutput) printf("{\"ok\":true,\"help\":\"%s\"}\n", JEsc(usage).c_str()); else printf("%s", usage);
+    if (g_jsonOutput) printf("{\"ok\":true,\"text_word_boundary_version\":1,\"help\":\"%s\"}\n", JEsc(usage).c_str()); else printf("%s", usage);
 }
 
 int wmain(int argc, wchar_t** wargv) {

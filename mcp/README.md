@@ -89,7 +89,7 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 | `capture_burst` | one contact-sheet image of `frames` tiles taken `interval_ms` apart (`columns`, `max_width` / `scale`, `format`, `region`); `frames[]` has each tile's time and rectangle |
 | `ocr` | text and lines with boxes (`region`, `scale`, `lang`, `words`, `tiles`) |
 | `find_text` | locate text without clicking (box, centre, match_count) |
-| `click_text` | find text and click its centre (`nth`, `exact`, `fuzzy`, `timeout_ms`, `button`, `region`, `optional`) |
+| `click_text` | find whole OCR words by default and click their centre (`whole_word`, `nth`, `exact`, `fuzzy`, `timeout_ms`, `button`, `region`, `optional`) |
 | `wait_text` | wait until text appears (or `gone`) |
 | `find_image` / `click_image` / `wait_image` | template matching with a PNG (`threshold`, `scales`, `region`, `nth`) |
 | `pixel` | colour of one pixel |
@@ -203,6 +203,10 @@ Give either top-level controls plus `ms`, or1..16 phases. All phase durations pl
 ### Keyboard and mouse action observations
 
 `key`, `click`, `click_text`, `move`, `move_relative` and `key_sequence` accept `capture_after` plus `max_width`, `scale`, `region`, `format`, `quality` and `capture_settle_ms`. No image is taken unless capture_after is enabled (0 is enabled). Example: `move_relative {pid, dx:120, dy:0, capture_after:0, max_width:640, capture_settle_ms:100}`. Image sizing/validation and the saved-versus-returned coordinate mapping match pad observations above; width defaults to at most960 unless scale is explicit. `click_text.region` remains its OCR search region and also crops an enabled observation; a search-only region still works without capture_after.
+
+`click_text` defaults to case-insensitive `whole_word:true`: `PLAY` matches the complete OCR word `Play`, not `Player`. Whitespace remains ignored and `nth` counts eligible matches in reading order. Multiple matches still refuse and list candidates. `exact:true` adds case sensitivity; `whole_word:false` explicitly permits legacy substring matching. An explicit fuzzy budget may accept a different complete word. These are OCR token boundaries, including punctuation, not a guarantee about what the image actually says.
+
+Default whole-word clicks require CLI `text_word_boundary_version:1`. A bounded2s read-only `help` preflight checks that capability before input, without caching or target/claim changes; observed attachment changes during it refuse the click. An older CLI fails with update/opt-out instructions. The existing `exact:true` mode works without this new capability because it already enforces boundaries. Read-only `find_text` and `wait_text` keep their prior matching defaults. Native replies retain matched text/candidates and report the applied boundary/case mode.
 
 Options that are incompatible or out of bounds are rejected before input. A later capture/backend/filesystem failure leaves the original action/job receipt intact with capture_after_error; it never replays the action. key_sequence still returns after scheduling one job: its image can show an ongoing sequence, and does not imply completion. Use job_status or job_cancel as before. The optional settle delay is a bounded nonblocking timer, not a completion wait. Observed attachment changes before capture suppress the image; overlapping captures and unobserved external process/window changes retain the existing mapping/lifetime limits.
 

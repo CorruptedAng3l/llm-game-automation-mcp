@@ -5,6 +5,7 @@
 //  * default: case-insensitive; ALL whitespace is ignored on both sides ("Load  Game" == "LoadGame" == "load game");
 //    the query may be a substring of a line ("PLAY" also matches inside "PLAYERS" - use --exact to forbid that).
 //  * exact:   case-sensitive, and the match must start and end on OCR word boundaries.
+//  * whole_word: require the same OCR word boundaries independently of case; exact still requires case.
 //  * fuzzy N: also accept a run of whole words whose letters differ from the query by <= N edits (OCR slips such as
 //    BATTLE -> BATTIE). Fuzzy hits have score < 1.
 //  * hits are returned in reading order (rows top to bottom, left to right inside a row); --nth is 1-based on that order.
@@ -33,7 +34,7 @@ struct Hit {
     std::wstring line_text;
     std::wstring query;                  // populated by multi-query CLI search; not OCR confidence
 };
-struct Options { bool exact = false; int fuzzy = 0; };
+struct Options { bool exact = false; int fuzzy = 0; bool whole_word = false; };
 
 inline std::wstring Lower(std::wstring s) {
     if (!s.empty()) CharLowerBuffW(&s[0], static_cast<DWORD>(s.size()));
@@ -83,7 +84,7 @@ inline void FindInLine(const Line& line, int lineIndex, const std::wstring& quer
     };
     for (size_t pos = s.find(q); pos != std::wstring::npos; pos = s.find(q, pos + q.size())) {
         const size_t end = pos + q.size() - 1;
-        if (opt.exact && !(wordStart[pos] && wordEnd[end])) continue;
+        if ((opt.exact || opt.whole_word) && !(wordStart[pos] && wordEnd[end])) continue;
         addHit(owner[pos], owner[end], 1.0);
     }
     if (opt.fuzzy > 0) {

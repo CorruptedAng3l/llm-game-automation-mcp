@@ -32,6 +32,13 @@ static void TextTests() {
     Check(hits.size() == 2 && hits[0].box.x == 60 && hits[1].box.x == 540, "two BATTLE hits are in reading order (left before right)");
     hits = vi_text::Find(lines, L"play", o);
     Check(hits.size() == 2 && hits[0].box.y == 110 && hits[1].box.y == 200, "substring 'play' also hits PLAYERS (documented), top-to-bottom order");
+    vi_text::Options whole; whole.whole_word = true;
+    hits = vi_text::Find(lines, L"play", whole);
+    Check(hits.size() == 1 && hits[0].line_text == L"PLAY", "whole-word mode is case-insensitive and excludes PLAYERS");
+    const std::vector<Line> player = {MakeLine({L"Player"}, 20, 20)};
+    Check(vi_text::Find(player, L"PLAY", whole).empty(), "whole-word PLAY cannot select Player");
+    whole.whole_word = false;
+    Check(vi_text::Find(player, L"PLAY", whole).size() == 1, "explicit whole-word false preserves substring opt-out");
     o.exact = true;
     hits = vi_text::Find(lines, L"PLAY", o);
     Check(hits.size() == 1 && hits[0].box.y == 110, "--exact: PLAY does not match inside PLAYERS");

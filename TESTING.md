@@ -163,6 +163,9 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   on the first run, and the 19 failed or not-run cases (`di_type_lifetime` under load, `owner_input` with the desk in
   use, and the cases queued behind them) all passed on a rerun, so 89 / 89. Real-desktop hotkey delivery and a real
   game cursor trap are not measured in the background suites.
+- Commit 281961b (2026-11-04): `click_text` / text clicks match whole OCR words by default, so "PLAY" no longer
+  clicks "Player". Gate: `build.bat` x64 + x86 OK; `mcp` `npm test` 39 files PASS; `run_textwordmodeltest.ps1`
+  22 / 0; background plan (89 cases): 86 passed, 3 not_measured (capture_diagnostics, cursor_guard, legacy_focus).
 
 ## Real games
 

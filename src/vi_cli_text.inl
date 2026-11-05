@@ -37,6 +37,9 @@ static bool ParseTextQuery(const Args& a, const char* cmd, TextQuery& q, std::st
         begin = end + 1;
     } while (begin <= input.size());
     q.opt.exact = HasOpt(a, "exact");
+    const std::string wholeWord = GetOpt(a, "whole-word", "false");
+    if (wholeWord != "true" && wholeWord != "false") { err = "--whole-word accepts true or false"; return false; }
+    q.opt.whole_word = wholeWord == "true";
     q.opt.fuzzy = atoi(GetOpt(a, "fuzzy", "0").c_str());
     if (q.opt.fuzzy < 0 || q.opt.fuzzy > 3) { err = "--fuzzy must be 0..3"; return false; }
     q.preprocess = GetOpt(a, "preprocess", "auto");
@@ -173,7 +176,7 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
         ++polls;
         const DWORD elapsed = GetTickCount() - t0;
         std::string stats = "\"elapsed_ms\":" + std::to_string(elapsed) + ",\"polls\":" + std::to_string(polls) +
-            ",\"ocr_pass\":\"" + scan.preprocessing + "\",\"ocr_scale\":" + Num(scan.scale) + ",\"ocr_passes\":" + std::to_string(scan.passes) + ",\"capture_space_updated\":false";
+            ",\"ocr_pass\":\"" + scan.preprocessing + "\",\"ocr_scale\":" + Num(scan.scale) + ",\"ocr_passes\":" + std::to_string(scan.passes) + ",\"capture_space_updated\":false,\"text_word_boundary_version\":1,\"whole_word\":" + (q.opt.whole_word || q.opt.exact ? "true" : "false") + ",\"case_sensitive\":" + (q.opt.exact ? "true" : "false");
         if (mode == 0) {
             if (!hits.empty()) {
                 if (nth == 0 && hits.size() > 1)
