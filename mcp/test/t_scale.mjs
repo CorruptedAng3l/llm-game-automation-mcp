@@ -3,7 +3,8 @@ import { makeChecker, startFake } from "./lib.mjs";
 const { decodePng } = await import("../build/png.js");
 const { state, check } = makeChecker();
 const pid = process.pid;
-const t = await startFake({ png: { w: 640, h: 360 } });
+const scope = { hwnd:'0x123',thread:1,adoption_generation:'1',geometry_epoch:'0',lifetime_cookie:'99',client_w:640,client_h:360,geometry_witness:'client dimensions plus adopted WndProc WM_SIZE/WM_DPICHANGED epoch' };
+const t = await startFake({ png: { w: 640, h: 360 }, replies:{json:{ok:true,pid,capture_space_updated:false,capture_scope:scope}} });
 const returned = (r) => decodePng(Buffer.from(r.image.data, "base64"));
 const px = (im, x, y) => { const o = (y * im.width + x) * 4; return [im.data[o], im.data[o + 1], im.data[o + 2]]; };
 const near = (a, b, d = 1) => a.every((v, i) => Math.abs(v - b[i]) <= d);
@@ -47,6 +48,10 @@ try {
   check(jz.isError === true && /max_width/.test(jz.text) && /png/i.test(jz.text), "jpeg + zoom: the error names the fix (png + max_width)", jz.text.slice(0, 260));
   const jg = await t.call("capture", { pid, format: "jpeg", grid: 100 });
   check(jg.isError === true && /max_width|scale/.test(jg.text) && /png/i.test(jg.text), "jpeg + grid: the error names the fix (png + max_width / scale)", jg.text.slice(0, 260));
+  t.clearCalls();
+  const js = await t.call("capture", { pid, format: "jpeg", scale: 2 });
+  check(js.isError && /scale > 1/.test(js.text) && /png/i.test(js.text) && t.callsOf("capture").length === 0,
+    "jpeg enlargement is refused before capture instead of reporting an unapplied scale", js.text.slice(0, 260));
 
   const zg = await t.call("capture", { pid, region: { x: 100, y: 50, w: 200, h: 100 }, zoom: 2, grid: 50 });
   const zgi = returned(zg);
@@ -68,7 +73,9 @@ try {
   await t.call("click", { pid, x: 60, y: 40 });
   check(JSON.stringify(positional(t.callsOf("click").at(-1), "click")) === JSON.stringify(["60", "40"]), "default (no coord_space) = client coordinates, unchanged");
   await t.call("click", { pid, x: 100, y: 50, coord_space: "capture", mapping: { scale: 0.5, offset_x: 0, offset_y: 0 } });
-  check(JSON.stringify(positional(t.callsOf("click").at(-1), "click")) === JSON.stringify(["200", "100"]), "an explicit mapping overrides the last capture", JSON.stringify(t.callsOf("click").at(-1)));
+  const explicitArgs = t.callsOf("click").at(-1);
+  check(JSON.stringify(positional(explicitArgs, "click")) === JSON.stringify(["200", "100"]) && JSON.parse(val(explicitArgs,"--scope-json")).lifetime_cookie === scope.lifetime_cookie,
+    "an explicit mapping overrides the transform and carries a fresh native scope fence", JSON.stringify(explicitArgs));
   t.clearCalls();
   const mix = await t.call("click", { pid, x: 1, y: 1, coord_space: "capture", norm: true });
   check(mix.isError && t.callsOf("click").length === 0, "coord_space capture with norm is refused before anything is sent", mix.text.slice(0, 200));

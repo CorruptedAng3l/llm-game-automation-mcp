@@ -58,13 +58,17 @@ inline bool Add(const char* name, void* detour) {
     hooks.push_back({entry, detour, original}); return true;
 }
 using WindowPosition=BOOL(WINAPI*)(HWND,HWND,int,int,int,int,UINT);
+using WindowVisibility=BOOL(WINAPI*)(HWND,int);
 // The optional fixture dispatcher must refuse all but proved own, nonactivating
-// offscreen geometry. All default write spies remain terminal absorbers.
-inline bool Install(WindowPosition position=&WindowPos) {
-    if(!position)return false;
+// offscreen geometry. Optional visibility dispatchers must similarly prove an
+// explicitly requested exact own HWND/UI-thread/lifetime, offscreen pre/post
+// rect and SW_SHOWNA-only call under a no-activation CBT barrier. Defaults stay
+// terminal, including ShowWindow and ShowWindowAsync.
+inline bool Install(WindowPosition position=&WindowPos,WindowVisibility show=&Show,WindowVisibility showAsync=&Show) {
+    if(!position||!show||!showAsync)return false;
     if (MH_Initialize() != MH_OK) return false;
     const char* names[] = {"SetCursorPos", "SetPhysicalCursorPos", "ClipCursor", "SendInput", "mouse_event", "SetForegroundWindow", "BringWindowToTop", "SetActiveWindow", "SetFocus", "SwitchToThisWindow", "AttachThreadInput", "SetCapture", "ReleaseCapture", "AllowSetForegroundWindow", "LockSetForegroundWindow", "SetWindowPos", "ShowWindow", "ShowWindowAsync"};
-    void* detours[] = {reinterpret_cast<void*>(&Position), reinterpret_cast<void*>(&Position), reinterpret_cast<void*>(&Clip), reinterpret_cast<void*>(&Send), reinterpret_cast<void*>(&Mouse), reinterpret_cast<void*>(&Foreground), reinterpret_cast<void*>(&Foreground), reinterpret_cast<void*>(&Focus), reinterpret_cast<void*>(&Focus), reinterpret_cast<void*>(&Switch), reinterpret_cast<void*>(&Attach), reinterpret_cast<void*>(&Capture), reinterpret_cast<void*>(&Release), reinterpret_cast<void*>(&Permission), reinterpret_cast<void*>(&LockPermission), reinterpret_cast<void*>(position), reinterpret_cast<void*>(&Show), reinterpret_cast<void*>(&Show)};
+    void* detours[] = {reinterpret_cast<void*>(&Position), reinterpret_cast<void*>(&Position), reinterpret_cast<void*>(&Clip), reinterpret_cast<void*>(&Send), reinterpret_cast<void*>(&Mouse), reinterpret_cast<void*>(&Foreground), reinterpret_cast<void*>(&Foreground), reinterpret_cast<void*>(&Focus), reinterpret_cast<void*>(&Focus), reinterpret_cast<void*>(&Switch), reinterpret_cast<void*>(&Attach), reinterpret_cast<void*>(&Capture), reinterpret_cast<void*>(&Release), reinterpret_cast<void*>(&Permission), reinterpret_cast<void*>(&LockPermission), reinterpret_cast<void*>(position), reinterpret_cast<void*>(show), reinterpret_cast<void*>(showAsync)};
     for (unsigned n = 0; n < sizeof(names) / sizeof(names[0]); ++n) if (!Add(names[n], detours[n])) return false;
     return true;
 }

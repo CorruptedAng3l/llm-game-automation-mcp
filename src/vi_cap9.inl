@@ -38,9 +38,10 @@ template<class F>HRESULT D9PresentFrame(IDirect3DDevice9* device,IDirect3DSwapCh
     const HWND window=destination?destination:params.hDeviceWindow;
     owned=owned&&FullscreenOwnWindow(window)&&(!g_hwnd||window==g_hwnd||GetAncestor(window,GA_ROOT)==g_hwnd);
     if(!owned)return native();
+    const auto presentationWitness=BeginPresentedWindow(window);
     ++g_d9PresentAttempts;++C.present;
     const bool capture=BeginCaptureClaim();if(capture)CaptureD9(device,chain);
-    const HRESULT hr=native();g_d9PresentLast=hr;
+    const HRESULT hr=native();g_d9PresentLast=hr;EndPresentedWindow(presentationWitness,API_D3D9,hr);
     if(hr==D3D_OK){++g_d9PresentOk;OnFrame(API_D3D9);}
     else if(hr==D3DERR_DEVICELOST||hr==D3DERR_DEVICENOTRESET)++g_d9Lost;
     if(capture){if(hr!=D3D_OK){g_capPix.clear();g_capW=g_capH=0;g_capErr="d3d9: Present did not render, HRESULT "+std::to_string((unsigned long)hr);}if(!g_capErr.empty())++g_d9CaptureFailures;EndCapture(API_D3D9);}

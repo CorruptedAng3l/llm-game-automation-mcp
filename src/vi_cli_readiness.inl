@@ -13,24 +13,11 @@ static bool InjectHooksOnly(const Args& args,bool& value,std::string& error) {
  return true;
 }
 static bool ReadinessTransport(DWORD pid,const std::string& request,DWORD budget,std::string& response,HANDLE target=nullptr) {
- const auto deadline=GetTickCount64()+budget;
- HANDLE pipe=OpenPipe(pid,budget,target);if(pipe==INVALID_HANDLE_VALUE)return false;
- struct Close{HANDLE h;~Close(){CloseHandle(h);}} close{pipe};
- const std::string wire=StampOwner(request)+"\n";
- DWORD written=0;if(!WriteFile(pipe,wire.data(),(DWORD)wire.size(),&written,nullptr)||written!=wire.size())return false;
- response.clear();
- while(GetTickCount64()<deadline) {
-  if(target&&WaitForSingleObject(target,0)==WAIT_OBJECT_0)return false;
-  DWORD available=0;if(!PeekNamedPipe(pipe,nullptr,0,nullptr,&available,nullptr))return false;
-  if(!available){Sleep(2);continue;}
-  char block[2048];DWORD read=0;if(!ReadFile(pipe,block,(std::min)(available,(DWORD)sizeof(block)),&read,nullptr)||!read)return false;
-  response.append(block,read);if(response.size()>65536)return false;
-  auto newline=response.find('\n');if(newline!=std::string::npos){response.resize(newline);return true;}
- }
- return false;
+ return BoundedCliRequest(pid,request,budget,response,target);
 }
 static bool RequestInputReady(DWORD pid,bool hooksOnly,std::string& response,HANDLE target=nullptr) {
- return ReadinessTransport(pid,std::string("{\"cmd\":\"readiness\",\"wait_ms\":5000,\"hooks_only\":")+(hooksOnly?"true":"false")+"}",6500,response,target);
+ const auto wait=CliBudget(hooksOnly?5000:g_cliReadinessWaitMs);if(!wait)return false;
+ return ReadinessTransport(pid,std::string("{\"cmd\":\"readiness\",\"wait_ms\":")+std::to_string(wait)+",\"hooks_only\":"+(hooksOnly?"true":"false")+"}",6500,response,target);
 }
 #include "vi_cli_cursor_guard.inl"
 static int ReportInputReady(FILE* output,DWORD pid,const std::wstring& dll,bool quiet,bool hooksOnly,bool already,HANDLE target=nullptr,std::string* captured=nullptr) {

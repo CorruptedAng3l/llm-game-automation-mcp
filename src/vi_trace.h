@@ -7,11 +7,23 @@ struct ChannelTrace {
     std::atomic<long long> reads{0};
     std::atomic<long long> down_reads{0};
     std::atomic<int> last{0};
+    std::atomic<unsigned> writing{0};
+    std::atomic<std::uint64_t> serial{0};
 
     void record(int value, bool down) noexcept {
+        writing.fetch_add(1);
         reads.fetch_add(1, std::memory_order_relaxed);
         if (down) down_reads.fetch_add(1, std::memory_order_relaxed);
         last.store(value, std::memory_order_relaxed);
+        serial.fetch_add(1);writing.fetch_sub(1);
+    }
+
+    // Bounded observation: never spin waiting for a hot application reader.
+    bool snapshot(long long& count,long long& high) const noexcept {
+        for(unsigned attempt=0;attempt<4;++attempt){const auto before=serial.load();if(writing.load())continue;
+            const auto r=reads.load(),d=down_reads.load();
+            if(!writing.load()&&serial.load()==before){count=r;high=d;return true;}}
+        return false;
     }
 
     // Win32 SHORT states use bit 15; BYTE keyboard/DirectInput states use bit 7.

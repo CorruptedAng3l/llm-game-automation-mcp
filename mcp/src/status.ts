@@ -88,7 +88,7 @@ export function mouseMessageHealth(s: Obj): Obj | undefined {
   const ratio = total ? dropped / total : 0;
   const owned = count("wm_mouse_owned"), delivered = count("wm_mouse_owned_delivered"), ownedDropped = count("wm_mouse_owned_dropped"), unrecognizedDropped = count("wm_mouse_unrecognized_dropped");
   const out: Obj = { received: total, dropped, drop_ratio: ratio };
-  const known = owned !== undefined && delivered !== undefined && ownedDropped !== undefined && unrecognizedDropped !== undefined && delivered + ownedDropped <= owned && owned <= total;
+  const known = owned !== undefined && delivered !== undefined && ownedDropped !== undefined && unrecognizedDropped !== undefined && delivered + ownedDropped <= owned && owned <= total && delivered <= total-dropped && ownedDropped <= dropped && unrecognizedDropped <= dropped && ownedDropped + unrecognizedDropped <= dropped && unrecognizedDropped <= total-owned;
   Object.assign(out, known ? { owned_received: owned, owned_delivered: delivered, owned_dropped: ownedDropped, unrecognized_dropped: unrecognizedDropped } : { owned_received: null, owned_delivered: null, owned_dropped: null, unrecognized_dropped: null });
   if (total >= 20 && ratio >= 0.5) out.warning = `Mouse message isolation suppressed ${dropped} of ${total} messages (${Math.round(ratio * 100)}%). ` +
     (known ? `${delivered} vinput-owned messages reached the window callback; ${ownedDropped} owned messages were dropped. ` : "This DLL does not separate owned and unrecognized mouse delivery. ") +
@@ -117,16 +117,49 @@ function padReturns(s: Obj): Obj | undefined {
   return out;
 }
 
+/** Preserve typed native visibility; missing/old metadata never implies visible. */
+export function hiddenWindowView(s: Obj): Obj {
+  const out: Obj = {};
+  if (s.hidden_window_version === 1 && typeof s.window_adopted === "boolean" &&
+      (typeof s.window_hidden === "boolean" || s.window_hidden === null)) {
+    out.window_adopted = s.window_adopted;
+    out.window_hidden = s.window_hidden;
+    if (typeof s.automatic_visibility_restoration === "boolean") out.automatic_visibility_restoration = s.automatic_visibility_restoration;
+    const p = s.presentation_window;
+    if (p && typeof p === "object" && !Array.isArray(p)) {
+      const v = p as Obj;
+      const flags = ["ambiguous", "capacity_unconfirmed", "evidence_unconfirmed", "candidates_truncated"];
+      if (v.version === 1 && typeof v.hidden_candidate_count === "number" && Number.isSafeInteger(v.hidden_candidate_count) &&
+          v.hidden_candidate_count >= 0 && v.hidden_candidate_count <= 128 && flags.every(k => typeof v[k] === "boolean"))
+        out.presentation_window = Object.fromEntries(["hidden_candidate_count", ...flags].map(k => [k, v[k]]));
+    }
+  }
+  const h = s.hidden_show;
+  if (s.show_hidden_version === 1 && h && typeof h === "object" && !Array.isArray(h)) {
+    const v = h as Obj;
+    const flags = ["pending", "completed", "call_attempted", "visible_after"];
+    const decimal = (value: unknown) => typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value);
+    if (decimal(v.ticket) && decimal(v.adoption_generation) && typeof v.hwnd === "string" && /^0x[0-9a-f]{1,16}$/i.test(v.hwnd) &&
+        flags.every(k => typeof v[k] === "boolean") && !(v.pending === true && v.completed === true) &&
+        typeof v.reason === "string" && v.reason.length <= 128 && typeof v.expires_in_ms === "number" &&
+        Number.isSafeInteger(v.expires_in_ms) && v.expires_in_ms >= 0 && v.expires_in_ms <= 5000)
+      out.hidden_show = Object.fromEntries(["ticket", "hwnd", "adoption_generation", ...flags, "reason", "expires_in_ms"].map(k => [k, v[k]]));
+  }
+  return out;
+}
+
 /** The essentials of a status reply (about 0.5 KB instead of 3 KB) plus warnings; `verbose` on the tool gives the raw reply. */
 export function compactStatus(s: Obj): Obj {
   const c = (s.counters ?? {}) as Record<string, unknown>;
   const nonzero: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(c)) if (typeof v === "number" && v !== 0) nonzero[k] = v;
   const warnings: string[] = [];
+  const hidden = hiddenWindowView(s);
   const d = diagnoseFrames(s);
   if (d.warning) warnings.push(d.warning);
   else if (d.note && d.refusals > 0) warnings.push(d.note);
-  if (s.hwnd === "0x0") warnings.push("No game window has been adopted yet (hwnd 0x0): the game may still be starting, or it has no top-level window. Wait and check status again; capture and mouse input need the window.");
+  if (s.hwnd === "0x0") warnings.push(hidden.window_hidden === true ? "A hidden-window observation exists, but no game window is adopted yet. Check presentation evidence and launch diagnostics; capture and mouse input still need a protected adopted window." : "No game window has been adopted yet (hwnd 0x0): the game may still be starting, or it has no top-level window. Wait and check status again; capture and mouse input need the window.");
+  if (hidden.window_adopted === true && hidden.window_hidden === true) warnings.push("The adopted game window is hidden. Visibility changes require an explicit show_hidden launch option; adoption and Present evidence do not prove application input readiness.");
   if (s.app_active === 0 && s.really_foreground === false)
     warnings.push(`app_active is 0 while the game is in the background: the game believes it is inactive and may ignore input (old DirectDraw-era games often do). ${s.autoactivate === false ? "autoactivate is OFF: set config autoactivate=true. " : "autoactivate is on, so this should clear shortly after the first input. "}If it persists, check the game's own background-input settings.`);
   if (s.minimized === true) warnings.push("The game window is minimized; minimized games stop rendering, so captures go stale. Restore it (keepvisible=true keeps it visible).");
@@ -138,7 +171,7 @@ export function compactStatus(s: Obj): Obj {
   if (s.anticheat_disabled === true) warnings.push("An anti-cheat module was detected after injection: vinput refuses input and capture commands for this game.");
   const claim = s.claim as { active?: boolean; owner?: string } | undefined;
   const out: Obj = {
-    ok: s.ok, pid: s.pid, hwnd: s.hwnd, title: s.title,
+    ok: s.ok, pid: s.pid, hwnd: s.hwnd, title: s.title, ...hidden,
     client: { w: s.client_w, h: s.client_h },
     really_foreground: s.really_foreground, app_active: s.app_active,
     present: c.present, frames: s.frames, capture_path: s.capture_path, frame_api: s.frame_api,
@@ -163,6 +196,8 @@ export function compactStatus(s: Obj): Obj {
   // what this game's vinput DLL can do (older DLLs report none of these)
   const caps: Obj = {};
   if (typeof s.capture_output_version === "number") caps.capture_output_version = s.capture_output_version;
+  if (s.hidden_window_version === 1) caps.hidden_window_version = 1;
+  if (s.show_hidden_version === 1) caps.show_hidden_version = 1;
   if (s.input_precision && typeof s.input_precision === "object") Object.assign(caps, s.input_precision);
   if (Object.keys(caps).length) out.capabilities = caps;
   if (s.edge_contact === true) { out.edge_contact = true; out.edge_sides = s.edge_sides;

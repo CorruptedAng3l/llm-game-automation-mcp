@@ -91,6 +91,7 @@ static std::string ApplyLaunchClientSize(DWORD pid, const LaunchOptions& options
     auto getDpi = (UINT(WINAPI*)(HWND))GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
     if (getDpi && window) dpi = getDpi(window);
     if (warning.empty() && (!dpiScope.matched || !getDpi || !dpi)) warning = "target DPI context cannot be matched safely; no resize attempted, target remains running";
+    if(warning.empty()&&!CliBudget(1))warning="launch deadline expired before client resize; no resize attempted";
     if (warning.empty()) {
         RECT desired{0, 0, (LONG)options.width, (LONG)options.height};
         DWORD style = (DWORD)GetWindowLongPtrW(window, GWL_STYLE), extended = (DWORD)GetWindowLongPtrW(window, GWL_EXSTYLE);
@@ -109,8 +110,8 @@ static std::string ApplyLaunchClientSize(DWORD pid, const LaunchOptions& options
                     if (!IsWindow(window) || currentOwner != pid) { warning = "adopted window changed during size verification; target was not relaunched"; break; }
                     GetClientRect(window, &client);
                     if (client.right == (LONG)options.width && client.bottom == (LONG)options.height) break;
-                    Sleep(10);
-                } while (GetTickCount64()-started < 1000);
+                    Sleep(CliBudget(10));
+                } while (GetTickCount64()-started < 1000&&CliBudget(1));
                 if (warning.empty() && (client.right != (LONG)options.width || client.bottom != (LONG)options.height)) warning = "application did not retain requested client size within 1000 ms; target remains running";
             }
         }

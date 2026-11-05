@@ -38,5 +38,6 @@ struct LaunchProcessHandles {
         else h=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,p.pid);
         if(h){auto now=LaunchProcess(p.pid,p.parent,p.name,h);if(now.born==p.born)held.push_back({h,p});else CloseHandle(h);}
     }
+    HANDLE Find(DWORD pid,unsigned long long born)const{for(const auto& h:held)if(h.process.pid==pid&&h.process.born==born)return h.handle;return nullptr;}
     void Refresh(vi_launch_follow::Tree& tree){for(auto& h:held)tree.Remember(LaunchProcess(h.process.pid,h.process.parent,h.process.name,h.handle));}
 };

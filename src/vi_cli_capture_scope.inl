@@ -55,6 +55,12 @@ static bool CaptureScopePreflight(DWORD pid,std::string& request,std::string& re
  if(!parsed.Parse()){const std::string error=CaptureScopeParseError(parsed);return CaptureScopeRefusal(response,error.c_str(),false);}
  const auto commandField=parsed.fields.find("cmd");std::string command;
  if(commandField==parsed.fields.end()||!CaptureScopeText(commandField->second,command))return CaptureScopeRefusal(response,"outgoing request needs one decoded string cmd; no original request was sent",false);
+ const bool scopedPointer=parsed.fields.count("expected_capture_scope")&&(command=="click"||command=="mousedown"||command=="mouseup"||command=="mouse"||command=="move");
+ if(scopedPointer){
+  std::string scope;if(!CaptureScopeText(parsed.fields.at("expected_capture_scope"),scope)||scope.empty())return CaptureScopeRefusal(response,"expected pointer scope must be a nonempty string; no pointer input was sent",false);
+  std::string capability;const bool received=BoundedJobRequest(pid,"{\"cmd\":\"ping\",\"pointer_scope_support\":true}",1000,capability);vi_ready_json::Reader version{capability,0,{}};bool accepted=false;
+  if(!received||!version.Parse()||!version.Bool("ok",accepted)||!accepted||version.fields.count("pointer_scope_version")==0||version.fields.at("pointer_scope_version").type!='n'||version.fields.at("pointer_scope_version").raw!="1"||version.fields.count("pid")==0||version.fields.at("pid").raw!=std::to_string(pid))return CaptureScopeRefusal(response,"target lacks exact pointer-scope enforcement or its capability was unconfirmed; no pointer input or cleanup was sent; restart with the matching DLL");
+ }
  const bool positioned=parsed.fields.count("x")||parsed.fields.count("y");
  // Both motion commands branch on dx/dy presence, not their command name.
  // Without either delta, ResolveXY also maps implicit current x/y. With a

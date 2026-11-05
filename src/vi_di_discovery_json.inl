@@ -1,0 +1,9 @@
+std::string DiReaderStatusJson(){
+    JOut out;out.num("version",1);out.bol("factory_hooked",g_diFactoryEnabled&&CursorEntryReaches(g_diFactoryTarget,(void*)&DiFactoryEntry));
+    out.num("actual_factory_returns",(double)g_diFactoryReturns.load());out.num("created_device_returns",(double)g_diDeviceReturns.load());out.num("queried_device_interfaces",(double)g_diQueriedDevices.load());out.num("probe_factory_returns",(double)g_diProbeFactoryReturns.load());out.num("hook_failures",(double)g_diDiscoveryFailures.load());
+    unsigned state=0,buffer=0;{std::lock_guard<std::mutex> lock(g_claimDiEntryMx);for(unsigned i=0;i<kDiPollSlots;++i){if(g_diStateEntries[i].enabled)++state;if(g_diDataEntries[i].enabled)++buffer;}}
+    out.num("state_entries",state);out.num("buffer_entries",buffer);
+    out.num("keyboard_format_version",1);out.num("formats_supported",(double)g_diFormatsAccepted.load());out.num("formats_unsupported",(double)g_diFormatsUnsupported.load());out.num("formatted_state_reads",(double)g_diFormatStateReads.load());out.num("formatted_buffer_reads",(double)g_diFormatBufferReads.load());out.num("format_read_refusals",(double)g_diFormatRefused.load());out.num("format_lifetimes_retired",(double)g_diFormatRetired.load());out.num("legacy_format_assumptions",(double)g_diLegacyFormatPolls.load());out.num("appdata_unavailable",(double)g_diFormatAppDataUnavailable.load());
+    {std::lock_guard<std::mutex> lock(g_diFormatMx);out.num("tracked_format_aliases",(double)g_diFormatAliases.size());out.num("retired_format_aliases",(double)g_diFormatRetiredAliases.size());out.bol("legacy_format_uncertain",g_diFormatLegacyUncertain);if(!g_diFormatLastUnsupported.empty())out.str("last_unsupported_format",g_diFormatLastUnsupported);}
+    out.str("scope","discovery/formats are coverage evidence; per-key trace proves returned virtual API values, never gameplay; pre-existing untracked standard devices retain legacy format assumptions");return out.done();
+}

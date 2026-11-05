@@ -1,7 +1,7 @@
 // Called only under g_inputMx. Publications remain atomic in g_padStateMx.
 // The frame counter witnesses target Present checkpoints, not game acceptance.
 void JobTimelinePublish(InputJob& job,WORD buttons,int mask,const int* axes,ULONGLONG now){
- JobPadPublish(buttons,mask,axes);job.publishedButtons=buttons;job.publishedMask=mask;
+ JobPadPublish(buttons,mask,axes,true,job.id);job.publishedButtons=buttons;job.publishedMask=mask;
  for(int i=0;i<6;i++)job.publishedAxes[i]=axes[i];job.padSnapshot=true;
  ++job.updates;job.lastApply=now;job.lastFrame=C.present_ours;
 }

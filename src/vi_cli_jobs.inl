@@ -4,10 +4,7 @@
 // and reversible: decoded u00XX code points map back to the original bytes.
 static std::string JobRawBytes(const std::string& bytes){std::string out;for(unsigned char byte:bytes){if(byte<0x20||byte>=0x7f){char escaped[7];sprintf_s(escaped,"\\u%04X",byte);out+=escaped;}else{if(byte=='"'||byte=='\\')out+='\\';out+=(char)byte;}}return out;}
 static bool BoundedJobRequest(DWORD pid,const std::string& request,DWORD budget,std::string& response,size_t maxResponseBytes=65536){
- if(!budget)return false;const ULONGLONG deadline=GetTickCount64()+budget;HANDLE pipe=OpenPipe(pid,budget);if(pipe==INVALID_HANDLE_VALUE)return false;
- struct Close{HANDLE handle;~Close(){CloseHandle(handle);}} close{pipe};std::string wire=StampOwner(request)+"\n";DWORD written=0;if(!WriteFile(pipe,wire.data(),(DWORD)wire.size(),&written,nullptr)||written!=wire.size())return false;
- while(GetTickCount64()<deadline){DWORD available=0;if(!PeekNamedPipe(pipe,nullptr,0,nullptr,&available,nullptr))return false;if(!available){Sleep(2);continue;}char block[2048];DWORD read=0;if(!ReadFile(pipe,block,(std::min)(available,(DWORD)sizeof(block)),&read,nullptr)||!read)return false;response.append(block,read);if(response.size()>maxResponseBytes)return false;auto newline=response.find('\n');if(newline!=std::string::npos){response.resize(newline);return true;}}
- return false;
+ return BoundedCliRequest(pid,request,budget,response,nullptr,maxResponseBytes);
 }
 // Select top-level protocol fields without matching text inside a JSON string.
 // This is a bounded field selector, not a replacement for the target JSON parser.

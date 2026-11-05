@@ -18,6 +18,10 @@ try{
  t.setScenario({replies:{launch:{ok:false,error:'CreateProcess failed 740',inject:null}}});
  const before=await t.call('launch',{exe:'C:/fixture/game.exe',claim:true});
  check(before.isError&&before.json?.launched===undefined&&before.json?.keep_pid===undefined,'failed-before-load MCP launch never claims a launched game');
+ t.setScenario({replies:{launch:{...loaded,ok:true,claimed:true,input_ready:false,queue_ready:false,readiness_unconfirmed:true,window_adopted:true},claim:{ok:true}}});t.clearCalls();
+ const live=await t.call('launch',{exe:'E:/fixture/game.exe',claim:true,claim_ttl_s:123});
+ check(!live.isError&&live.json.ok===true&&live.json.input_ready===false&&live.json.queue_ready===false&&live.json.claim_ok===true&&t.callsOf('claim').length===1,'live adopted pending queue keeps launch success and requested claim');
+ check(t.callsOf('status').length===0&&live.json.render_health_unmeasured_reason,'pending queue launch avoids a UI-dependent full-status health wait');
 }finally{await t.close();}
 console.log(`LAUNCH_LOADED_RESULT ${JSON.stringify({completed:true,passed:state.passes,failed:state.failures,scope:'pure receipt classification plus actual MCP against a fake CLI; no native process liveness/readiness claim'})}`);
 process.exit(state.failures?1:0);

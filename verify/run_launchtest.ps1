@@ -1,19 +1,28 @@
 # CLI-output/launch regression; launches only the nonactivating synthetic test target.
-# Baseline/current CLI directories may differ; TargetDir must contain the new no-activate target.
+# CLI source is rebuilt through terminal guards; CliDir supplies pinned DLLs.
+# All original cases/assertions remain; TargetDir is replaced by guarded owned fixtures.
 param(
   [string]$CliDir = "$PSScriptRoot\..\dist",
   [string]$TargetDir = "$PSScriptRoot\..\dist",
-  [string]$Out = "$PSScriptRoot\..\build\test\launchtest"
+  [string]$Out = "$PSScriptRoot\..\_scratch\launchtest",
+  [string]$SourceRoot = "",
+  [switch]$BuildOnly
 )
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path "$PSScriptRoot\..").Path
 $Out = [IO.Path]::GetFullPath($Out)
-if (-not $Out.StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase)) { throw 'Launch-test artifacts must stay within this repository' }
+if (-not $Out.StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase) -or -not $Out.StartsWith('E:\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Launch-test artifacts must stay within this vinput copy on E:' }
 New-Item -ItemType Directory -Force -Path $Out, "$Out\temp" | Out-Null
 $Out = (Resolve-Path $Out).Path
-$V = (Resolve-Path "$CliDir\vinput.exe").Path
+$V = $null
 $oldTemp = $env:TEMP; $oldTmp = $env:TMP
 $env:TEMP = "$Out\temp"; $env:TMP = "$Out\temp"
+. "$PSScriptRoot\vi_legacy_launch_guard.ps1"
+if(-not$SourceRoot){$SourceRoot=$root}
+try{$guardHarness=New-ViLegacyHarness $root $SourceRoot $CliDir $Out}catch{$env:TEMP=$oldTemp;$env:TMP=$oldTmp;throw}
+$CliDir="$($guardHarness.tools)\x64";$TargetDir=$CliDir;$V="$CliDir\vinput.exe"
+if($BuildOnly){Save-ViLegacyEvidence $guardHarness;$env:TEMP=$oldTemp;$env:TMP=$oldTmp;Write-Output "BUILD ONLY 2 PASS / 0 FAIL $($guardHarness.folder) (no GUI executed)";return}
+
 if (-not ('ViLaunchNative' -as [type])) {
   Add-Type 'using System; using System.Runtime.InteropServices; public static class ViLaunchNative { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid); }'
 }
@@ -44,42 +53,11 @@ function Quote-NativeArgument([string]$value) {
   return '"' + $value + '"'
 }
 function Invoke-Cli([string]$name, [string[]]$arguments, [string]$expectedTarget = '') {
-  $startedAt = [DateTime]::UtcNow
-  $psi = [Diagnostics.ProcessStartInfo]::new()
-  $psi.FileName = $V
-  $psi.Arguments = ($arguments | ForEach-Object { Quote-NativeArgument $_ }) -join ' '
-  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-  $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-  $proc = [Diagnostics.Process]::Start($psi)
-  try {
-    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
-    if (-not $proc.WaitForExit(45000)) {
-      # This is our CLI PID only. No preexisting process is stopped.
-      Stop-Process -Id $proc.Id -Force -Confirm:$false
-      throw "$name timed out; our CLI stopped by PID"
-    }
-    $stdout = $stdoutTask.GetAwaiter().GetResult()
-    $stderr = $stderrTask.GetAwaiter().GetResult()
-    [IO.File]::WriteAllText("$Out\$name.stdout.txt", $stdout)
-    [IO.File]::WriteAllText("$Out\$name.stderr.txt", $stderr)
-    $lines = @($stdout -split '\r?\n' | Where-Object { $_.Trim().Length -gt 0 })
-    $json = [Collections.Generic.List[object]]::new()
-    foreach ($line in $lines) {
-      try { $obj = $line | ConvertFrom-Json }
-      catch { $json.Add($null); continue }
-      $json.Add($obj)
-      if ($expectedTarget -and $obj.pid) {
-        $targetPid = [int]$obj.pid
-        if (-not @($owned | Where-Object Id -eq $targetPid).Count) {
-          $target = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
-          if ($target -and $target.Path -eq $expectedTarget -and $target.StartTime.ToUniversalTime() -ge $startedAt.AddSeconds(-2)) { $owned.Add($target) }
-          elseif ($target) { throw "Returned PID $targetPid does not identify our newly launched target" }
-        }
-      }
-    }
-    return [pscustomobject]@{exit_code=$proc.ExitCode; stdout=$stdout; stderr=$stderr; lines=$lines; json=$json.ToArray()}
-  } finally { $proc.Dispose() }
+  $result=Invoke-ViLegacyCli $guardHarness $name $arguments $expectedTarget
+  foreach($target in $result.targets){if(-not @($owned|Where-Object Id -eq $target.Id).Count){$owned.Add($target)}}
+  [IO.File]::WriteAllText("$Out\$name.stdout.txt",$result.stdout)
+  [IO.File]::WriteAllText("$Out\$name.stderr.txt",$result.stderr)
+  return $result
 }
 function Last-Reply($result) { @($result.json | Where-Object { $null -ne $_ }) | Select-Object -Last 1 }
 function Check-Json($result, [string]$name, [bool]$expectOk) {
@@ -88,9 +66,10 @@ function Check-Json($result, [string]$name, [bool]$expectOk) {
   Check ($null -ne $reply -and [bool]$reply.ok -eq $expectOk -and (($result.exit_code -eq 0) -eq $expectOk)) "$name exit/result agree" "exit=$($result.exit_code)"
 }
 function Stop-OwnedTargets {
-  foreach ($target in $owned) { if (-not $target.HasExited) { Stop-Process -Id $target.Id -Force -Confirm:$false }; $target.Dispose() }
+  Stop-ViLegacyTargets $guardHarness
   $owned.Clear()
 }
+
 try {
   # A global flag before the command must select the command's own validation.
   foreach ($position in @('prefix','suffix')) {
@@ -145,7 +124,7 @@ try {
   try {
     $before = (Get-FileHash -LiteralPath $foreign -Algorithm SHA256).Hash
     $fgBefore = [ViLaunchNative]::GetForegroundWindow()
-    $r = Invoke-Cli 'foreign_lock' @('launch','--exe',$target,'--lock',$foreign,'--owner','other-launchtest','--lock-retry','1','--lock-max-wait','1','--timeout','2','--settle','0','--json') $target
+    $r = Invoke-Cli 'foreign_lock' @('launch','--exe',$target,'--lock',$foreign,'--owner','codex-launchtest','--lock-retry','1','--lock-max-wait','1','--timeout','2','--settle','0','--json') $target
     Check-Json $r 'foreign lock refusal' $false
     $reply = Last-Reply $r
     Check ($null -ne $reply -and $reply.error -match 'lock') 'foreign lock reaches lock validation' ($reply | ConvertTo-Json -Compress)
@@ -157,6 +136,5 @@ try {
   if ($failed.Count) { throw "$($failed.Count) launch regression checks failed; see $Out\result.json" }
   "PASS launch JSON/foreground/lock controls: $($checks.Count) checks"
 } finally {
-  Stop-OwnedTargets
-  $env:TEMP = $oldTemp; $env:TMP = $oldTmp
+  try{Stop-OwnedTargets}finally{Save-ViLegacyEvidence $guardHarness;$env:TEMP = $oldTemp; $env:TMP = $oldTmp}
 }

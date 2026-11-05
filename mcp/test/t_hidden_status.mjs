@@ -1,0 +1,20 @@
+import { compactStatus, hiddenWindowView } from '../build/status.js';
+import { fullStatus, makeChecker, startFake } from './lib.mjs';
+const {check,state}=makeChecker();
+const proof={version:1,hidden_candidate_count:1,ambiguous:false,capacity_unconfirmed:false,evidence_unconfirmed:false,candidates_truncated:false};
+const show={ticket:'7',hwnd:'0x1234',adoption_generation:'8',pending:true,completed:false,call_attempted:false,visible_after:false,reason:'queued',expires_in_ms:4999};
+const source=fullStatus({hwnd:'0x1234',hidden_window_version:1,window_adopted:true,window_hidden:true,automatic_visibility_restoration:false,presentation_window:proof,show_hidden_version:1,hidden_show:show});
+let view=compactStatus(source);
+check(view.window_adopted===true&&view.window_hidden===true&&view.automatic_visibility_restoration===false,'compact status preserves hidden adoption separately from visibility');
+check(view.hidden_show.ticket==='7'&&view.hidden_show.hwnd==='0x1234'&&view.hidden_show.pending===true&&view.hidden_show.visible_after===false,'pending exact show receipt remains pending and never becomes visibility success');
+check(view.presentation_window.hidden_candidate_count===1&&view.presentation_window.ambiguous===false&&view.capabilities.hidden_window_version===1&&view.capabilities.show_hidden_version===1,'bounded presentation diagnostics and exact capability versions are discoverable');
+check(view.warnings.some(x=>x.includes('adopted game window is hidden')),'hidden target warning describes explicit visibility option');
+view=compactStatus({...source,window_hidden:null});check(view.window_hidden===null,'explicit unknown visibility remains null');
+view=compactStatus({...source,window_hidden:false});check(view.window_hidden===false&&!view.warnings.some(x=>x.includes('adopted game window is hidden')),'typed actual visible state is preserved');
+check(!('window_hidden' in hiddenWindowView({hwnd:'0x1234'})),'old DLL HWND alone never implies visible');
+for(const change of [{window_hidden:'false'},{window_adopted:'true'},{hidden_window_version:2}])check(!('window_hidden' in hiddenWindowView({...source,...change})),'malformed/unsupported visibility metadata is omitted rather than coerced');
+for(const change of [{pending:true,completed:true},{ticket:7},{expires_in_ms:-1},{hwnd:'0x1234junk'},{adoption_generation:'01'},{visible_after:'true'}])check(!('hidden_show' in hiddenWindowView({...source,hidden_show:{...show,...change}})),'malformed exact show receipt cannot imply success');
+view=compactStatus({...source,hwnd:'0x0',window_adopted:false});check(view.warnings.some(x=>x.includes('hidden-window observation exists')),'unadopted hidden evidence is not described as absent top-level window');
+const t=await startFake({replies:{status:source}});
+try{const r=await t.call('status',{pid:process.pid});check(!r.isError&&r.json?.window_hidden===true&&r.json?.hidden_show?.pending===true,'actual MCP default status carries typed hidden/show diagnostics');}finally{await t.close();}
+console.log(`Hidden status: ${state.passes} PASS / ${state.failures} FAIL`);process.exit(state.failures?1:0);

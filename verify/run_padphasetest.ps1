@@ -1,32 +1,36 @@
 # Background owned XInput/Present receiver. Actual reader samples are retained before assertions.
-param([string]$Out="$PSScriptRoot\..\build\test\pad_phases",[string]$Vinput="$PSScriptRoot\..\dist\vinput.exe",[switch]$KeepGoing,[switch]$BaselineOnly)
+# Vinput supplies the production DLL directory; CLI adapters compile this root's
+# current production source with terminal desktop writers before entry.
+param([string]$Out="$PSScriptRoot\pad_phases",[string]$Vinput="$PSScriptRoot\..\dist\vinput.exe",[switch]$KeepGoing,[switch]$BaselineOnly,[switch]$BuildOnly)
 . "$PSScriptRoot\_vcvars.ps1";$vcDir=Get-VcVarsDir
 $ErrorActionPreference='Stop';$root=(Resolve-Path "$PSScriptRoot\..").Path;$V=(Resolve-Path $Vinput).Path
-$Out=[IO.Path]::GetFullPath($Out);if(-not$Out.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Fixture output must stay inside this checkout'}
+$Out=[IO.Path]::GetFullPath($Out);if(-not$Out.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Fixture output must stay in the isolated vinput copy'}
 New-Item -ItemType Directory -Force $Out|Out-Null;$run=[guid]::NewGuid().ToString('N');$tools="$Out\tools_$run";New-Item -ItemType Directory -Force "$tools\temp","$Out\calls"|Out-Null
 $checks=[Collections.Generic.List[object]]::new();$cases=[Collections.Generic.List[object]]::new();$failures=0;$completed=$false;$owned=$null;$serial=0
+. "$PSScriptRoot\vi_padphase_fixture_support.ps1"
+$currentTarget=$null;$controllerProcess=[Diagnostics.Process]::GetCurrentProcess();$controller=PhaseTrack $controllerProcess $controllerProcess.MainModule.FileName $true;PhaseValidate $controller
 function Check($Good,$Name){$checks.Add(@{pass=[bool]$Good;name=$Name});Write-Host "$(if($Good){'PASS'}else{'FAIL'}) $Name";if(-not$Good){$script:failures++;if(-not$KeepGoing){throw $Name}}}
-if(-not('ViPhaseNative'-as[type])){Add-Type 'using System;using System.Runtime.InteropServices;public static class ViPhaseNative{[DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);[DllImport("user32.dll",SetLastError=true)]public static extern IntPtr SendMessageTimeoutW(IntPtr h,uint m,UIntPtr w,IntPtr l,uint flags,uint timeout,out UIntPtr result);}' }
+if(-not('ViPhaseNative'-as[type])){Add-Type 'using System;using System.Runtime.InteropServices;public static class ViPhaseNative{[DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);[DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr GetPropW(IntPtr h,string n);[DllImport("user32.dll",SetLastError=true)]public static extern IntPtr SendMessageTimeoutW(IntPtr h,uint m,UIntPtr w,IntPtr l,uint flags,uint timeout,out UIntPtr result);}' }
 function Call([int]$TargetPid,[string[]]$Arguments,[int]$Budget=10000){
- $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$V;$info.UseShellExecute=$false;$info.CreateNoWindow=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
- foreach($arg in @('--json','--pid',[string]$TargetPid)+$Arguments){$info.ArgumentList.Add([string]$arg)}
- $proc=[Diagnostics.Process]::new();$proc.StartInfo=$info
- try{if(-not$proc.Start()){throw 'owned CLI failed to start'};$stdout=$proc.StandardOutput.ReadToEndAsync();$stderr=$proc.StandardError.ReadToEndAsync();if(-not$proc.WaitForExit($Budget)){$proc.Kill();$proc.WaitForExit();throw 'owned CLI deadline exceeded'}
-  $text=$stdout.GetAwaiter().GetResult();$err=$stderr.GetAwaiter().GetResult();$lines=@($text-split'\r?\n'|Where-Object{$_-match'\S'});$reply=$null;if($lines.Count-eq1){try{$reply=$lines[0]|ConvertFrom-Json}catch{}}
-  $script:serial++;$record=@{arguments=$Arguments;exit=$proc.ExitCode;stdout=$text;stderr=$err;reply=$reply};$record|ConvertTo-Json -Depth 20|Set-Content "$Out\calls\$serial.json" -Encoding utf8NoBOM
+ if($TargetPid-eq$controller.pid){PhaseLive $controller}else{PhaseRequire ($currentTarget-and$currentTarget.pid-eq$TargetPid) 'CLI targets only retained fixture or actual peer host';PhaseLive $currentTarget.identity}
+ if($Arguments[0]-eq'inject'){$Arguments+=@('--dll',$currentTarget.dll)}
+ $native=PhaseRun $currentTarget.cli (@('--json','--pid',[string]$TargetPid)+$Arguments) $Budget $true
+  $text=$native.stdout;$err=$native.stderr;$lines=@($text-split'\r?\n'|Where-Object{$_-match'\S'});$reply=$null;if($lines.Count-eq1){try{$reply=$lines[0]|ConvertFrom-Json}catch{}}
+  $script:serial++;$record=@{arguments=$Arguments;exit=$native.exit;stdout=$text;stderr=$err;reply=$reply};$record|ConvertTo-Json -Depth 20|Set-Content "$Out\calls\$serial.json" -Encoding utf8NoBOM
   Check ($lines.Count-eq1-and$null-ne$reply) "one JSON reply: $($Arguments[0])";return $record
- }finally{$proc.Dispose()}
 }
 function Rows($Target,[int]$Token){
  @(foreach($line in (Get-Content -LiteralPath $Target.log -ErrorAction SilentlyContinue)){if($line-match'^OBS token=(\d+) tick=(\d+) frame=(\d+) rc=(\d+) b=(\d+) lt=(\d+) rt=(\d+) lx=(-?\d+) ly=(-?\d+) rx=(-?\d+) ry=(-?\d+) axis_frame=(\d+) violations=(\d+) stage=(\d+) selections=(\d+)'){
   if([int]$Matches[1]-eq$Token){[pscustomobject]@{token=[int]$Matches[1];tick=[long]$Matches[2];frame=[long]$Matches[3];rc=[long]$Matches[4];buttons=[int]$Matches[5];lt=[int]$Matches[6];rt=[int]$Matches[7];lx=[int]$Matches[8];ly=[int]$Matches[9];rx=[int]$Matches[10];ry=[int]$Matches[11];axis_frame=[long]$Matches[12];violations=[int]$Matches[13];stage=[int]$Matches[14];selections=[int]$Matches[15];line=$line}}
  }})
 }
-function Control($Target,[uint32]$Message,[uint32]$Value){
+function Control($Target,[uint32]$Message,[uint32]$Value,[switch]$Closing){
+ PhaseLive $Target.identity
  [uint32]$windowPid=0;$thread=[ViPhaseNative]::GetWindowThreadProcessId([IntPtr]$Target.hwnd,[ref]$windowPid)
- if(-not$thread-or$windowPid-ne$Target.pid){throw 'owned fixture HWND/PID validation failed before control message'}
+ $cookieLine=Get-Content $Target.log|Where-Object{$_-match'^GUARDS .*cookie=(\d+)'}|Select-Object -First 1;$cookie=if($cookieLine-match'cookie=(\d+)'){[long]$Matches[1]}else{0}
+ if(-not$thread-or$windowPid-ne$Target.pid-or-not$cookie-or[ViPhaseNative]::GetPropW([IntPtr]$Target.hwnd,'ViPadPhaseLifetime.v1').ToInt64()-ne$cookie){throw 'owned fixture HWND/PID/lifetime validation failed before control message'}
  [UIntPtr]$result=[UIntPtr]::Zero;$sent=[ViPhaseNative]::SendMessageTimeoutW([IntPtr]$Target.hwnd,$Message,[UIntPtr]$Value,[IntPtr]::Zero,2,500,[ref]$result)
- if($sent-eq[IntPtr]::Zero-or$result.ToUInt64()-ne1){throw 'owned fixture control failed or exceeded500ms'}
+ if($sent-eq[IntPtr]::Zero-or(-not$Closing-and$result.ToUInt64()-ne1)){throw 'owned fixture control failed or exceeded500ms'}
 }
 function Reset-Case($Target,[int]$Token){Control $Target 0x8001 ([uint32]$Token);Start-Sleep -Milliseconds 30}
 function Wire($States,[int]$Duration,[int]$Stagger=100,[string]$Pacing='frames',[bool]$Async=$false){@{cmd='pad-timeline';states_json=$States;ms=$Duration;stagger_ms=$Stagger;pacing=$Pacing;async=$Async;strict_frames=($Pacing-eq'frames')}|ConvertTo-Json -Compress}
@@ -59,18 +63,14 @@ function Verify-Radial($Target,$Record,[int]$Token,$Name,[bool]$Native=$true){
  if($Native){Check ($pressed.Count-gt0-and@($pressed|Where-Object{$_.violations-ne0-or$_.frame-le$_.axis_frame}).Count-eq0) "$Name new press follows a separately observed target Present frame"}
 }
 try{
+ foreach($path in @($PSCommandPath,"$PSScriptRoot\vi_padphase_fixture_support.ps1","$PSScriptRoot\vi_padphase_peer.cs","$root\test\vi_pad_phaseconsumer.cpp","$root\test\vi_padphase_guarded_cli.cpp","$root\test\vi_padphase_tail.cs","$root\test\vi_r2_spies.h","$root\test\vi_launch_terminal.h","$root\test\vi_launch_terminal_batch.h","$root\test\vi_r2_pipe.cs","$root\test\vi_cursor_spies.h","$root\test\vi_launch_ack.h","$root\test\vi_d3d9_fixture_geometry.h","$PSScriptRoot\vi_r1_identity.ps1","$PSScriptRoot\vi_exited_cli_accounting.ps1","$PSScriptRoot\vi_r1_lifecycle.ps1")){PhasePin $path}
+ foreach($file in Get-ChildItem "$root\src" -Recurse -File){PhasePin $file.FullName}
+ foreach($file in Get-ChildItem "$root\third_party\minhook\src" -Recurse -File){PhasePin $file.FullName};PhasePin "$root\third_party\minhook\include\MinHook.h"
  foreach($arch in @('x64','x86')){
-  $vc=if($arch-eq'x64'){'vcvars64.bat'}else{'vcvars32.bat'};$suffix=if($arch-eq'x64'){''}else{'32'}
-  $batch=@"
-@echo off
-set "TEMP=$tools\temp"
-set "TMP=$tools\temp"
-call "$vcDir\$vc" >nul || exit /b 2
-cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_pad_phaseconsumer.cpp" /Fo:"$tools\reader$suffix.obj" /Fe:"$tools\reader$suffix.exe" /link /SUBSYSTEM:WINDOWS || exit /b 2
-"@
-  [IO.File]::WriteAllText("$tools\build_$arch.cmd",$batch,[Text.Encoding]::ASCII);& cmd /d /c "$tools\build_$arch.cmd" *> "$tools\build_$arch.log";Check ($LASTEXITCODE-eq0) "$arch phase receiver compiles /W4 /WX"
-  $target=@{arch=$arch;pid=0;hwnd=0;log="$Out\$arch.$run.target.log";evidence=[Collections.Generic.List[object]]::new()};$cases.Add($target)
-  $owned=Start-Process "$tools\reader$suffix.exe" -ArgumentList "`"$($target.log)`"" -WindowStyle Hidden -PassThru;$target.pid=$owned.Id
+  $folder=Join-Path $tools $arch;PhaseBuild $arch $folder;Check $true "$arch phase receiver compiles /W4 /WX and guarded CLI is warning-free"
+  if($BuildOnly){continue};$dll=Join-Path (Split-Path $V -Parent) $(if($arch-eq'x64'){'vinput64.dll'}else{'vinput32.dll'});PhasePin $dll
+  $target=@{arch=$arch;pid=0;hwnd=0;log="$Out\$arch.$run.target.log";cli="$folder\vinput.exe";dll=$dll;evidence=[Collections.Generic.List[object]]::new()};$cases.Add($target);$currentTarget=$target
+  $owned=PhaseStart $target "$folder\reader.exe"
   try{
    $until=[Environment]::TickCount64+5000;do{$ready=Get-Content $target.log -ErrorAction SilentlyContinue|Where-Object{$_-match'^READY '};if($ready-and$ready-match'hwnd=(\d+)'){$target.hwnd=[long]$Matches[1];break};Start-Sleep -Milliseconds 20}while([Environment]::TickCount64-lt$until);Check ($target.hwnd-ne0) "$arch owns responsive offscreen receiver"
    $injected=Call $target.pid @('inject') 30000;Check ($injected.exit-eq0-and$injected.reply.ok) "$arch inject readiness"
@@ -103,7 +103,7 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_pad_phaseconsumer.cpp
     $guardedPositive=@(@{at_ms=0;phase='confirm';buttons='a';lx=5000},@{at_ms=$guardRelease;phase='up';buttons='none';lx=5000},@{at_ms=$guardNeutral;phase='neutral';buttons='none';lx=0})|ConvertTo-Json -Compress
     Reset-Case $target 4;$ack=Call $target.pid @('json',(Wire $guardedPositive $guardDuration 800 'frames' $true));Check ($ack.reply.accepted-and$ack.reply.job_id-and$null-eq$ack.reply.input_injected) "$arch async admission does not claim a delivered press"
     Wait-Rows $target 4 {$_.lx-eq5000-and$_.buttons-eq0}|Out-Null;Control $target 0x8002 0
-    $pauseBefore=Call $target.pid @('status');Start-Sleep -Milliseconds 900;$pauseAfter=Call $target.pid @('status');$pausedRows=@(Rows $target 4);$target.evidence.Add(@{name='paused pending guard';rows=$pausedRows;before=$pauseBefore.reply;after=$pauseAfter.reply})
+    $pauseBefore=PhaseStatus $target;Start-Sleep -Milliseconds 900;$pauseAfter=PhaseStatus $target;$pausedRows=@(Rows $target 4);$target.evidence.Add(@{name='paused pending guard';rows=$pausedRows;before=$pauseBefore.reply;after=$pauseAfter.reply})
     Check ($pauseBefore.reply.frames-eq$pauseAfter.reply.frames-and@($pausedRows|Where-Object buttons -ne 0).Count-eq0) "$arch paused native Present never publishes pending A after time-only expiry"
     Control $target 0x8002 1;$job=Wait-Job $target $ack.reply.job_id
     Verify-Radial $target @{exit=0;reply=$job} 4 "$arch resumed renderer preserves later phase dwell"
@@ -141,29 +141,32 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 "$root\test\vi_pad_phaseconsumer.cpp
     $job=Wait-Job $target $ack.reply.job_id;$journalJson=$job|ConvertTo-Json -Depth 15 -Compress
     Check ($job.job_state-eq'completed'-and$job.phase_publications.Count-eq256-and$journalJson.Length-gt65536) "$arch generic job-status receives and parses all256 phase records beyond64KiB"
    }
-  }finally{if($owned-and-not$owned.HasExited){Stop-Process -Id $owned.Id -Force};$owned=$null}
+  }finally{PhaseStop $target;$owned=$null}
   if(-not$BaselineOnly){
-   $target=@{arch="$arch-time";pid=0;hwnd=0;log="$Out\$arch.time.$run.target.log";evidence=[Collections.Generic.List[object]]::new()};$cases.Add($target)
-   $owned=Start-Process "$tools\reader$suffix.exe" -ArgumentList "`"$($target.log)`" --no-render" -WindowStyle Hidden -PassThru;$target.pid=$owned.Id
+   $target=@{arch="$arch-time";pid=0;hwnd=0;log="$Out\$arch.time.$run.target.log";cli="$folder\vinput.exe";dll=$dll;evidence=[Collections.Generic.List[object]]::new()};$cases.Add($target);$currentTarget=$target
+   $owned=PhaseStart $target "$folder\reader.exe" $true
    try{
     $until=[Environment]::TickCount64+5000;do{$ready=Get-Content $target.log -ErrorAction SilentlyContinue|Where-Object{$_-match'^READY '};if($ready-and$ready-match'hwnd=(\d+)'){$target.hwnd=[long]$Matches[1];break};Start-Sleep -Milliseconds 20}while([Environment]::TickCount64-lt$until)
     if(-not('ViPadPhasePeer'-as[type])){Add-Type -Path "$PSScriptRoot\vi_padphase_peer.cs"}
     foreach($escaped in @('{"cmd":"pad\u002dtimeline","states_json":"[{\"at_ms\":0,\"buttons\":\"a\"}]","stagger_ms":60}', '{"cmd":"pad-timeline","states_json":"[{\"at_ms\":0,\"buttons\":\"a\"}]","stagger\u005fms":60}')){
-     $peer=[ViPadPhasePeer]::Start($target.pid,'{"ok":true}');$r=Call $target.pid @('json',$escaped);$wire=$peer.GetAwaiter().GetResult();$target.evidence.Add(@{name='old capability peer';wire=$wire;reply=$r.reply})
+     $peerPid=[ViPadPhasePeer]::HostPid;$peer=[ViPadPhasePeer]::Start('{"ok":true}');$r=Call $peerPid @('json',$escaped);$wire=$peer.GetAwaiter().GetResult();$target.evidence.Add(@{name='old capability peer';host_pid=$peerPid;wire=$wire;reply=$r.reply;original_input_implemented=$false})
      Check ($r.exit-ne0-and$r.reply.input_injected-eq$false-and$r.reply.pad_timeline_support_checked-eq$true-and($wire|ConvertFrom-Json).cmd-eq'ping') "$arch escaped JSON cannot bypass old-target capability refusal before original input"
     }
     $r=Call $target.pid @('inject') 30000;Check ($r.reply.ok) "$arch non-rendering Win32 reader readiness"
     Reset-Case $target 1;$r=Call $target.pid @('json',(Wire $positiveStates $positiveDuration 150 'time')) ($positiveDuration+6000);Verify-Radial $target $r 1 "$arch explicit time-only stagger" $false
     $target.evidence.Add(@{name='time-only receipt';reply=$r.reply})
     Check ($null-eq$r.reply.phase_publications[0].press_after_axis_present-and$r.reply.phase_publications[0].published_present-eq0-and$r.reply.timeline_shift_ms-ge150) "$arch no-frame path reports time staggering with no frame-separation claim"
-   }finally{if($owned-and-not$owned.HasExited){Stop-Process -Id $owned.Id -Force};$owned=$null}
+   }finally{PhaseStop $target;$owned=$null}
   }
  }
  $completed=$true
 }catch{$checks.Add(@{pass=$false;name=$_.Exception.Message});$failures++;Write-Host $_.Exception.Message}
 finally{
- if($owned-and-not$owned.HasExited){Stop-Process -Id $owned.Id -Force}
+ if($owned){PhaseStop $currentTarget};foreach($entry in $processes){if($entry.ContainsKey('process')){PhaseFinish $entry;$entry.process.Dispose();$entry.Remove('process')}}
+ foreach($pin in $pins){if(-not(Test-Path $pin.path)-or(Get-FileHash -LiteralPath $pin.path).Hash-ne$pin.sha256){$instrument=$false;$failures++;Write-Host "FAIL pinned input changed: $($pin.path)"}}
+ $controllerProcess.Dispose()
  foreach($case in $cases){$case.all_samples=if(Test-Path $case.log){@(Get-Content $case.log)}else{@()}}
- @{schema=1;completed=$completed;status=if($failures){'failed'}else{'passed'};failed_check_count=$failures;not_measured_check_count=0;positive_case_count=@($checks|Where-Object pass).Count;checks=$checks;cases=$cases;tool_issues=@()}|ConvertTo-Json -Depth 25|Set-Content "$Out\result.json" -Encoding utf8NoBOM
+ $nativeReady=@($cases|Where-Object{($_.all_samples-join"`n")-match'(?m)^READY '}).Count
+ @{schema=1;completed=($completed-and$instrument);status=if($failures-or-not$instrument){'failed'}else{'passed'};build_only=[bool]$BuildOnly;native_ready_case_count=$nativeReady;production_adapter_executed=$(if($BuildOnly){$false}elseif($nativeReady){$true}else{$null});cli_adapter='current production source with terminal desktop writers';failed_check_count=$failures;not_measured_check_count=0;positive_case_count=@($checks|Where-Object pass).Count;checks=$checks;cases=$cases;owned_calls=$ownedCalls;processes=$processes;pins=$pins;tool_issues=@()}|ConvertTo-Json -Depth 40|Set-Content "$Out\result.json" -Encoding utf8NoBOM
 }
-if($failures-or-not$completed){exit 1};exit 0
+if($failures-or-not$completed-or-not$instrument){exit 1};exit 0

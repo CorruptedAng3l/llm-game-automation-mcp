@@ -1,6 +1,8 @@
 #include "vi_job_time.h"
 #include "vi_sequence_guard.h"
 #include "vi_sequence_anchor.h"
+#include "vi_input_read_observation.h"
+#include "vi_input_deadline.inl"
 // One target-side worker. All state transitions and ownership checks share g_inputMx.
 // Native frame checkpoints only apply bounded pad publications; they never wait.
 struct InputJob {
@@ -20,7 +22,8 @@ struct InputJob {
  std::uint64_t qpcNativeStart=0,qpcFirst=0;unsigned latenessLimit=0;bool eventAnchor=false;
  vi_sequence_guard::State sequenceGuard;std::uint64_t observerQpc=0;
  unsigned long long generation[257]={};unsigned transitions=0,updates=0,skipped=0;ULONGLONG maxLate=0;long firstFrame=0,lastFrame=0;ULONGLONG lastApply=0;
- CaptureScope captureScope;bool captureBound=false;
+ CaptureScope captureScope;bool captureBound=false;std::uint64_t admissionDeadlineQpc=0;
+ vi_input_reads::State readObservation;
  PointerPath pointerPath;POINT pointerStart{},pointerEnd{},expected{};int pointerSteps=0,consumed=0,buttonIndex=0;
  unsigned long long motionToken=0,pressToken=0,releaseToken=0;ULONGLONG phaseAt=0,pressedAt=0,releasedAt=0,finalAt=0,pollCap=1000,dwell=200,stepMs=0;
  bool downSeen=false,upSeen=false,finalSeen=false,finalBeforeRelease=false,edgeContact=false,positionSeen=false;int pointerReader=0;
@@ -39,7 +42,8 @@ thread_local std::shared_ptr<InputJob> g_waitJob;
 HANDLE g_jobWake=nullptr;bool g_jobWorker=false;
 int JobResource(int vk){return vk==VK_SHIFT||vk==VK_LSHIFT||vk==VK_RSHIFT?VK_SHIFT:vk==VK_CONTROL||vk==VK_LCONTROL||vk==VK_RCONTROL?VK_CONTROL:vk==VK_MENU||vk==VK_LMENU||vk==VK_RMENU?VK_MENU:vk;}
 struct JobMutation {bool prior;JobMutation():prior(g_jobApplying){g_jobApplying=true;}~JobMutation(){g_jobApplying=prior;}};
-void JobPadPublish(WORD buttons,int mask,const int* values,bool active=true){std::lock_guard<std::mutex> lock(g_padStateMx);g_padLT=values[0];g_padRT=values[1];g_padLX=values[2];g_padLY=values[3];g_padRX=values[4];g_padRY=values[5];g_padButtons=buttons;g_padSetMask=mask;g_padActive=active;g_padPacket++;PadPublicationChangedLocked();}
+void JobPadPublish(WORD buttons,int mask,const int* values,bool active=true,unsigned long long readOwner=0){std::lock_guard<std::mutex> lock(g_padStateMx);g_padLT=values[0];g_padRT=values[1];g_padLX=values[2];g_padLY=values[3];g_padRX=values[4];g_padRY=values[5];g_padButtons=buttons;g_padSetMask=mask;g_padActive=active;g_padPacket++;PadPublicationChangedLocked(readOwner);}
+#include "vi_job_reads.inl"
 bool JobOwns(const InputJob& job,int resource){return g_resourceOwner[resource]==job.id&&g_resourceGeneration[resource]==job.generation[resource];}
 // Pure preview of JobFinish's exact keyboard/mouse release effects. Caller
 // holds g_inputMx. A reserved future Sequence key or pad resource proves nothing.
@@ -65,7 +69,7 @@ bool RetargetHeldJobsReleaseAllLocked(){
  return true;
 }
 void JobFinish(InputJob& job,const char* state,const char* reason){
- if(job.done)return;JobMutation mutation;
+ if(job.done)return;JobReadsSample(job,true);JobMutation mutation;
  if(job.started){if(job.pad){if(JobOwns(job,256)){int zero[6]={};JobPadPublish(0,0,zero);if(job.kind==InputJob::Timeline){job.cleanupPublished=true;job.padSnapshot=true;job.publishedButtons=0;job.publishedMask=0;for(int i=0;i<6;i++)job.publishedAxes[i]=0;}}}
   else {const auto& releasing=job.kind==InputJob::Sequence&&job.sequenceStep<job.sequence.size()?job.sequence[job.sequenceStep].keys:job.keys;for(size_t i=releasing.size();i-- >0;)if(JobOwns(job,JobResource(releasing[i]))&&g_vk[releasing[i]]){KeyEvent(releasing[i],false);++job.transitions;}}
   for(int resource:job.resources)if(JobOwns(job,resource)){g_resourceOwner[resource]=0;++g_resourceGeneration[resource];}}
@@ -113,12 +117,14 @@ void JobRun(InputJob& job,ULONGLONG now,bool frame){
  if(job.captureBound&&!CaptureScopeCurrent(job.captureScope)){JobFinish(job,"cancelled",job.kind==InputJob::Placement?"capture_scope_changed":"input_capture_scope_changed");return;}
  if(now-job.accepted>=120000){JobFinish(job,"cancelled","job_lifetime_cap");return;}
  if(!job.started){
+  if(job.admissionDeadlineQpc){if(OwnerCursorActive()){JobFinish(job,"cancelled","input_admission_user_active");return;}if(vi_input_deadline::Expired(job.admissionDeadlineQpc,vi_qpc::Now())){JobFinish(job,"cancelled","input_admission_expired");return;}}
   // Earlier conflicting queued jobs keep FIFO; unrelated resources may proceed.
   for(auto& earlier:g_jobs){if(earlier.get()==&job)break;if(!earlier->done&&JobConflicts(job,*earlier))return;}
   for(int resource:job.resources)if(g_resourceOwner[resource])return;
   if(job.frames&&!frame){if(now-job.accepted>=1500)JobFinish(job,"failed","native_present_start_timeout");return;}
   for(int resource:job.resources){g_resourceOwner[resource]=job.id;job.generation[resource]=++g_resourceGeneration[resource];}
   job.started=true;job.state="running";job.start=now;job.next=now;job.firstFrame=job.lastFrame=C.present_ours;job.lastApply=now;
+  JobReadsStart(job,now);
  }
  const ULONGLONG elapsed=now-job.start;
  if(job.guardPending&&now-job.guardAt>=job.staggerMs+1500){JobFinish(job,"failed","stagger_present_stalled");return;}
@@ -138,7 +144,7 @@ void JobRun(InputJob& job,ULONGLONG now,bool frame){
  if(job.frames&&job.lastFrame==C.present_ours&&job.updates)return;
  int values[6]={};WORD buttons=job.buttons;int mask=job.mask;
  if(job.kind==InputJob::Pad){if(job.updates&&elapsed>=job.duration){JobFinish(job,"completed","");return;}for(int i=0;i<6;i++)values[i]=job.to[i];}
- else if(job.kind==InputJob::Ramp){if(job.updates&&elapsed>=job.duration+job.endHold){if(job.point==0){for(int i=0;i<6;i++)values[i]=job.to[i];JobPadPublish(job.buttons,job.mask,values);++job.updates;job.point=1;job.lastApply=now;job.lastFrame=C.present_ours;return;}JobFinish(job,"completed","");return;}
+ else if(job.kind==InputJob::Ramp){if(job.updates&&elapsed>=job.duration+job.endHold){if(job.point==0){for(int i=0;i<6;i++)values[i]=job.to[i];JobPadPublish(job.buttons,job.mask,values,true,job.id);++job.updates;job.point=1;job.lastApply=now;job.lastFrame=C.present_ours;return;}JobFinish(job,"completed","");return;}
   const double fraction=job.duration?(std::min)(1.0,(double)elapsed/job.duration):1;for(int i=0;i<6;i++)values[i]=(int)std::llround(job.from[i]+(job.to[i]-job.from[i])*fraction);if(fraction>=1)job.point=1;
  }else{
   size_t next=job.point;while(next+1<job.points.size()&&job.points[next+1].at<=elapsed)++next;
@@ -152,7 +158,7 @@ void JobRun(InputJob& job,ULONGLONG now,bool frame){
   if(movement){job.movementKnown=true;job.movementAt=now;job.movementFrame=C.present_ours;job.movementNative=job.movementFrame>0;}
   JobTimelinePublish(job,buttons,mask,values,now);JobTimelineRecord(job,job.point,now,press);return;
  }
- JobPadPublish(buttons,mask,values);++job.updates;job.lastApply=now;job.lastFrame=C.present_ours;
+ JobPadPublish(buttons,mask,values,true,job.id);++job.updates;job.lastApply=now;job.lastFrame=C.present_ours;
 }
 void JobsTick(bool frame){std::lock_guard<std::recursive_mutex> lock(g_inputMx);if(g_acProduct.load()){JobsCancelAll("anticheat_detected");return;}const ULONGLONG now=HousekeepingNow();for(auto& job:g_jobs)JobRun(*job,now,frame);JobPrune(now);}
 void JobsFrame(){try{std::unique_lock<std::recursive_mutex> lock(g_inputMx,std::try_to_lock);if(!lock.owns_lock())return;if(g_acProduct.load()){JobsCancelAll("anticheat_detected");return;}const ULONGLONG now=HousekeepingNow();for(auto& job:g_jobs)if(job->frames)JobRun(*job,now,true);}catch(...){try{JobsCancelAll("frame_checkpoint_exception");}catch(...){}}}
@@ -170,7 +176,9 @@ DWORD WINAPI InputJobWorker(void*){for(;;){try{JobsTick(false);}catch(...){try{J
 bool EnsureJobWorker(){if(g_jobWorker)return true;if(!g_jobWake)g_jobWake=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!g_jobWake)return false;HANDLE thread=CreateThread(nullptr,0,InputJobWorker,nullptr,0,nullptr);if(!thread)return false;CloseHandle(thread);g_jobWorker=true;return true;}
 std::string JobId(const InputJob& job){return std::to_string(g_pid)+":"+std::to_string(g_jobIdentity)+":"+std::to_string(job.id);}
 std::string JobReplyLocked(const InputJob& job,bool accepted=false,bool details=true){JOut out;out.bol("ok",accepted||job.state=="completed");out.bol("accepted",accepted);out.str("job_id",JobId(job));out.str("job_state",job.state);out.str("job_reason",job.reason);out.bol("job_complete",job.done);out.bol("hold_ready",job.started&&!job.done&&(job.pad?job.updates>0:job.kind==InputJob::Keys&&job.phase==1));out.str("owner",job.owner);
- out.bol("capture_scope_checked",job.captureBound);
+ out.bol("capture_scope_checked",job.captureBound);JobReadFields(out,job);
+ if(job.admissionDeadlineQpc){out.num("input_admission_version",1);out.str("admission_deadline_qpc_ticks",std::to_string(job.admissionDeadlineQpc));}
+ if(job.kind!=InputJob::Sequence){const char* kinds[]={"keys","pulse","pad","ramp","timeline","placement","sequence"};out.str("job_kind",kinds[(unsigned)job.kind]);}
  if(accepted)out.raw("input_injected","null");else out.bol("input_injected",job.transitions>0||job.updates>0);out.num("transitions",job.transitions);out.num("pad_updates",job.updates);out.num("skipped_states",job.skipped);const bool latenessMeasured=job.kind==InputJob::Keys||job.kind==InputJob::Timeline||(job.kind==InputJob::Sequence&&job.qpcLast!=0);out.bol("max_lateness_measured",latenessMeasured);if(latenessMeasured)out.num("max_lateness_ms",(double)job.maxLate);else out.raw("max_lateness_ms","null");out.str("housekeeping_clock","QueryInterruptTime");out.num("requested_ms",(double)job.duration);out.num("elapsed_ms",(double)((job.done?job.finished:HousekeepingNow())-job.accepted));out.num("active_ms",job.started?(double)((job.done?job.finished:HousekeepingNow())-job.start):0);out.bol("frame_paced",job.frames);out.num("first_frame",job.firstFrame);out.num("last_frame",job.lastFrame);out.num("last_apply_ms",job.started?(double)(job.lastApply-job.start):0);
  if(job.kind==InputJob::Sequence){out.str("job_kind","sequence");out.num("sequence_steps",(double)job.sequence.size());out.num("sequence_step",(double)job.sequenceStep);if(job.sequenceStep<job.sequence.size())out.num("sequence_line",job.sequence[job.sequenceStep].line);
   out.num("sequence_timing_version",1);out.str("timing_clock","QueryPerformanceCounter");out.str("qpc_frequency",std::to_string(job.qpcFrequency));out.str("anchor_qpc_ticks",std::to_string(job.qpcAnchor));out.str("last_apply_qpc_ticks",std::to_string(job.qpcLast));out.str("last_deadline_qpc_ticks",std::to_string(job.qpcLastDeadline));
@@ -184,9 +192,10 @@ std::string JobReplyLocked(const InputJob& job,bool accepted=false,bool details=
  if(job.kind==InputJob::Placement){static const char* phases[]={"prepare","hover_poll","press_poll","move","step_poll","dwell","release_poll","complete"};out.str("placement_phase",phases[(std::min)(7,job.phase)]);out.num("steps",job.pointerSteps);out.num("steps_consumed",job.consumed);out.num("position_generation",(double)job.motionToken);out.bol("position_poll_confirmed",job.positionSeen);out.str("position_poll_channel",job.pointerReader==2?"GetPhysicalCursorPos":job.pointerReader==1?"GetCursorPos":"none");out.bol("di_poll_confirmed",job.downSeen);out.bol("di_release_confirmed",job.upSeen);out.bol("di_press_release_confirmed",job.downSeen&&job.upSeen);out.bol("final_position_seen",job.finalSeen);out.bol("final_position_before_release",job.finalBeforeRelease);out.num("dwell_ms",(double)job.dwell);out.num("final_seen_ms",job.finalAt?(double)(job.finalAt-job.start):0);out.num("release_ms",job.releasedAt?(double)(job.releasedAt-job.start):0);out.num("button_hold_ms",job.pressedAt?(double)((job.releasedAt?job.releasedAt:job.done?job.finished:HousekeepingNow())-job.pressedAt):0);out.bol("button_released",!g_vk[job.keys[0]]);out.num("x",job.expected.x);out.num("y",job.expected.y);EdgeFields(out,&job.pointerPath);out.bol("path_edge_contact",job.edgeContact);}
  if(job.kind==InputJob::Timeline)JobTimelineFields(out,job,details&&!accepted);
  if(job.pad){out.num("buttons",job.buttons);out.num("axes_set_mask",job.mask);out.bol("clamped",job.clamped);out.bol("hold",false);}if(job.done&&job.state!="completed")out.str("error",job.reason);out.str("delivery","job transitions describe virtual input; application response is not implied; no uncertain input is retried");return out.done();}
-std::string JobReply(const std::shared_ptr<InputJob>& job,bool accepted=false){std::lock_guard<std::recursive_mutex> lock(g_inputMx);return JobReplyLocked(*job,accepted);}
+std::string JobReply(const std::shared_ptr<InputJob>& job,bool accepted=false){std::lock_guard<std::recursive_mutex> lock(g_inputMx);JobReadsSample(*job);return JobReplyLocked(*job,accepted);}
 std::string ScheduleInputJob(const std::shared_ptr<InputJob>& job,const JObj& request){
  std::lock_guard<std::recursive_mutex> lock(g_inputMx);
+ {std::string error;if(!ReadInputDeadline(request,job->admissionDeadlineQpc,error)){JOut out;out.bol("ok",false);out.bol("input_injected",false);out.str("error",error);return out.done();}}
  if(JHas(request,"expected_capture_scope")){const auto scope=JStr(request,"expected_capture_scope");
   if(request.find("expected_capture_scope")->second.t!=1||scope.size()<2||scope.size()>2048||scope.find('\0')!=std::string::npos||!CaptureScopeTake(job->captureScope)||scope!=CaptureScopeJson(job->captureScope)){
    JOut out;out.bol("ok",false);out.bol("input_injected",false);out.str("error","input observation scope changed or is unrecognized; no input was injected");return out.done();}

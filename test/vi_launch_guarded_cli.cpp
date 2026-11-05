@@ -37,15 +37,22 @@ static bool GuardedArguments(int count,wchar_t** values){
  const Args parsed=SplitArgs(options);if(!parsed.pos.empty())return false;std::set<std::string> seen;
  for(const auto& option:parsed.opt){
   if(!seen.insert(option.first).second)return false;
-  const bool allowed=command=="launch"?(option.first=="exe"||option.first=="args"||option.first=="dll"||option.first=="settle"||option.first=="fg-guard"||option.first=="timeout"||option.first=="no-inject"||option.first=="allow-dialog"):(option.first=="pid"||option.first=="dll"||option.first=="hooks-only"||option.first=="quiet");
-  if(!allowed)return false; // includes every spelling/value form of early/Steam/AUMID
+  const bool allowed=command=="launch"?(option.first=="exe"||option.first=="args"||option.first=="dll"||option.first=="settle"||option.first=="fg-guard"||option.first=="timeout"||option.first=="no-inject"||option.first=="allow-dialog"||option.first=="cpu-affinity"||option.first=="claim-ttl"||option.first=="follow-pid"||option.first=="follow-created"):(option.first=="pid"||option.first=="dll"||option.first=="hooks-only"||option.first=="quiet");
+  if(!allowed&&!(command=="inject"&&option.first=="readiness-wait-ms"))return false; // early/Steam/AUMID remain refused
  }
  const std::wstring dll=U2W(GetOpt(parsed,"dll"));if(!dll.empty()&&_wcsicmp(dll.c_str(),allowedDll))return false;
- if(command=="launch")return !_wcsicmp(U2W(GetOpt(parsed,"exe")).c_str(),target)&&GetOpt(parsed,"fg-guard")=="0"&&GetOpt(parsed,"settle")=="0"&&GetOpt(parsed,"timeout")=="10";
- const std::string pid=GetOpt(parsed,"pid");char* end=nullptr;const auto id=strtoul(pid.c_str(),&end,10);if(!id||!end||*end)return false;
+ if(command=="launch"){
+  wchar_t budget[2]{};const bool shortBudget=GetEnvironmentVariableW(L"VI_LAUNCH_TEST_GUARD_BUDGET",budget,2)==1&&budget[0]=='1';
+  if(GetOpt(parsed,"settle")!="0"||(shortBudget?(GetOpt(parsed,"fg-guard")!="5"||GetOpt(parsed,"timeout")!="8"):(GetOpt(parsed,"fg-guard")!="0"||GetOpt(parsed,"timeout")!="10")))return false;
+  if(!GetOpt(parsed,"exe").empty())return !_wcsicmp(U2W(GetOpt(parsed,"exe")).c_str(),target)&&!HasOpt(parsed,"follow-pid");
+  if(!HasOpt(parsed,"follow-pid")||!HasOpt(parsed,"follow-created"))return false;
+ }
+ const std::string pid=GetOpt(parsed,command=="launch"?"follow-pid":"pid");char* end=nullptr;const auto id=strtoul(pid.c_str(),&end,10);if(!id||!end||*end)return false;
  HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,id);if(!process)return false;
  wchar_t image[32768]{};DWORD size=32768;FILETIME created{},exited{},kernel{},user{};
- const bool same=WaitForSingleObject(process,0)==WAIT_TIMEOUT&&QueryFullProcessImageNameW(process,0,image,&size)&&!_wcsicmp(image,target)&&GetProcessTimes(process,&created,&exited,&kernel,&user)&&OwnTargetLedger(id,created);CloseHandle(process);return same;
+ bool same=WaitForSingleObject(process,0)==WAIT_TIMEOUT&&QueryFullProcessImageNameW(process,0,image,&size)&&!_wcsicmp(image,target)&&GetProcessTimes(process,&created,&exited,&kernel,&user)&&OwnTargetLedger(id,created);
+ if(same&&command=="launch"){ULARGE_INTEGER stamp{};stamp.LowPart=created.dwLowDateTime;stamp.HighPart=created.dwHighDateTime;same=GetOpt(parsed,"follow-created")==std::to_string(stamp.QuadPart);}
+ CloseHandle(process);return same;
 }
 int wmain(int argc,wchar_t** argv){
  SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
@@ -58,6 +65,7 @@ int wmain(int argc,wchar_t** argv){
  vi_launch_terminal::Record(out,"before_cli_entry",installed);
  if(!installed){fclose(out);return 111;}
  if(!GuardedArguments(argc,argv)||!vi_launch_spawn::Install(out)||!vi_launch_ack::Wait(out,L"cli")){fclose(out);return 111;}
+ wchar_t claimOwner[128]{};const DWORD ownerSize=GetEnvironmentVariableW(L"VI_LAUNCH_TEST_OWNER",claimOwner,128);if(ownerSize&&ownerSize<128)g_owner=W2U(claimOwner);
  // Every physical/foreground/queue/capture write from the CLI, including any
  // restore attempt and delegated x86 CLI, reaches an absorber installed first.
  const int result=ViLaunchEntry(argc,argv);

@@ -10,7 +10,7 @@ import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { drawGrid, resample, toClient, type Mapping } from "./imgtools.js";
+import { drawGrid, imageOutputSize, resample, toClient, type Mapping } from "./imgtools.js";
 import { decodePng, encodePng } from "./png.js";
 import { compactStatus, configView, diagnoseFrames, tailLog } from "./status.js";
 import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
@@ -22,7 +22,13 @@ import { requireTextBoundary } from "./textboundary.js";
 import { keyScheduleLines } from "./keyschedule.js";
 import { withMouseModifiers } from "./mousemodifiers.js";
 import { presentOcr } from "./ocr.js";
+import { presentInputReads } from "./inputreads.js";
+import { presentMouseDiagnostics } from "./actiondiagnostics.js";
+import {verifiedClick,clickScopeCapability} from './clickverify.js';
+import { CaptureMappings, nativeMapping } from "./capturemapping.js";
 import { registerCameraHelpers } from "./camerahelpers.js";
+import { waitTextQuery, presentWaitTextAny } from "./waittextany.js";
+import { registerAgentLoops, noteOtherInput } from "./agentloops.js";
 import { loadedLaunchFailure } from "./launchstate.js";
 import { prepareSequenceConditions, guardSequence, type PreparedConditions } from "./sequenceconditions.js";
 
@@ -34,6 +40,7 @@ type Content = { type: "text"; text: string } | { type: "image"; data: string; m
 type ToolReply = { content: Content[]; isError?: boolean };
 
 function reply(r: CliResult, extra?: Record<string, unknown>): ToolReply {
+  r=presentMouseDiagnostics(presentInputReads(r));
   let json = r.json;
   if (extra && json && typeof json === "object" && !Array.isArray(json)) json = { ...(json as object), ...extra };
   json = completedJobView(json, r.ok);
@@ -127,6 +134,7 @@ const server = new McpServer(
       "Plays single-player / offline Windows games through vinput: input and screenshots go to ONE game process in the " +
       "background, so the game never needs focus and the user keeps the mouse and keyboard. Workflow: launch (or attach) -> " +
       "capture to look -> act (click_text / click / key / pad) -> verify with wait_text, capture or wait_change. " +
+      "For repeated placement use click_many/click_grid; wait_text accepts any-of banners; click_to_move checks scoped pixel change/stability with one bounded hold and unknown displacement. " +
       "Coordinates are the game's client pixels, which equal the pixels of a full capture. ok:true on an input tool only " +
       "means the input was delivered, not that the game reacted: always verify. capture_after:true requests a following " +
       "image; a zero-Present PrintWindow fallback does not prove a new rendered frame. Use capture_after:0 to look immediately. " +
@@ -138,10 +146,10 @@ const server = new McpServer(
 );
 
 function tool<S extends z.ZodRawShape>(name: string, title: string, description: string, shape: S,
-  run: (a: z.objectOutputType<S, z.ZodTypeAny>) => Promise<ToolReply>, readOnly = false) {
+  run: (a: z.objectOutputType<S, z.ZodTypeAny>, runtime?: {signal?:AbortSignal}) => Promise<ToolReply>, readOnly = false) {
   server.registerTool(name, { title, description, inputSchema: shape, annotations: { title, readOnlyHint: readOnly, openWorldHint: false } },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (async (a: any) => {
+    (async (a: any, extra: {signal?:AbortSignal}) => {
       const p: number | undefined = typeof a?.pid === "number" ? a.pid : undefined;
       try {
         if (p !== undefined) {
@@ -149,11 +157,13 @@ function tool<S extends z.ZodRawShape>(name: string, title: string, description:
           if (name === "attach" || name === "detach") advanceCaptureSession(p);
           const k = name === "attach" ? undefined : knownExit(p);   // attach may be a reused pid number
           if (k) return exitedReply(p, k.code);
+          if(!readOnly&&!['click_many','click_grid','click_to_move'].includes(name))noteOtherInput(p);
         }
-        const out = await run(a);
+        const out = await run(a,{signal:extra?.signal});
         if (p !== undefined && out.isError) {
           const ex = await confirmExit(p);
           if (ex) {
+            try {const j=JSON.parse((out.content[0] as {text:string}).text);if(j.input_session||j.input_receipt||j.input_read_observation){out.content[0]={type:'text',text:JSON.stringify({...j,target_exited:true,pid:p,exit_code:ex.code})};return out;}}catch{/* Existing pre-input/malformed replies keep normal exit behavior. */}
             if (name === "key_sequence" && a.wait === true) {
               try {
                 const j = JSON.parse((out.content[0] as { text: string }).text);
@@ -189,6 +199,7 @@ tool("launch", "Launch a game",
     steam_appid: z.string().optional().describe("Steam app id; starts the game through Steam (needs wait_exe)."),
     wait_exe: z.string().optional().describe("Executable name to wait for, e.g. 'Game-Win64-Shipping.exe' (launchers, Steam relaunches)."),
     early: z.boolean().optional().describe("Create the process suspended and inject before its first instruction (exe only)."),
+    show_hidden:z.boolean().optional().describe('Explicitly request SW_SHOWNA for the exact adopted presenting hidden window (default false). One native UI-thread request with a5s expiry; inspect show_hidden_reply/status and window_hidden because queue admission does not confirm visibility.'),
     settle_s: z.number().min(0).max(600).optional().describe("Seconds to let the game settle after injection (default 5)."),
     timeout_s: z.number().min(1).max(1800).optional().describe("Seconds to wait for the game window (default 240)."),
     lock: z.string().optional().describe("Optional lock file shared by tools that may touch the real foreground; held only while launching."),
@@ -216,7 +227,7 @@ tool("launch", "Launch a game",
       ...opt("--exe", a.exe), ...opt("--aumid", a.aumid), ...opt("--steam", a.steam_appid), ...opt("--wait-exe", a.wait_exe),
       ...opt("--follow-pid", a.follow_pid), ...opt("--follow-created", a.follow_created),
       ...opt("--cpu-affinity", a.cpu_affinity),
-      ...(a.args === undefined ? [] : [`--args=${a.args}`]), ...opt("--cwd", cwd), ...opt("--early", a.early), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
+      ...(a.args === undefined ? [] : [`--args=${a.args}`]), ...opt("--cwd", cwd), ...opt("--early", a.early),...opt('--show-hidden',a.show_hidden), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
       ...opt("--lock", a.lock), ...opt("--claim-ttl", a.claim ? a.claim_ttl_s ?? 3600 : undefined)];
     const r = await runVinput(argv, ((a.timeout_s ?? 240) + (a.settle_s ?? 5) + 120) * 1000);
     { const np = (r.json as { pid?: unknown }).pid; if (typeof np === "number" && np > 0) { advanceCaptureSession(np); forgetExit(np); watchTarget(np); } }
@@ -252,7 +263,8 @@ tool("launch", "Launch a game",
         if (!extra.error) extra.error = extra.pad_arm_error;
       }
     }
-    if (lp) Object.assign(extra, await frameHealth(lp, a.args));
+    if (lp && (r.json as {input_ready?:unknown}).input_ready!==false) Object.assign(extra, await frameHealth(lp, a.args));
+    else if(lp)extra.render_health_unmeasured_reason='input queue readiness is unconfirmed; full status may require its UI thread; inspect native launch/presentation receipts';
     if (r.ok && !compoundOk) { extra.ok = false; extra.launch_ok = true; extra.launched = true; }
     return reply({ ...r, ok: compoundOk }, extra);
   });
@@ -431,22 +443,24 @@ tool("capture", "Capture a frame",
     return g.out;
   });
 
-function validateFormat(a: { format?: "png" | "jpeg"; quality?: number; grid?: number; zoom?: number }): string | undefined {
+function validateFormat(a: { format?: "png" | "jpeg"; quality?: number; grid?: number; zoom?: number; scale?: number }): string | undefined {
   if (a.quality !== undefined && a.format !== "jpeg") return "quality applies only to format jpeg";
   if (a.format === "jpeg" && a.grid !== undefined) return "grid needs format png: the grid is drawn on the decoded image and only PNG can be decoded here. Drop format (png) and shrink with max_width or scale instead, or keep jpeg and drop grid (read coordinates from a png capture first)";
   if (a.format === "jpeg" && a.zoom !== undefined) return "zoom needs format png: the enlargement is done on the decoded image and only PNG can be decoded here. Drop format (png) and cap the size with max_width, or keep jpeg and drop zoom (use max_width / scale with jpeg)";
+  if (a.format === "jpeg" && a.scale !== undefined && a.scale > 1) return "scale > 1 needs format png: JPEG supports shrinking only. Use format png with scale/zoom and max_width, or keep jpeg with scale <= 1";
   return undefined;
 }
 
 /** Mapping of the last image returned per game (image_px = (client_px - offset) * scale), for coord_space:"capture". */
-const lastMapping = new Map<number, Mapping>();
+const lastMapping = new CaptureMappings();
 // Cooperative attachment epoch only; this is not OS process-creation identity.
 const captureSessionEpoch = new Map<number, number>();
-function advanceCaptureSession(pid: number) { captureSessionEpoch.set(pid, (captureSessionEpoch.get(pid) ?? 0) + 1); }
+function advanceCaptureSession(pid: number) { captureSessionEpoch.set(pid, (captureSessionEpoch.get(pid) ?? 0) + 1);lastMapping.clear(pid); }
 
 /** One frame grab: runs vinput capture, attaches the PNG, and diagnoses "nothing presented / fullscreen refused" when the
  *  native path was not used. Shared by capture and the capture_after option of the action tools. */
 async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean; grid?: number; zoom?: number }) {
+  const captureEpoch=captureSessionEpoch.get(pid)??0;
   const jpeg = o.format === "jpeg";
   const path = resolve(o.path ?? defaultCapturePath(pid, jpeg ? "jpg" : "png"));
   const base = [...at(pid), "capture", path, ...region(o.region), ...opt("--after-frames", o.after_frames), ...opt("--method", o.method === "native" ? "swapchain" : o.method)];
@@ -492,15 +506,19 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
   }
   let saved: string | undefined;
   let png: Buffer | undefined, imgErr: string | undefined;
-  const mapping: Mapping = { scale: 1, offset_x: o.region?.x ?? 0, offset_y: o.region?.y ?? 0 };
+  const nativeMap = nativeMapping(r.json,captureEpoch,pid);
+  let persistedMap=nativeMap;
+  const mapping: Mapping = nativeMap ? {...nativeMap.mapping} : { scale: 1, offset_x: o.region?.x ?? 0, offset_y: o.region?.y ?? 0 };
   let imageInfo: Record<string, unknown> | undefined;
-  if (scaledBy === "vinput") {
+  if (!nativeMap && scaledBy === "vinput") {
     // vinput reports the client rectangle the saved image covers: image_px = (client_px - origin) * w / region_client_w
     const j = r.json as { w?: number; region_client_w?: number; origin_x?: number; origin_y?: number };
     if (j.w && j.region_client_w) mapping.scale = j.w / j.region_client_w;
     if (typeof j.origin_x === "number") mapping.offset_x = j.origin_x;
     if (typeof j.origin_y === "number") mapping.offset_y = j.origin_y;
   }
+  let finalW=nativeMap?.imageW??(r.json as {w?:number}).w,finalH=nativeMap?.imageH??(r.json as {h?:number}).h;
+  const baseMapping={...mapping};
   if (r.ok && o.include_image !== false) {
     saved = j0.path || path;
     try {
@@ -514,8 +532,9 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
           let factor = wantScale ?? 1;
           if (wantW !== undefined && im.width * factor > wantW) factor = wantW / im.width;   // max_width caps the final (zoomed) width
           if (factor !== 1) {
-            const nw = Math.max(1, Math.round(im.width * factor)), nh = Math.max(1, Math.round(im.height * factor));
-            mapping.scale = nw / im.width;
+            const { width: nw, height: nh } = imageOutputSize(Math.max(1, Math.round(im.width * factor)), Math.max(1, Math.round(im.height * factor)));
+            mapping.scale = baseMapping.scale * nw / im.width;
+            mapping.scale_y = (baseMapping.scale_y??baseMapping.scale) * nh / im.height;
             im = resample(im, nw, nh);
           }
           if (o.grid) im = drawGrid(im, mapping, o.grid);
@@ -523,13 +542,25 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
           w = im.width; h = im.height;
         } catch (e) {
           imgErr = `could not process the image (${(e as Error).message}); the original image is returned unchanged`;
-          if (scaledBy === "mcp") { mapping.scale = 1; scaledBy = undefined; }
+          if (scaledBy === "mcp") { Object.assign(mapping,baseMapping); scaledBy = undefined; }
         }
       }
       imageInfo = { w, h, ...mapping, ...(scaledBy ? { scaled_by: scaledBy } : {}), ...(jpeg ? { format: "jpeg" } : {}),
         ...(o.grid && !imgErr ? { grid: o.grid } : {}), ...(imgErr ? { image_note: imgErr } : {}) };
-      lastMapping.set(pid, { ...mapping });
+      finalW=w;finalH=h;
     } catch (e) { imgErr = `capture reported ok but the image could not be read: ${(e as Error).message}`; }
+  }
+  if(r.ok&&(captureSessionEpoch.get(pid)??0)===captureEpoch){
+    if(nativeMap&&finalW&&finalH&&(finalW!==nativeMap.imageW||finalH!==nativeMap.imageH)){
+      const resized=await runVinput([...at(pid),'json',JSON.stringify({cmd:'capture-map-resize',capture_map_id:nativeMap.mapId,expected_capture_scope:nativeMap.scope,image_w:finalW,image_h:finalH})],2000);
+      persistedMap=resized.ok?nativeMapping(resized.json,captureEpoch,pid):undefined;
+      if(!persistedMap)extra.capture_mapping_warning='postprocessed image mapping was not persisted; pass the returned mapping explicitly across MCP sessions';
+    }
+    if((captureSessionEpoch.get(pid)??0)===captureEpoch){
+      lastMapping.remember(pid,persistedMap??{mapping:{...mapping},epoch:captureEpoch,imageW:finalW,imageH:finalH,...(nativeMap?{scope:nativeMap.scope}:{})});
+      extra.mapping={...mapping};extra.capture_mapping_persisted=!!persistedMap;
+      if(!nativeMap)extra.capture_mapping_warning='this DLL did not confirm persisted capture mapping; another MCP session requires an explicit mapping';
+    }else extra.capture_mapping_warning='attachment changed during capture mapping publication';
   }
   if (fallbackNote) extra = { ...extra, notes: [...((extra.notes as string[] | undefined) ?? []), fallbackNote] };
   const out = reply(r, { ...extra, ...(imageInfo ? { image: imageInfo } : {}), ...(imageInfo?.image_note ? { image_note: imageInfo.image_note } : {}) });
@@ -544,7 +575,7 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
 
 const captureAfterSchema = z.union([z.boolean(), z.number().int().min(0).max(3600)]).optional().describe(
   "Look right after acting: true waits for 3 presented frames, with one explicitly reported fresh PrintWindow fallback if that wait times out and status shows no target Present stream; a number strictly waits for that many frames " +
-  "first (0 = capture immediately). The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
+  "first (0 = capture immediately). Use observe_settle for bounded scoped stable-frame observation after the action; capture_after itself is one image. The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
   "saving a capture round trip. Skipped when the action itself failed.");
 const DEFAULT_LOOK_FRAMES = 3;
 type PostActionObservation = { settle_ms_requested: number; attachment_epoch: number; action_state: string; image_options?: CaptureImageOptions };
@@ -703,12 +734,12 @@ tool("click_text", "Click text on screen",
   });
 
 tool("wait_text", "Wait for text",
-  "Block until text appears on screen (or, with gone:true, disappears). Times out with timed_out:true and ocr_saw.",
-  { pid, text: textMatch.text, region: regionSchema.optional(), gone: z.boolean().optional().describe("Wait until the text is NOT on screen."),
+  "Wait until visible OCR text matches one string or ANY of a list, e.g. text:['VICTORY','DEFEAT'], in an optional region. All alternatives share each native capture/OCR poll; matched_text identifies the matching query. gone:true waits until ALL listed alternatives are absent. Times out with timed_out:true and ocr_saw. Use observe_settle separately to wait for selected pixels to become stable.",
+  { pid, text: z.union([textMatch.text,z.array(z.string().min(1).max(256)).min(1).max(16)]).describe('One text string or any-of alternatives (1..16); list entries cannot contain |.'), region: regionSchema.optional(), gone: z.boolean().optional().describe("Wait until every requested text is NOT on screen."),
     exact_line:textMatch.exact_line,
     timeout_ms: timeoutMs(15000), optional: z.boolean().optional().describe("Succeed with skipped:true on timeout.") },
-  async (a) => {const unsupported=await requireTextBoundary(false,false,a.exact_line);if(unsupported)return reply(unsupported);return reply(await runVinput([...at(a.pid), "wait-text", a.text, ...region(a.region), ...opt("--gone", a.gone),...(a.exact_line===undefined?[]:[`--exact-line=${a.exact_line}`]),
-    ...opt("--timeout", a.timeout_ms), ...opt("--optional", a.optional)], (a.timeout_ms ?? 15000) + 60000));}, true);
+  async (a) => {const query=waitTextQuery(a.text);if(query.error)return fail(query.error);const unsupported=await requireTextBoundary(false,false,a.exact_line);if(unsupported)return reply(unsupported);return reply(presentWaitTextAny(await runVinput([...at(a.pid), "wait-text", ...query.argv, ...region(a.region), ...opt("--gone", a.gone),...(a.exact_line===undefined?[]:[`--exact-line=${a.exact_line}`]),
+    ...opt("--timeout", a.timeout_ms), ...opt("--optional", a.optional)], (a.timeout_ms ?? 15000) + 60000),query.queries));}, true);
 
 const imageArgs = {
   template: z.string().min(1).describe("Path of a PNG template (e.g. an icon cut from an earlier capture with region)."),
@@ -796,8 +827,8 @@ const xy = {
   norm: z.boolean().optional().describe("x and y are fractions of the client size (0..1)."),
   capture_space: z.boolean().optional().describe("x and y are pixels of the last capture (use after a region capture). vinput binds that map to one window and client size and refuses it after a resize or retarget: capture again."),
 };
-const mappingSchema = z.object({ scale: z.number().positive(), offset_x: z.number(), offset_y: z.number() })
-  .describe("Image-to-client mapping as returned by capture (image: {scale, offset_x, offset_y}).");
+const mappingSchema = z.object({ scale: z.number().positive(),scale_y:z.number().positive().optional(), offset_x: z.number(), offset_y: z.number() })
+  .describe("Image-to-client transform as returned by capture. An explicit transform gets a fresh observation-only window scope; click/move require a matching native pointer-scope enforcement build.");
 const coordArgs = {
   coord_space: z.enum(["client", "capture"]).optional().describe(
     "client (default): x / y are game client pixels. capture: x / y are pixels of the image you were shown by capture (after " +
@@ -806,12 +837,9 @@ const coordArgs = {
 };
 type CoordIn = { coord_space?: "client" | "capture"; mapping?: Mapping; norm?: boolean; capture_space?: boolean };
 /** Convert image-space points to client points when coord_space is "capture"; an error string when that is impossible. */
-function mapPoints(pid: number, a: CoordIn, pts: [number, number][]): { pts: [number, number][]; mapped: boolean } | { error: string } {
-  if (a.coord_space !== "capture") return { pts, mapped: false };
-  if (a.norm || a.capture_space) return { error: "coord_space \"capture\" cannot be combined with norm or capture_space" };
-  const m = a.mapping ?? lastMapping.get(pid);
-  if (!m) return { error: "coord_space \"capture\" needs a capture first (the mapping comes from the last capture of this game) or an explicit mapping" };
-  return { pts: pts.map(([x, y]) => toClient(m, x, y)), mapped: true };
+async function mapPoints(pid: number, a: CoordIn, pts: [number, number][],expectedScope?:unknown) {
+  const epoch=captureSessionEpoch.get(pid)??0;const mapped=await lastMapping.resolve(pid,a,pts,epoch,runVinput,at(pid),expectedScope);
+  return (captureSessionEpoch.get(pid)??0)===epoch?mapped:{error:'attachment changed while resolving capture coordinates; no input was sent'};
 }
 
 // ---- edge-scroll guard: a cursor resting at the window edge pans the view in many games (The Sims, strategy games)
@@ -870,6 +898,7 @@ tool("click", "Click",
   "Placement / drop-in-world clicks: hold_ms ~900. ok:true = the click was delivered; verify with capture / wait_text.",
   { pid, x: xy.x.optional(), y: xy.y.optional(), norm: xy.norm, capture_space: xy.capture_space, button: button.optional(),
     count: z.number().int().min(1).max(10).optional().describe("2 = double click."),
+    verify_change:z.object({region:regionSchema,timeout_ms:z.number().int().min(50).max(5000).optional(),poll_ms:z.number().int().min(20).max(1000).optional()}).optional().describe('Observe a scoped region before and after this one click. No pixel change returns an explicit observation failure retaining the delivery receipt; change may be animation and does not prove game acceptance. Never retries.'),
     hold_ms: z.number().int().min(1).max(10000).optional().describe(
       `How long the button stays down (default ${DEFAULT_CLICK_HOLD_MS} ms). Games that poll the mouse once a frame or per tick ignore very short ` +
       "presses: measured, under about 200 ms is often ignored in some old games, old menus needed about 300 ms, and furniture / item placement " +
@@ -890,22 +919,29 @@ tool("click", "Click",
     if (captureError) return fail(captureError);
     const observation = actionObservation(a);
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
+    if(a.verify_change&&a.x===undefined)return fail('verify_change requires a positioned click with x and y; no input was sent');
     let pos: string[] = a.x === undefined ? [] : [String(a.x), String(a.y)];
-    let mappedInfo: Record<string, unknown> | undefined;
+    let mappedInfo: Record<string, unknown> | undefined, pointerScope:string|undefined;
     if (a.x !== undefined) {
-      const m = mapPoints(a.pid, a, [[a.x, a.y as number]]);
+      const m = await mapPoints(a.pid, a, [[a.x, a.y as number]]);
       if ("error" in m) return fail(m.error);
       pos = [String(m.pts[0][0]), String(m.pts[0][1])];
+      pointerScope=m.scope;
       if (m.mapped) mappedInfo = { mapped: { x: m.pts[0][0], y: m.pts[0][1] } };
     }
     const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "click target", x: Number(pos[0]), y: Number(pos[1]) }], a.edge_margin, a.norm);
+    const verificationEpoch=captureSessionEpoch.get(a.pid)??0;
+    const capability=a.verify_change?await clickScopeCapability(a.pid,runVinput,at(a.pid)):undefined;
+    if(capability&&!capability.ok)return reply(capability);
+    if(a.verify_change&&(captureSessionEpoch.get(a.pid)??0)!==verificationEpoch)return fail('attachment changed during click preflight; no click or temporary modifier was sent');
     return withMouseModifiers(a.pid,a.modifiers,async()=>{
-    const cr = await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
+    const sendClick=(scope?:string)=>runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),...opt('--scope-json',scope??pointerScope),
       ...(a.x === undefined ? [] : ["--settle-ms", String(a.hover_ms ?? DEFAULT_CLICK_HOVER_MS)]),
       ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS),
       ...(a.di_poll_timeout_ms !== undefined ? ["--di-poll-timeout-ms", String(a.di_poll_timeout_ms)] : []),
       ...(a.di_release_timeout_ms !== undefined ? ["--di-release-timeout-ms", String(a.di_release_timeout_ms)] : [])],
       60000 + (a.hold_ms ?? 0) * (a.count ?? 1) + (a.hover_ms ?? 0) + ((a.di_poll_timeout_ms ?? 1000) + (a.di_release_timeout_ms ?? 1000)) * (a.count ?? 1));
+    const cr=a.verify_change?await verifiedClick(a.pid,a.verify_change,runVinput,at(a.pid),()=>(captureSessionEpoch.get(a.pid)??0)===verificationEpoch,sendClick,pointerScope,capability):await sendClick();
     const parked = a.park_cursor && cr.ok ? await parkCursor(a.pid) : undefined;
     const evidence = inputEvidence(cr.json);
     return look(a.pid, reply(cr, { ...mappedInfo, ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after, observation);
@@ -919,11 +955,11 @@ tool("move", "Move the cursor",
     const captureError = actionCaptureError(a);
     if (captureError) return fail(captureError);
     const observation = actionObservation(a);
-    const m = mapPoints(a.pid, a, [[a.x, a.y]]);
+    const m = await mapPoints(a.pid, a, [[a.x, a.y]]);
     if ("error" in m) return fail(m.error);
     const warnings = await edgeWarnings(a.pid, [{ label: "move target", x: m.pts[0][0], y: m.pts[0][1] }], a.edge_margin, a.norm);
     const mr = await runVinput([...at(a.pid), "mouse", String(m.pts[0][0]), String(m.pts[0][1]), ...opt("--norm", a.norm),
-      ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps)], 60000);
+      ...opt("--capture-space", a.capture_space), ...opt("--steps", a.steps),...opt('--scope-json',m.scope)], 60000);
     const evidence = inputEvidence(mr.json);
     return look(a.pid, reply(mr, { ...(m.mapped ? { mapped: { x: m.pts[0][0], y: m.pts[0][1] } } : {}), ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}) }), a.capture_after, observation);
   });
@@ -963,7 +999,7 @@ tool("drag", "Drag",
     ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema, ...mouseModifiers },
   async (a) => {
     if(a.modifier_hold_ms!==undefined&&!a.modifiers?.length)return fail('modifier_hold_ms requires nonempty modifiers; no input was sent');
-    const m = mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
+    const m = await mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
     if ("error" in m) return fail(m.error);
     const [[x1, y1], [x2, y2]] = m.pts;
     const warnings = await edgeWarnings(a.pid, [{ label: "drag start", x: x1, y: y1 }, { label: "drag destination", x: x2, y: y2 }], a.edge_margin);
@@ -1453,6 +1489,10 @@ tool("detach", "Stop controlling a game",
 registerCameraHelpers(tool, { owner: OWNER, at, run: runVinput, epoch: p => captureSessionEpoch.get(p) ?? 0,
   captureError: actionCaptureError, finish: (p, out, options, epoch) => look(p, out, options.capture_after, { ...actionObservation(options), attachment_epoch: epoch }) },
   actionCaptureArgs, regionSchema, keyCombo);
+
+registerAgentLoops(tool,{owner:OWNER,at,run:runVinput,epoch:p=>captureSessionEpoch.get(p)??0,
+  map:(p,a,points,expectedScope)=>mapPoints(p,a,points,expectedScope),qualifyInput:r=>presentMouseDiagnostics(presentInputReads(r)),captureError:actionCaptureError,
+  finish:(p,out,options,epoch)=>look(p,out,options.capture_after,{...actionObservation(options),attachment_epoch:epoch})},actionCaptureArgs,regionSchema,coordArgs);
 
 async function main() {
   const transport = new StdioServerTransport();

@@ -22,6 +22,9 @@ function Get-VinputForegroundCases {
  }
 }
 function Get-VinputBackgroundCases {
+ New-VinputSuiteCase 'cli_budget' 'run_clibudgettest.ps1'
+ New-VinputSuiteCase 'present_window_memory' 'run_presentwindowmemorytest.ps1'
+ New-VinputSuiteCase 'hidden_window_native' 'run_hiddenwindowtest.ps1' @{} 'Retained own offscreen hidden HWNDs, synthetic Present proof, and one explicit guarded SW_SHOWNA; all other desktop writers terminal.'
  New-VinputSuiteCase 'userintentstate' 'run_userintentstate.ps1'
  New-VinputSuiteCase 'owner_input' 'run_ownerinputtest.ps1' @{} 'Owner input pass-through in the real foreground, via a fake foreground predicate (VINPUT_TEST_HOOKS); no OS input.'
  New-VinputSuiteCase 'chord' 'run_chordtest.ps1' @{} 'Ctrl/Shift chords reach TranslateMessage-derived WM_CHAR.'
@@ -36,6 +39,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'keys' 'run_keytest.ps1'
  New-VinputSuiteCase 'trace' 'run_tracetest.ps1'
  New-VinputSuiteCase 'mouse_message_health' 'run_mousemessagehealthtest.ps1'
+ New-VinputSuiteCase 'action_diagnostics' 'run_actiondiagnosticstest.ps1'
  New-VinputSuiteCase 'mouse_modifiers' 'run_mousemodifiertest.ps1'
  New-VinputSuiteCase 'capture' 'run_capturetest.ps1'
  New-VinputSuiteCase 'launch' 'run_launchtest.ps1' @{} 'Nonactivating synthetic launch, CLI output and owned-lock refusal; asserts the real foreground never changes.'
@@ -49,7 +53,14 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'launch_snapshot_model' 'run_launchsnapshotmodel.ps1'
  New-VinputSuiteCase 'sequence_deadline_model' 'run_sequencedeadlinemodel.ps1'
  New-VinputSuiteCase 'input_scope_memory' 'run_inputscopememory.ps1'
+ New-VinputSuiteCase 'pointer_scope_model' 'run_pointerscopemodel.ps1'
+ New-VinputSuiteCase 'pointer_widen_model' 'run_pointerwidenmodel.ps1'
+ New-VinputSuiteCase 'public_safeguards' 'run_publicsafeguardstest.ps1'
+ New-VinputSuiteCase 'job_reader_observation' 'run_jobreadtest.ps1'
+ New-VinputSuiteCase 'capture_mapping' 'run_capturemappingtest.ps1'
+ New-VinputSuiteCase 'pointer_capability' 'run_pointercapabilitytest.ps1'
  New-VinputSuiteCase 'launch_loaded' 'run_launchloadedtest.ps1'
+ New-VinputSuiteCase 'launch_live' 'run_launchlivetest.ps1'
  New-VinputSuiteCase 'hold_until_change' 'run_holduntilchangetest.ps1'
  New-VinputSuiteCase 'relative_scope' 'run_relativescopetest.ps1'
  New-VinputSuiteCase 'visual_camera' 'run_visualcameratest.ps1'
@@ -79,6 +90,10 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'character_translation' 'run_chartranslatetest.ps1'
  New-VinputSuiteCase 'di_type_lifetime' 'run_ditypelifetimetest.ps1'
  New-VinputSuiteCase 'di8_mouse' 'run_di8mousetest.ps1'
+ New-VinputSuiteCase 'di_discovery' 'run_didiscoverytest.ps1'
+ New-VinputSuiteCase 'di_keyboard_formats' 'run_diformattest.ps1'
+ New-VinputSuiteCase 'di_keyboard_native' 'run_dikeyboardtest.ps1'
+ New-VinputSuiteCase 'raw_thread_routing' 'run_rawroutingtest.ps1'
  New-VinputSuiteCase 'clickpoint' 'run_clickpointtest.ps1'
  New-VinputSuiteCase 'lease_invariants' 'run_locktest.ps1'
  New-VinputSuiteCase 'legacylock' 'run_legacylocktest.ps1' @{CliCheck=$true}
@@ -124,6 +139,9 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'input_jobs' 'run_inputjobstest.ps1'
  New-VinputSuiteCase 'sequence_wait_native' 'run_sequencewaitnativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');McpBuildDir=(Join-Path $PSScriptRoot '..\mcp\build');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'pad_phases' 'run_padphasetest.ps1'
+ New-VinputSuiteCase 'pad_phase_peer' 'run_padphasepeertest.ps1' @{Vinput=(Join-Path $PSScriptRoot '..\dist\vinput.exe')} 'Windowless capability peer belongs to its actual pipe-server process; no original input is implemented.'
+ New-VinputSuiteCase 'pad_phase_tail' 'run_padphasetailtest.ps1' @{} 'Memory-only bounded complete phase-journal output and overflow refusal.'
+ New-VinputSuiteCase 'terminal_guard_batch' 'run_terminalbatchtest.ps1' @{} 'Finite fake hook endpoints verify every guarded export before product entry.'
  New-VinputSuiteCase 'pad_triggers' 'run_padtriggerstest.ps1'
  New-VinputSuiteCase 'key_sequence' 'run_keysequencetest.ps1'
  New-VinputSuiteCase 'input_readiness' 'run_readinesstest.ps1'

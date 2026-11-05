@@ -1,12 +1,15 @@
 // All fields share g_padStateMx. These observations describe API returns,
 // never a device arrival event, UI glyph change, or application action.
 unsigned long long g_padPublication=1;
+unsigned long long g_padReadOwner=0,g_padReadReturns=0; // same g_padStateMx, native job publication attribution
+bool g_padReadValid=true;
 struct PadReturnObservation {
  unsigned long long count=0,standard=0,extended=0,fast=0,publication=0;
  ULONGLONG at=0;DWORD packet=0;bool neutral=false;
 } g_padReturn;
-void PadPublicationChangedLocked(){if(!++g_padPublication)++g_padPublication;}
+void PadPublicationChangedLocked(unsigned long long readOwner=0){if(g_padReadOwner!=readOwner){g_padReadOwner=readOwner;g_padReadReturns=0;g_padReadValid=true;}if(!++g_padPublication)++g_padPublication;}
 void PadRecordReturnLocked(int slot,const XST& state,bool fast){
+ if(g_padReadOwner){if(g_padReadReturns==(std::numeric_limits<unsigned long long>::max)())g_padReadValid=false;else ++g_padReadReturns;}
  ++g_padReturn.count;if(slot<4)++g_padReturn.standard;else ++g_padReturn.extended;
  if(fast)++g_padReturn.fast;g_padReturn.publication=g_padPublication;
  g_padReturn.at=GetTickCount64();g_padReturn.packet=state.pkt;

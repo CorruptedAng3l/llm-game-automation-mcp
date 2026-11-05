@@ -1,0 +1,10 @@
+#include "../src/vi_launch_live.h"
+#include <cstdio>
+int main(){unsigned pass=0,fail=0;auto check=[&](bool v,const char* n){printf("%s %s\n",v?"PASS":"FAIL",n);v?++pass:++fail;};
+ const std::string valid="{\"ok\":false,\"pid\":123,\"readiness_version\":1,\"hook_ready\":true,\"window_ready\":true,\"queue_ready\":false,\"cursor_hooks_ready\":true,\"keybd_event_hooks_ready\":true,\"keybd_event_guard_version\":1,\"cursor_guard_version\":1,\"readiness_reason\":\"queue_not_progressing\",\"window_generation\":2,\"hwnd\":\"0x123\"}";
+ std::uint64_t hwnd=0;check(vi_launch_live::QueuePending(valid,123,hwnd)&&hwnd==0x123,"positive queue-pending launch classification");
+ check(!vi_launch_live::QueuePending(valid,124,hwnd),"wrong process identity refused");
+ for(const auto& edit:std::vector<std::pair<std::string,std::string>>{{"\"hook_ready\":true","\"hook_ready\":false"},{"\"window_ready\":true","\"window_ready\":false"},{"\"cursor_hooks_ready\":true","\"cursor_hooks_ready\":false"},{"\"keybd_event_hooks_ready\":true","\"keybd_event_hooks_ready\":false"},{"\"queue_ready\":false","\"queue_ready\":true"},{"queue_not_progressing","window_not_adopted_or_subclassed"},{"\"window_generation\":2","\"window_generation\":0"},{"\"pid\":123","\"pid\":\"123\""},{"\"readiness_version\":1","\"readiness_version\":2"},{"\"hwnd\":\"0x123\"","\"hwnd\":\"0x0\""},{"\"ok\":false","\"ok\":true"}}){auto value=valid;value.replace(value.find(edit.first),edit.first.size(),edit.second);check(!vi_launch_live::QueuePending(value,123,hwnd),edit.first.c_str());}
+ check(!vi_launch_live::QueuePending(valid+" trailing",123,hwnd),"malformed response refused");
+ for(bool active:{false,true})for(bool seen:{false,true})for(bool current:{false,true})check(vi_launch_live::UserTookForeground(active,seen,current)==(active&&seen&&current),"foreground claim requires observed and current target ownership");
+ printf("launch live: %u PASS / %u FAIL\n",pass,fail);return fail?1:0;}

@@ -178,6 +178,15 @@ The delay guards observed MCP attach/detach/launch changes before requesting the
 
 ### Launch arming and claim inactivity TTL
 
+Native launch `--timeout` is a shared post-lock budget for pre-injection, window discovery,
+adoption, settle/guard and readiness stages. Readiness/helper transports bound both writes
+and reads and reject a pipe served by another PID. Replies expose the requested budget,
+elapsed time and expiry. Lock acquisition has its separate `--lock-timeout`; synchronous
+OS/filesystem/COM calls and bounded cleanup can add latency, so this is not a hard realtime
+wall-clock promise. A timed-out loader reports unknown injection and whether its remote
+argument storage was retained; it is never retried or freed while the remote thread may
+still consume it. Such retained remote storage can remain until the target exits.
+
 `launch {exe:"C:/Games/Game.exe", claim:true, claim_ttl_s:9000, arm_pad:true, pad_wait_ms:500}` uses the existing neutral-arm protocol after successful launch/claim; it does not inject again, press a button, cancel jobs or retry input. If requested claim/arming is refused or unconfirmed, MCP reports `ok:false`/`isError:true` with `launch_ok:true`, `launched:true` and the original PID/launch fields preserved: inspect `pad_arm_attempted`, `pad_arm_acknowledged`, `pad_arm_error` and the native `pad_arm` receipt. Do not relaunch that target. A missing poll is not application or glyph readiness; all neutral-arm limits above still apply.
 
 `claim_ttl_s` is available on `launch`/`attach` only with `claim:true`, and on `claim {pid, claim_ttl_s:9000}`. Bounds are integer 1..86400 seconds, default 3600. Native claims already slide on accepted matching-owner input commands; status/readiness/log/jobs and the host-only `wait` do not renew them. Longer total sessions do not require periodic re-claim while qualifying owner input continues within the inactivity interval. Use the same explicit `VINPUT_OWNER` for one-shot MCP server instances; their default `mcp-<server pid>` names otherwise differ. An owner-mismatch refusal is not evidence that a TTL expired. This change does not alter native ownership policy or silently take over another owner.
@@ -234,6 +243,13 @@ The key job admission is tied to that exact captured window lifetime and geometr
 
 ### Observing and correcting a camera landmark
 
+Native status `window_adopted` and `window_hidden` distinguish binding from visibility;
+unknown visibility is null. A fresh, unique successful Present can identify a hidden owned
+top-level window without showing it. `presentation_window` lists bounded evidence and
+ambiguity/capacity/lifetime uncertainty. Adoption does not establish input queue or game
+readiness, and a hidden origin disables automatic visibility restoration for that adoption.
+No default show/activation is performed. A no-window capture reports `no_window_adopted`.
+
 `observe_settle {pid,region:[100,100,500,300],stable_samples:3}` watches exact scoped region hashes and reports their changes and stable-window duration. It sends no input. Quiet pixels can mean a pause, a clamp, input rejection, or a stable camera; animated overlays can prevent stability. `queue_drain_measured:false`, `camera_angle_measured:false` and `raw_queue_remaining_counts:null` keep those unknowns explicit. Inspect the game's camera smoothing settings when views continue to change after raw movement.
 
 `look_calibrate {pid,template:"E:/landmark.png",counts:80}` submits two small raw relative probes and reidentifies one unique static PNG landmark after each hash-stability check. Its signed 2x2 matrix measures local screen pixels per submitted mouse count. It moves the view and does not restore it automatically. `degrees_per_count` remains null: image displacement does not measure camera angle or prove raw input consumption. Keep the landmark visible during both probes and select a region without unrelated animation.
@@ -242,4 +258,31 @@ Pass its `calibration` object to `look_at {pid,template:"E:/landmark.png",calibr
 
 Visual helpers require the matching native relative-motion scope version and CLI `image_scope_version`. Scoped `find-image --preserve-map` observations retain the existing saved click map; their capture scope is checked before motion. All four helpers accept the standard `capture_after`, region and image transforms. Simulated protocol tests establish bounds and refusal behavior; these helpers have not been validated for a particular game's camera smoothing or targeting.
 
-A failed launch that includes a typed, matching native DLL-load receipt now reports `launched:true`, `keep_pid:true`, and `liveness:"not_verified"`. It preserves the failure/readiness fields. Retain that PID and inspect readiness before considering another launch; the historical load receipt does not prove the process is still alive. If claiming was requested, `claim_pending` and `claim_ttl_s_requested` preserve the unconfirmed request. The MCP does not claim, arm a pad, or send fallback input until full launch readiness succeeds.
+A failed launch that includes a typed, matching native DLL-load receipt reports `launched:true`, `keep_pid:true`, and `liveness:"not_verified"`. It preserves the failure/readiness fields. Retain that PID and inspect readiness before considering another launch; the historical load receipt does not prove the process is still alive. If claiming was requested, `claim_pending` and `claim_ttl_s_requested` preserve the unconfirmed request. A fresh live process with the exact adopted window, required safety hooks and only a pending queue handshake instead returns launch success and takes its claim with `input_ready:false`, `queue_ready:false`, and `readiness_unconfirmed:true`. Input commands retain their own readiness checks.
+
+`launch {show_hidden:true}` explicitly requests the native operation below for a proven adopted hidden presenter. The default preserves hidden visibility. `window_hidden`, `window_adopted`, `show_hidden_reply/status` and `show_hidden_visibility_confirmed` distinguish discovery, adoption, request admission and observed visibility. Unproven hidden windows return within a separate discovery bound; keep the PID and follow it later. Direct launches echo the immutable `final_command_line`, requested and queried applied affinity, and the spawned PID even when a later stage fails.
+
+Capture replies include `mapping` and `capture_mapping_persisted`. Matching DLLs keep the last image-to-client transform in the target, including crop origins and separate axis scales after resizing. Thus a fresh MCP server can use `coord_space:"capture"` without a local cache. Host resizing uses an exact map/scope CAS; failure returns an explicit mapping warning and never replays a capture. An explicit `mapping` preserves the supplied transform and gets a fresh observation-only window scope (or an already verified helper baseline) before coordinate input. Missing scope refuses input. It does not prove that the supplied transform still describes the game image. Click/move enforce that scope in the matching native build; ordinary drag retains its existing ownership behavior. Older DLLs without persisted maps need scoped observation and matching pointer-scope enforcement for these fenced clicks/moves; update the DLL when that support is unavailable.
+
+`click {x:...,y:...,verify_change:{region:{x:...,y:...,w:...,h:...},timeout_ms:1000}}` samples a scoped region before and after one delivery. Unchanged pixels return `no_visual_change` with the original input receipt. Changed pixels may include animation; causality and game acceptance remain unmeasured. `capture_after` is one image; use `observe_settle` for scoped stable-frame observation. Action replies also surface cumulative mouse-message suppression warnings and separate known owned delivery from unrecognized sources.
+
+Explicit native `show-hidden` requires the exact adopted `hwnd` and the current claim owner.
+It queues one UI-thread `ShowWindow(SW_SHOWNA)` request with a native five-second expiry.
+`ok:true` acknowledges admission; `hidden_show` reports the exact ticket, pending/completed,
+call_attempted, visible_after and reason. Paused queues, changed claims, owner activity,
+retargets and lost lifetime/geometry witnesses cancel without replay. ShowWindow's return
+value is never taken as visibility success. The callback uses a strict thread activation
+barrier, and no default show is added. Read-only native `presentation-status` returns only
+PID/HWND, hidden proof and show receipts; it avoids the full status title callback. Use
+bounded transport for either status command. An expired/unconfirmed receipt never proves
+that the application rendered or accepted input.
+
+Default MCP `status` includes typed `window_adopted`/`window_hidden`, bounded presentation
+uncertainty and exact `hidden_show` receipts when the native schema supports them. Unknown
+visibility stays null; old or malformed metadata is omitted. `verbose:true` retains all raw
+native evidence. A queued show ticket never means that the window became visible.
+
+Presentation adoption pins a private window-object cookie before native Present and checks
+the same lifetime after S_OK. Its pre-call reservation is not successful-frame evidence.
+Destruction or HWND recycling during Present refuses adoption; failed/test Presents never
+become presenting candidates, and lost cookies are never repaired by post-call restamping.

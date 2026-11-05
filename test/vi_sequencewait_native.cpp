@@ -17,15 +17,15 @@
 namespace {
 using U64=unsigned long long;
 constexpr UINT ControlMessage=WM_APP+0xB8;
-constexpr int Keys[3]={VK_F6,VK_F7,VK_SHIFT};
-constexpr const char* Names[3]={"f6","f7","shift"};
+constexpr int Keys[4]={VK_F6,VK_F7,VK_SHIFT,VK_LBUTTON};
+constexpr const char* Names[4]={"f6","f7","shift","lbutton"};
 constexpr const wchar_t* ClassName=L"ViSequenceWaitOwned";
 constexpr const wchar_t* Property=L"vi.sequencewait.fixture.v1";
 int lifetimeToken=0;HWND target=nullptr;DWORD uiThread=0;FILE* output=nullptr;std::mutex logMutex,stateMutex;bool exiting=false;
 struct State {
  U64 epoch=1,lastTick=0,sampleSerial=0,polls=0,firstChordTick=0,completedTick=0,lastToken=0,captures=0,edgeRecords=0,wmRecords=0,recordsDropped=0;
  DWORD sampleThread=0;unsigned mask=0,keyStateMask=0,keyboardMask=0,eventCaptures=0;bool keyboardOk=false,chordSeen=false,completed=false,eventVisible=false;
- std::array<U64,3> reads{},high{},down{},up{},wmDown{},wmUp{};
+ std::array<U64,4> reads{},high{},down{},up{},wmDown{},wmUp{};
 };
 State state;std::atomic<U64> nextSample{0};
 const char* Bool(bool value){return value?"true":"false";}
@@ -43,13 +43,13 @@ bool Own(HWND h){DWORD pid=0;return h&&h==target&&IsWindow(h)&&GetWindowThreadPr
 bool Poll(){
  U64 epoch=0;{std::lock_guard<std::mutex> lock(stateMutex);epoch=state.epoch;}const U64 serial=nextSample.fetch_add(1)+1;
  unsigned mask=0,gks=0,gkbs=0;BYTE keyboard[256]{};
- for(unsigned i=0;i<3;i++){if(GetAsyncKeyState(Keys[i])&0x8000)mask|=1u<<i;if(GetKeyState(Keys[i])&0x8000)gks|=1u<<i;}
- const bool keyboardOk=GetKeyboardState(keyboard)!=FALSE;if(keyboardOk)for(unsigned i=0;i<3;i++)if(keyboard[Keys[i]]&0x80)gkbs|=1u<<i;
+ for(unsigned i=0;i<4;i++){if(GetAsyncKeyState(Keys[i])&0x8000)mask|=1u<<i;if(GetKeyState(Keys[i])&0x8000)gks|=1u<<i;}
+ const bool keyboardOk=GetKeyboardState(keyboard)!=FALSE;if(keyboardOk)for(unsigned i=0;i<4;i++)if(keyboard[Keys[i]]&0x80)gkbs|=1u<<i;
  const U64 now=GetTickCount64();const DWORD readerThread=GetCurrentThreadId();unsigned edges=0;State observed;bool emit=false;
  {std::lock_guard<std::mutex> lock(stateMutex);if(state.epoch!=epoch)return false;if(serial<=state.sampleSerial)return true;
   edges=state.mask^mask;state.mask=mask;state.keyStateMask=gks;state.keyboardMask=gkbs;state.keyboardOk=keyboardOk;state.lastTick=now;state.sampleSerial=serial;state.sampleThread=readerThread;++state.polls;
-  for(unsigned i=0;i<3;i++){++state.reads[i];if(mask&(1u<<i))++state.high[i];if(edges&(1u<<i)){if(mask&(1u<<i))++state.down[i];else ++state.up[i];}}
-  if((mask&3u)==3u&&!state.chordSeen){state.chordSeen=true;state.firstChordTick=now;}
+  for(unsigned i=0;i<4;i++){++state.reads[i];if(mask&(1u<<i))++state.high[i];if(edges&(1u<<i)){if(mask&(1u<<i))++state.down[i];else ++state.up[i];}}
+  if(((mask&3u)==3u||(mask&8u))&&!state.chordSeen){state.chordSeen=true;state.firstChordTick=now;}
   if(state.chordSeen&&!mask&&!state.completed){state.completed=true;state.completedTick=now;}
   if(edges){if(state.edgeRecords<256){++state.edgeRecords;emit=true;}else ++state.recordsDropped;}observed=state;
  }
@@ -59,7 +59,7 @@ bool Poll(){
 void Snapshot(U64 token,const char* event="snapshot"){
  const State value=CopyState();
  Log("{\"event\":\"%s\",\"token\":%llu,\"epoch\":%llu,\"sample_tick\":%llu,\"sample_serial\":%llu,\"sample_thread\":%lu,\"ui_thread\":%lu,\"mask\":%u,\"gaks_mask\":%u,\"gks_mask\":%u,\"gkbs_mask\":%u,\"gkbs_ok\":%s,\"final_all_up\":%s,\"chord_seen\":%s,\"completed_latch\":%s,\"first_chord_tick\":%llu,\"completed_tick\":%llu,\"polls\":%llu,\"captures\":%llu,\"records_dropped\":%llu,\"terminal_calls\":%llu,\"native_writer_called\":false}",event,token,value.epoch,value.lastTick,value.sampleSerial,value.sampleThread,uiThread,value.mask,value.mask,value.keyStateMask,value.keyboardMask,Bool(value.keyboardOk),Bool(value.mask==0),Bool(value.chordSeen),Bool(value.completed),value.firstChordTick,value.completedTick,value.polls,value.captures,value.recordsDropped,capture_spy::writes.load());
- for(unsigned i=0;i<3;i++)Log("{\"event\":\"key_snapshot\",\"token\":%llu,\"epoch\":%llu,\"name\":\"%s\",\"vk\":%d,\"reads\":%llu,\"high_samples\":%llu,\"down_count\":%llu,\"up_count\":%llu,\"wm_down\":%llu,\"wm_up\":%llu}",token,value.epoch,Names[i],Keys[i],value.reads[i],value.high[i],value.down[i],value.up[i],value.wmDown[i],value.wmUp[i]);
+ for(unsigned i=0;i<4;i++)Log("{\"event\":\"key_snapshot\",\"token\":%llu,\"epoch\":%llu,\"name\":\"%s\",\"vk\":%d,\"reads\":%llu,\"high_samples\":%llu,\"down_count\":%llu,\"up_count\":%llu,\"wm_down\":%llu,\"wm_up\":%llu}",token,value.epoch,Names[i],Keys[i],value.reads[i],value.high[i],value.down[i],value.up[i],value.wmDown[i],value.wmUp[i]);
 }
 // Writes only a caller-owned memory DC. Original PrintWindow is never called.
 BOOL WINAPI SurrogatePrint(HWND h,HDC dc,UINT){
@@ -78,8 +78,9 @@ BOOL WINAPI SurrogatePrint(HWND h,HDC dc,UINT){
 LRESULT CALLBACK Window(HWND h,UINT message,WPARAM w,LPARAM l){
  if(message==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
  if(message==WM_KEYDOWN||message==WM_KEYUP||message==WM_SYSKEYDOWN||message==WM_SYSKEYUP){
-  const bool down=message==WM_KEYDOWN||message==WM_SYSKEYDOWN;for(unsigned i=0;i<3;i++)if(w==static_cast<WPARAM>(Keys[i])||(i==2&&(w==VK_LSHIFT||w==VK_RSHIFT))){bool emit=false;U64 epoch=0;{std::lock_guard<std::mutex> lock(stateMutex);if(down)++state.wmDown[i];else ++state.wmUp[i];epoch=state.epoch;if(state.wmRecords<256){++state.wmRecords;emit=true;}else ++state.recordsDropped;}if(emit)Log("{\"event\":\"key_message\",\"epoch\":%llu,\"tick\":%llu,\"name\":\"%s\",\"vk\":%llu,\"down\":%s,\"message\":%u}",epoch,GetTickCount64(),Names[i],static_cast<U64>(w),Bool(down),message);break;}
+  const bool down=message==WM_KEYDOWN||message==WM_SYSKEYDOWN;for(unsigned i=0;i<4;i++)if(w==static_cast<WPARAM>(Keys[i])||(i==2&&(w==VK_LSHIFT||w==VK_RSHIFT))){bool emit=false;U64 epoch=0;{std::lock_guard<std::mutex> lock(stateMutex);if(down)++state.wmDown[i];else ++state.wmUp[i];epoch=state.epoch;if(state.wmRecords<256){++state.wmRecords;emit=true;}else ++state.recordsDropped;}if(emit)Log("{\"event\":\"key_message\",\"epoch\":%llu,\"tick\":%llu,\"name\":\"%s\",\"vk\":%llu,\"down\":%s,\"message\":%u}",epoch,GetTickCount64(),Names[i],static_cast<U64>(w),Bool(down),message);break;}
  }
+ if(message==WM_LBUTTONDOWN||message==WM_LBUTTONUP){std::lock_guard<std::mutex> lock(stateMutex);if(message==WM_LBUTTONDOWN)++state.wmDown[3];else ++state.wmUp[3];}
  if(message==ControlMessage){const U64 token=static_cast<U64>(static_cast<ULONG_PTR>(l));bool ok=Own(h);Poll();if(ok&&w==1){std::lock_guard<std::mutex> lock(stateMutex);if(state.mask)ok=false;else{const U64 next=state.epoch+1;state=State{};state.epoch=next;state.lastTick=GetTickCount64();}}else if(ok&&w==2){std::lock_guard<std::mutex> lock(stateMutex);if(state.mask)ok=false;else{state.eventCaptures=2;state.eventVisible=false;}}else if(ok&&w==8)exiting=true;else if(w!=0)ok=false;{std::lock_guard<std::mutex> lock(stateMutex);state.lastToken=token;}Snapshot(token);Log("{\"event\":\"control\",\"token\":%llu,\"action\":%llu,\"ok\":%s}",token,static_cast<U64>(w),Bool(ok));return 0;}
  if(message==WM_CLOSE||message==WM_DESTROY){exiting=true;return 0;}return DefWindowProcW(h,message,w,l);
 }

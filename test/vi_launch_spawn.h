@@ -28,7 +28,9 @@ inline bool WaitForWindowPublication(DWORD pid){
 }
 inline BOOL WINAPI Create(LPCWSTR application,LPWSTR command,LPSECURITY_ATTRIBUTES processSecurity,LPSECURITY_ATTRIBUTES threadSecurity,BOOL inherit,DWORD flags,LPVOID environment,LPCWSTR directory,LPSTARTUPINFOW startup,LPPROCESS_INFORMATION process){
  const char* role=application&&!_wcsicmp(application,target.c_str())?"target":application&&!_wcsicmp(application,childCli.c_str())?"cli":nullptr;
- if(!role||(flags&CREATE_SUSPENDED)){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
+ wchar_t affinity[2]{};const bool affinityCase=GetEnvironmentVariableW(L"VI_LAUNCH_TEST_AFFINITY",affinity,2)==1&&affinity[0]=='1';
+ const bool suspendedTarget=role&&!std::strcmp(role,"target")&&flags==CREATE_SUSPENDED&&affinityCase;
+ if(!role||((flags&CREATE_SUSPENDED)&&!suspendedTarget)){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
  // Safety adaptation for BOTH baselines/candidates: console children never
  // receive a real console before their own guards. GUI targets ignore this bit.
  const DWORD safeFlags=flags|CREATE_NO_WINDOW;
@@ -37,7 +39,7 @@ inline BOOL WINAPI Create(LPCWSTR application,LPWSTR command,LPSECURITY_ATTRIBUT
   FILETIME created{},exited{},kernel{},user{};const DWORD id=GetProcessId(process->hProcess);ULARGE_INTEGER stamp{};
   const bool known=id==process->dwProcessId&&GetProcessTimes(process->hProcess,&created,&exited,&kernel,&user);stamp.LowPart=created.dwLowDateTime;stamp.HighPart=created.dwHighDateTime;
   fprintf(journal,"{\"event\":\"spawned_owned\",\"parent_pid\":%lu,\"child_pid\":%lu,\"creation_filetime\":%llu,\"creation_known\":%s,\"role\":\"%s\",\"case_nonce\":\"%s\",\"requested_creation_flags\":%lu,\"effective_creation_flags\":%lu,\"no_console_enforced\":true}\n",GetCurrentProcessId(),id,stamp.QuadPart,known?"true":"false",role,vi_launch_ack::Escape(nonce.c_str()).c_str(),flags,safeFlags);fflush(journal);
-  if(known&&!std::strcmp(role,"target")){
+  if(known&&!std::strcmp(role,"target")&&!suspendedTarget){
    const bool published=WaitForWindowPublication(id);
    fprintf(journal,"{\"event\":\"windows_publication_wait\",\"child_pid\":%lu,\"complete\":%s,\"deadline_ms\":5000}\n",id,published?"true":"false");fflush(journal);
   }
