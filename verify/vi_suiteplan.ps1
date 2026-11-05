@@ -42,6 +42,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'nativecapture' 'run_nativecapture.ps1'
  New-VinputSuiteCase 'capture_timing' 'run_capturetimingtest.ps1'
  New-VinputSuiteCase 'capture_diagnostics' 'run_capturediagnosticssurrogatetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
+ New-VinputSuiteCase 'launch_follow' 'run_launchfollowtest.ps1'
  New-VinputSuiteCase 'startup_activation' 'run_startupactivationtest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'xinput' 'run_xinputtest.ps1'
  New-VinputSuiteCase 'pad_readiness' 'run_padreadinessnativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
@@ -63,6 +64,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'physical_readers' 'run_physicalreaderstest.ps1'
  New-VinputSuiteCase 'character_translation' 'run_chartranslatetest.ps1'
  New-VinputSuiteCase 'di_type_lifetime' 'run_ditypelifetimetest.ps1'
+ New-VinputSuiteCase 'di8_mouse' 'run_di8mousetest.ps1'
  New-VinputSuiteCase 'clickpoint' 'run_clickpointtest.ps1'
  New-VinputSuiteCase 'lease_invariants' 'run_locktest.ps1'
  New-VinputSuiteCase 'legacylock' 'run_legacylocktest.ps1' @{CliCheck=$true}

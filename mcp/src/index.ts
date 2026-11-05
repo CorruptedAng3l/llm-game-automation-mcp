@@ -20,7 +20,7 @@ import { burstImage } from "./burstimage.js";
 import { requireSequenceWait, sequenceWaitError, waitSequence } from "./sequencewait.js";
 import { requireTextBoundary } from "./textboundary.js";
 
-const VERSION = "0.2.5";
+const VERSION = "0.2.6";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -167,13 +167,15 @@ function tool<S extends z.ZodRawShape>(name: string, title: string, description:
 
 // ---------------------------------------------------------------- targets
 tool("launch", "Launch a game",
-  "Start a game and inject vinput into it. Returns {ok, pid, injected, foreground_restored, ...}; keep the pid for every " +
+  "Start a game with optional args (for example '-windowed') and inject vinput into its real window-owning process. Returns {ok, pid, injected, followed_from, foreground_restored, ...}; keep the pid for every " +
   "other tool. Give exactly one of exe (a .exe path), aumid (a UWP / Xbox app id 'PackageFamilyName!AppId') or " +
   "steam_appid (+ wait_exe). Run games WINDOWED or borderless (exclusive fullscreen breaks background capture). Use " +
   "early:true for Vulkan / OpenGL games so capture hooks are in before the device is created (exe only). Refused with " +
-  "anticheat_refused:true if the game or the machine has a known anti-cheat.",
+  "anticheat_refused:true if the game or the machine has a known anti-cheat. Interactive Steam launchers return launch_state:'launcher_ready' and waiting_for; click Play, then call launch with follow_pid, follow_created and wait_exe from that receipt to adopt the game without starting another copy. For Steam load error 5:0000065434 use steam_appid + wait_exe.",
   {
     exe: z.string().optional().describe("Full path of the game executable."),
+    follow_pid: z.number().int().positive().optional().describe("Continue an existing launch after clicking Play; use instead of exe/aumid/steam_appid. Does not start another process."),
+    follow_created: z.string().regex(/^\d+$/).optional().describe("process_created from the launcher receipt; decimal string retains its identity after the launcher exits."),
     args: z.string().optional().describe("Command line arguments for the game, e.g. \"-windowed -width 1280 -height 720\". Many games ignore size switches because a saved setting wins: launch then warns (warnings, requested_size_ignored) when the window's client size differs from the size you asked for, so set the size in the game's own options."),
     cwd: z.string().optional().describe("Working directory for the game (exe launches only). Default: the exe's own folder, which is what most old games need, so leave it out unless the game wants something else."),
     aumid: z.string().optional().describe("UWP / Xbox app user model id, e.g. 'Publisher.Game_abc123!App'."),
@@ -191,8 +193,9 @@ tool("launch", "Launch a game",
   async (a) => {
     if (a.pad_wait_ms !== undefined && !a.arm_pad) return fail("pad_wait_ms requires arm_pad:true; nothing was sent");
     if (a.claim_ttl_s !== undefined && !a.claim) return fail("claim_ttl_s requires claim:true; nothing was sent");
-    const n = [a.exe, a.aumid, a.steam_appid].filter((v) => v).length;
-    if (n !== 1) return fail("give exactly one of exe, aumid or steam_appid");
+    const n = [a.exe, a.aumid, a.steam_appid, a.follow_pid].filter((v) => v).length;
+    if (n !== 1) return fail("give exactly one of exe, aumid, steam_appid or follow_pid");
+    if (a.follow_created !== undefined && !a.follow_pid) return fail("follow_created requires follow_pid");
     let cwd: string | undefined;
     if (a.cwd) {
       if (!a.exe) return fail("cwd only applies to exe launches (aumid / steam_appid games choose their own folder)");
@@ -202,6 +205,7 @@ tool("launch", "Launch a game",
     }
     const argv = ["--owner", OWNER, "launch",
       ...opt("--exe", a.exe), ...opt("--aumid", a.aumid), ...opt("--steam", a.steam_appid), ...opt("--wait-exe", a.wait_exe),
+      ...opt("--follow-pid", a.follow_pid), ...opt("--follow-created", a.follow_created),
       ...(a.args === undefined ? [] : [`--args=${a.args}`]), ...opt("--cwd", cwd), ...opt("--early", a.early), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
       ...opt("--lock", a.lock), ...opt("--claim-ttl", a.claim ? a.claim_ttl_s ?? 3600 : undefined)];
     const r = await runVinput(argv, ((a.timeout_s ?? 240) + (a.settle_s ?? 5) + 120) * 1000);

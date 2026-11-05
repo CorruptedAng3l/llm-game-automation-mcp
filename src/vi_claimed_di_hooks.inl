@@ -28,6 +28,7 @@ bool ClaimDiKnownAcquire(void* target){
 bool ClaimDiRememberAcquire(void* target,PFN_DIACQ original){
  if(!target||!original){++g_claimDiHookFailed;return false;}
  std::lock_guard<std::mutex> lock(g_claimDiEntryMx);
+ if(DiPollEntryKnown(target)){++g_claimDiHookFailed;return false;}
  for(const auto& entry:g_claimDiCoopEntries)if(entry.target==target){++g_claimDiHookFailed;return false;}
  for(const auto& entry:g_claimDiAcquireEntries)if(entry.target==target)return entry.enabled;
  for(auto& entry:g_claimDiAcquireEntries)if(!entry.target){
@@ -45,6 +46,7 @@ bool ClaimDiInstallEntry(void* target,bool cooperative){
  ClaimDiEntry* slot=nullptr;void* detour=nullptr;bool created=false;
  {
   std::lock_guard<std::mutex> lock(g_claimDiEntryMx);
+  if(DiPollEntryKnown(target)){++g_claimDiHookFailed;return false;}
   auto* entries=cooperative?g_claimDiCoopEntries:g_claimDiAcquireEntries;
   auto* other=cooperative?g_claimDiAcquireEntries:g_claimDiCoopEntries;
   for(unsigned i=0;i<kClaimDiEntries;i++)if(other[i].target==target){++g_claimDiHookFailed;return false;}

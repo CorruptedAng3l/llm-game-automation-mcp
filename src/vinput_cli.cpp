@@ -811,9 +811,13 @@ static Reply WaitChange(DWORD pid, const Args& a) {
 #include <limits>
 #include "vi_cli_launch_selection.inl"
 #include "vi_launch_injection_failure.h"
+#include "vi_cli_launch_follow.inl"
 
 static int Launch(const Args& a) {
     std::string injectReply,earlyInjectReply,dialogInjectReply,launchReadiness;
+    DWORD followedFrom=0,launcherPid=0;
+    unsigned long long selectedCreated=0;
+    std::string waitingFor;
     // Every launch result adds the actual latest injection record. Early hooks-only
     // setup remains separate from the full window/queue handshake after resume.
     auto launchResult=[&](const char* format,auto... values) {
@@ -823,20 +827,33 @@ static int Launch(const Args& a) {
         result+=",\"launch_readiness\":"+(launchReadiness.empty()?std::string("null"):launchReadiness);
         result+=",\"early_inject\":"+(earlyInjectReply.empty()?std::string("null"):earlyInjectReply);
         result+=",\"dialog_inject\":"+(dialogInjectReply.empty()?std::string("null"):dialogInjectReply)+"}";
+        result.pop_back();
+        result+=",\"followed_from\":"+(followedFrom?std::to_string(followedFrom):"null");
+        result+=",\"launcher_pid\":"+(launcherPid?std::to_string(launcherPid):"null");
+        result+=",\"process_created\":\""+std::to_string(selectedCreated)+"\"";
+        result+=",\"launch_state\":\""+std::string(launcherPid?"launcher_ready":"game")+"\"";
+        result+=",\"waiting_for\":"+(waitingFor.empty()?std::string("null"):"\""+JEsc(waitingFor)+"\"")+"}";
         printf("%s\n",result.c_str());
     };
     std::wstring exe = U2W(GetOpt(a, "exe")), steam = U2W(GetOpt(a, "steam")), args = U2W(GetOpt(a, "args")), waitExe = U2W(GetOpt(a, "wait-exe")), aumid = U2W(GetOpt(a, "aumid"));
     std::wstring lock = U2W(GetOpt(a, "lock")), dll = U2W(GetOpt(a, "dll"));
+    DWORD followPid=0;
+    if(HasOpt(a,"follow-pid")){
+        const auto value=GetOpt(a,"follow-pid");char* end=nullptr;const auto n=strtoull(value.c_str(),&end,10);
+        if(!n||!end||*end||n>MAXDWORD){launchResult("{\"ok\":false,\"error\":\"--follow-pid needs a positive PID\"}");return 2;}followPid=(DWORD)n;
+    }
+    if(HasOpt(a,"follow-created")&&!followPid){launchResult("{\"ok\":false,\"error\":\"--follow-created requires --follow-pid\"}");return 2;}
     LaunchOptions launchOptions; std::string launchOptionError;
     if (!PrepareLaunchOptions(a, exe, launchOptions, launchOptionError)) { launchResult("{\"ok\":false,\"error\":\"%s\"}\n", JEsc(launchOptionError).c_str()); return 2; }
     bool allowDialog=false;unsigned allowCount=0;
     for(const auto& option:a.opt)if(option.first=="allow-dialog"){if(++allowCount>1||(option.second!="true"&&option.second!="false")){launchResult("{\"ok\":false,\"error\":\"--allow-dialog must appear once with true or false\"}\n");return 2;}allowDialog=option.second=="true";}
     int timeout = atoi(GetOpt(a, "timeout", "240").c_str()), settle = atoi(GetOpt(a, "settle", "5").c_str());
+    if(timeout<1||timeout>1800||settle<0||settle>600){launchResult("{\"ok\":false,\"error\":\"timeout must be 1..1800 and settle 0..600 seconds\"}");return 2;}
     unsigned retry = 0, lockTimeout = 0;
     if (HasOpt(a, "lock-timeout") && HasOpt(a, "lock-max-wait")) { launchResult("{\"ok\":false,\"error\":\"use only --lock-timeout or its existing --lock-max-wait alias\"}\n"); return 2; }
     if (!LockSeconds(GetOpt(a, "lock-retry", "60"), 1, retry)) { launchResult("{\"ok\":false,\"error\":\"--lock-retry is the interval between attempts: use 1..86400 whole seconds; set --lock-timeout for a total wait budget\"}\n"); return 2; }
     if (!LockSeconds(GetOpt(a, "lock-timeout", GetOpt(a, "lock-max-wait", "0").c_str()), 0, lockTimeout)) { launchResult("{\"ok\":false,\"error\":\"--lock-timeout (or --lock-max-wait) must be 0..86400 whole seconds; 0 keeps the legacy unlimited wait\"}\n"); return 2; }
-    if (exe.empty() && steam.empty() && aumid.empty()) { launchResult("{\"ok\":false,\"error\":\"launch needs --exe, --steam or --aumid\"}\n"); return 2; }
+    if ((int)!exe.empty()+(int)!steam.empty()+(int)!aumid.empty()+(int)(followPid!=0)!=1) { launchResult("{\"ok\":false,\"error\":\"launch needs exactly one of --exe, --steam, --aumid or --follow-pid\"}\n"); return 2; }
     if (!steam.empty() && waitExe.empty()) { launchResult("{\"ok\":false,\"error\":\"--steam needs --wait-exe <name.exe>\"}\n"); return 2; }
     bool early = HasOpt(a, "early");
     if (early && exe.empty()) { launchResult("{\"ok\":false,\"error\":\"--early needs --exe (the process must be created suspended by vinput)\"}\n"); return 2; }
@@ -866,9 +883,13 @@ static int Launch(const Args& a) {
     g_launchUserIntent.Configure({GetAsyncKeyState,GetCursorPos,WindowFromPoint,GetForegroundWindow});
     std::thread watcher([&] { g_launchUserIntent.InstallEvents();while (watching) { {std::lock_guard<std::recursive_mutex> guard(g_restoreMx);g_launchUserIntent.Pump();GuardForeground(0, g_launchPhase.load());} Sleep(10); }g_launchUserIntent.StopEvents(); });
     int rc = 2; DWORD pid = 0; bool earlyInjected = false;
+    LaunchProcessHandles processHandles;
+    vi_launch_follow::Process rootProcess{};
+    const auto initialProcesses=LaunchSnapshot(nullptr,waitExe);
+    FILETIME launchTime{};GetSystemTimeAsFileTime(&launchTime);
     std::string cwdFields;
     auto rejectDialog = [&](HWND window,bool injected) {
-        if((WindowClass(window)!="#32770"&&!OwnedPopupWindow(window)) || allowDialog)return false;
+        if((WindowClass(window)!="#32770"&&!OwnedPopupWindow(window)) || allowDialog || launcherPid==pid)return false;
         DialogText text;text.pid=pid;EnumChildWindows(window,DialogTextEnum,(LPARAM)&text);
         RestoreForeground();
         launchResult("{\"ok\":false,\"pid\":%lu,\"injected\":%s,\"error\":\"launch found a modal/error dialog instead of a game window; inspect dialog_text (use --allow-dialog only for an intentional dialog target)\",\"dialog_text\":\"%s\",\"foreground_restored\":%s%s}\n",
@@ -876,7 +897,6 @@ static int Launch(const Args& a) {
         return true;
     };
     do {
-        std::set<DWORD> before; if (!waitExe.empty()) before = PidsByName(waitExe);
         if (!exe.empty()) {
             std::wstring dir = exe; size_t sl = dir.find_last_of(L"\\/"); dir = sl == std::wstring::npos ? L"." : dir.substr(0, sl);
             if (launchOptions.explicitCwd) dir = launchOptions.cwd;
@@ -886,6 +906,7 @@ static int Launch(const Args& a) {
             si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_SHOWNOACTIVATE;
             if (!CreateProcessW(exe.c_str(), &cl[0], nullptr, nullptr, FALSE, early ? CREATE_SUSPENDED : 0, nullptr, dir.c_str(), &si, &pi)) { launchResult("{\"ok\":false,\"error\":\"CreateProcess failed %lu\"}\n", GetLastError()); break; }
             pid = pi.dwProcessId; g_initialLaunchPid = pid; g_launchPid = pid;
+            rootProcess=LaunchProcess(pid,GetCurrentProcessId(),ProcName(pid),pi.hProcess);processHandles.Retain(rootProcess,pi.hProcess);
             if (!cwdFields.empty()) cwdFields += ",\"cwd_applies_to_spawned_pid\":" + std::to_string(pid);
             if (early) {
                 // Suspended: vinput's hooks (and its DLL-load notification for vulkan-1/opengl32) are installed
@@ -904,6 +925,14 @@ static int Launch(const Args& a) {
                 fprintf(stderr, "[vinput] early inject ok in %lu ms, main thread resumed\n", GetTickCount() - ti);
             }
             CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        } else if(followPid) {
+            pid=followPid;g_initialLaunchPid=pid;g_launchPid=pid;
+            rootProcess=LaunchProcess(pid,0,ProcName(pid));processHandles.Retain(rootProcess);
+            const auto stampText=GetOpt(a,"follow-created");char* end=nullptr;const auto stamp=strtoull(stampText.c_str(),&end,10);
+            if(!stampText.empty()&&(!stamp||!end||*end||(rootProcess.born&&rootProcess.born!=stamp))){launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"launcher identity changed; follow-created must match its launch receipt\"}",pid);break;}
+            if(!rootProcess.born&&stamp)rootProcess.born=stamp;
+            if(!rootProcess.born){launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"launcher exited; pass --follow-created from its launch receipt and --wait-exe; no process was started\"}",pid);break;}
+            if(!rootProcess.alive&&waitExe.empty()){launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"an exited launcher requires --wait-exe to identify its game\"}",pid);break;}
         } else if (!aumid.empty()) {
             // UWP / Xbox app: the activation manager returns the exact PID (no by-name guessing)
             HRESULT ci = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -913,6 +942,7 @@ static int Launch(const Args& a) {
             if (SUCCEEDED(ci)) CoUninitialize();
             if (FAILED(hr) || !p) { launchResult("{\"ok\":false,\"error\":\"ActivateApplication(%s) failed hr=0x%08X\"}\n", JEsc(W2U(aumid)).c_str(), (unsigned)hr); break; }
             pid = p; g_initialLaunchPid = pid; g_launchPid = pid;
+            rootProcess=LaunchProcess(pid,0,ProcName(pid));processHandles.Retain(rootProcess);
         } else {
             // steam://run with args can pop a "launch with these arguments?" confirmation; rungameid never does
             std::wstring url = args.empty() ? L"steam://rungameid/" + steam : L"steam://run/" + steam + L"//" + args + L"/";
@@ -920,31 +950,43 @@ static int Launch(const Args& a) {
         }
         fprintf(stderr, "[vinput] started (pid %lu)\n", pid);
         DWORD t0 = GetTickCount();
-        if (!waitExe.empty()) {
-            pid = 0;
-            while (!pid && GetTickCount() - t0 < (DWORD)timeout * 1000) { for (DWORD p : PidsByName(waitExe)) if (!before.count(p)) { pid = p; break; } if (!pid) Sleep(250); }
-            if (!pid) { launchResult("{\"ok\":false,\"error\":\"%s never appeared\"}\n", JEsc(W2U(waitExe)).c_str()); break; }
-            g_launchPid = pid;
-            fprintf(stderr, "[vinput] target pid %lu\n", pid);
-        }
         HWND w = nullptr;
-        HANDLE hp = OpenProcess(SYNCHRONIZE, FALSE, pid);
-        bool exited = false;
-        while (!(w = VisibleWindowOf(pid)) && GetTickCount() - t0 < (DWORD)timeout * 1000) {
-            if (hp && WaitForSingleObject(hp, 0) == WAIT_OBJECT_0) {
-                if (waitExe.empty()) { exited = true; break; }
-                // relaunch (e.g. SteamAPI_RestartAppIfNecessary): follow the next NEW process with that name
-                before.insert(pid); CloseHandle(hp); hp = nullptr; DWORD np = 0;
-                while (!np && GetTickCount() - t0 < (DWORD)timeout * 1000) { for (DWORD p : PidsByName(waitExe)) if (!before.count(p)) { np = p; break; } if (!np) Sleep(250); }
-                if (!np) { exited = true; break; }
-                fprintf(stderr, "[vinput] pid %lu exited, following relaunched pid %lu\n", pid, np);
-                pid = np; g_launchPid = pid; hp = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        vi_launch_follow::Tree tree(rootProcess);
+        DWORD selectedPid=0,stableSince=0;unsigned long long selectedBorn=0;
+        bool ambiguous=false;
+        const auto launcherName=vi_launch_follow::Launcher(waitExe);
+        // All discovery shares one deadline. Explicit wait-exe permits a fresh
+        // Steam-relaunched sibling; ordinary launches only follow proven ancestry.
+        while(GetTickCount()-t0<(DWORD)timeout*1000){
+            auto rows=LaunchSnapshot(&tree,waitExe);processHandles.Refresh(tree);
+            if(!waitExe.empty())for(const auto& p:rows){
+                bool existed=false;for(const auto& prior:initialProcesses)if(prior.pid==p.pid&&prior.born==p.born){existed=true;break;}
+                if((!existed||followPid)&&p.born>=(followPid?rootProcess.born:LaunchStamp(launchTime))&&(vi_launch_follow::Name(p.name,waitExe)||(!launcherName.empty()&&vi_launch_follow::Name(p.name,launcherName)))){
+                    tree.Remember(p);
+                    if(!rootProcess.pid&&!launcherName.empty()&&vi_launch_follow::Name(p.name,launcherName)){rootProcess=p;tree.root=p;g_initialLaunchPid=p.pid;}
+                }
             }
-            Sleep(250);
+            tree.Observe(rows);
+            for(auto& p:rows)if(tree.Contains(p)){processHandles.Retain(p);p.window=VisibleWindowOf(p.pid)!=nullptr;}
+            auto candidates=tree.Candidates(rows,waitExe);
+            bool launcher=false;
+            if(candidates.empty()&&!launcherName.empty()) {candidates=tree.Candidates(rows,launcherName);launcher=!candidates.empty();}
+            ambiguous=candidates.size()>1;
+            if(candidates.size()==1){const auto& p=candidates[0];
+                if(selectedPid!=p.pid||selectedBorn!=p.born){selectedPid=p.pid;selectedBorn=p.born;stableSince=GetTickCount();}
+                // Give a visible stub time to spawn its child; a named final
+                // executable already expresses the caller's selection.
+                if(GetTickCount()-stableSince>=(waitExe.empty()?750u:250u)){
+                    pid=p.pid;selectedCreated=p.born;g_launchPid=pid;w=VisibleWindowOf(pid);
+                    if(w){if(rootProcess.pid&&pid!=rootProcess.pid)followedFrom=rootProcess.pid;
+                        if(launcher){launcherPid=pid;waitingFor=W2U(waitExe);}break;}
+                }
+            }else{selectedPid=0;selectedBorn=0;}
+            Sleep(100);
         }
-        if (hp) CloseHandle(hp);
-        if (exited) { launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"process exited before showing a window (a launcher or a Steam relaunch?) - use --steam APPID --wait-exe NAME.exe or --wait-exe\"}\n", pid); break; }
-        if (!w) { launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"no visible window within timeout\"}\n", pid); break; }
+        if(!w){launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"%s\",\"waiting_for_exe\":\"%s\"}",pid,ambiguous?"multiple fresh game windows matched; no process was injected":"no matching visible game window within launch timeout; existing processes were left running",JEsc(W2U(waitExe)).c_str());break;}
+        // Early injection applies only to the original suspended process.
+        earlyInjected=earlyInjected&&pid==rootProcess.pid;
         if(rejectDialog(w,earlyInjected))break;
         fprintf(stderr, "[vinput] window up after %.1f s\n", (GetTickCount() - t0) / 1000.0);
         DWORD guardMs = (DWORD)(guardSec * 1000);
@@ -957,7 +999,7 @@ static int Launch(const Args& a) {
         }
         InjectChildHandle launchTarget;launchTarget.Reset(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid));
         HANDLE injectionTarget=launchTarget.value;
-        const bool exactDialogTarget=allowDialog&&(WindowClass(w)=="#32770"||OwnedPopupWindow(w));
+        const bool exactDialogTarget=(allowDialog||launcherPid==pid)&&(WindowClass(w)=="#32770"||OwnedPopupWindow(w));
         int injectionResult = Inject(pid,dll,true,exactDialogTarget,&injectReply);
         if(injectionResult==0&&exactDialogTarget) {
             dialogInjectReply=injectReply;

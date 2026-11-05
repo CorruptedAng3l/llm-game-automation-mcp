@@ -27,6 +27,8 @@ other foreground-taking tools on your machine use, or they use `build\foreground
 | script | covers |
 |---|---|
 | `run_selftest.ps1` | every input channel on x64 / x86, injected DLL and compiled-in mode, D3D11 capture, background isolation; then every background case of `vi_suiteplan.ps1` (the scripts below and the ones in the next rows) |
+| `run_launchfollowtest.ps1` | `launch` follows a launcher's child processes to the real game window and returns interactive launchers as-is |
+| `run_di8mousetest.ps1` | DirectInput8 mouse reads are fed from vinput across distinct polling implementations |
 | `run_claimedkeybdnativetest.ps1`, `run_claimedkeybdmemory.py` | a claimed target's own `keybd_event` calls are fenced off the real keyboard, and readiness reports the guard |
 | `run_sequencewaitnativetest.ps1` | `key_sequence` wait steps through the real CLI and DLL |
 | `run_padcensusaliastest.ps1` | optional controller observers stay off when their hook alias can't be made safe |

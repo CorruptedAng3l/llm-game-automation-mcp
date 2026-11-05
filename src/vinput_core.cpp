@@ -432,6 +432,7 @@ std::mutex g_diMx;
 struct DiQueuedEvent { DWORD first,second;unsigned long long generation=0;DWORD timestamp=0,sequence=0; };
 std::deque<DiQueuedEvent> g_diKbdQ, g_diMouseQ;  // (ofs, data, mouse-button press generation)
 std::atomic<DWORD> g_diSeq{1};
+std::atomic<unsigned long long> g_diMouseMovesSincePoll{0};
 int DiPush(bool kbd, DWORD ofs, DWORD data,unsigned long long generation=0) {
     if (kbd ? C.di_data_kbd == 0 : C.di_data_mouse == 0) return 0;  // nobody reads buffered data
     std::lock_guard<std::mutex> lk(g_diMx);
@@ -579,6 +580,7 @@ AppliedMouse MouseMoveTo(LONG x, LONG y, bool relativeOrigin, LONG rdx, LONG rdy
     g_vcurX = nx; g_vcurY = ny; g_vcurTouched = true;
     ++g_pointerIssued;
     a.accounting.device_dx=dx;a.accounting.device_dy=dy;
+    if(dx||dy)++g_diMouseMovesSincePoll;
     if(AddDiDelta(g_diDX,dx))a.accounting.di_state_dx=dx;else a.accounting.di_state_rejected=true;
     if(AddDiDelta(g_diDY,dy))a.accounting.di_state_dy=dy;else a.accounting.di_state_rejected=true;
     RawReg rr = QueryRawReg();
@@ -1100,6 +1102,7 @@ HRESULT DIGetDeviceStateImpl(PFN_DIGDS orig, void* self, DWORD cb, LPVOID data) 
         }
     } else {
         C.di_mouse++;
+        g_diMouseMovesSincePoll=0;
         std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
         DIMOUSESTATE2* m = (DIMOUSESTATE2*)data;
         m->lX=ReadDiDelta(g_diDX,m->lX);m->lY=ReadDiDelta(g_diDY,m->lY);m->lZ+=g_diDZ.exchange(0);
@@ -1120,7 +1123,7 @@ HRESULT DIGetDeviceDataImpl(PFN_DIGDD orig,void* self,DWORD cbObj,LPDIDEVICEOBJE
     const int type=DevType(self);const unsigned observedType=g_padApiLastDiType;const bool mask=ReaderMask(ReaderDiBuffer);
     PadApiRecordDiRead(observedType,true);
     if(type==0||!inout)return orig(self,cbObj,rg,inout,flags);
-    if(type==1)C.di_data_kbd++;else if(type==2)C.di_data_mouse++;
+    if(type==1)C.di_data_kbd++;else if(type==2){C.di_data_mouse++;g_diMouseMovesSincePoll=0;}
     DWORD req=0;
     if(!ReaderBufferWritable(inout,sizeof(*inout))||!ReaderBufferLoad(inout,&req,sizeof(req)))return DIERR_INVALIDPARAM;
     // Invalid native requests must retain their native errors, including under fake focus.
@@ -1544,27 +1547,34 @@ void InstallDxgiHooks() {
     if (ctx) ctx->Release(); if (dev) dev->Release(); if (sc) sc->Release();
     DestroyWindow(hw); UnregisterClassW(wc.lpszClassName, wc.hInstance);
 }
+bool DiPollEntryKnown(void* target);
 #include "vi_claimed_di_hooks.inl"
+#include "vi_di_poll_hooks.inl"
 void TryHookDInput() {
     TryClaimedDi8();
     if (g_diHooked) return;
     HMODULE h = GetModuleHandleW(L"dinput8.dll"); if (!h) return;
-    g_diHooked = true;
     using PFN_DI8C = HRESULT(WINAPI*)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
     PFN_DI8C create = (PFN_DI8C)GetProcAddress(h, "DirectInput8Create");
     if (!create) { g_hooksFail += "dinput8(no DirectInput8Create) "; return; }
-    IDirectInput8W* di = nullptr;
-    if (FAILED(create(GetModuleHandleW(nullptr), DIRECTINPUT_VERSION, IID_IDirectInput8W, (void**)&di, nullptr)) || !di) { g_hooksFail += "dinput8(create failed) "; return; }
-    IDirectInputDevice8W* dev = nullptr;
-    if (SUCCEEDED(di->CreateDevice(GUID_SysKeyboard, &dev, nullptr)) && dev) {
-        void** vt = *(void***)dev;
-        ClaimDiHookKnownAcquire("IDirectInputDevice8::Acquire", vt[7], (void*)&h_DIAcquire, &o_DIAcquire);
-        HookAddr("IDirectInputDevice8::GetDeviceState", vt[9], (void*)&h_DIGetDeviceState, (void**)&o_DIGetDeviceState);
-        HookAddr("IDirectInputDevice8::GetDeviceData", vt[10], (void*)&h_DIGetDeviceData_entry, (void**)&o_DIGetDeviceData);
-        dev->Release();
+    for(unsigned wide=0;wide<2;++wide){
+        void* owner=nullptr;
+        if(FAILED(create(GetModuleHandleW(nullptr),DIRECTINPUT_VERSION,wide?IID_IDirectInput8W:IID_IDirectInput8A,&owner,nullptr))||!owner)continue;
+        for(unsigned mouse=0;mouse<2;++mouse){
+            void* device=nullptr;
+            const auto result=((PFN_ClaimDiCreateDevice)(*(void***)owner)[3])(owner,mouse?GUID_SysMouse:GUID_SysKeyboard,&device,nullptr);
+            if(SUCCEEDED(result)&&device){
+                void** table=*(void***)device;
+                const bool acquire=ClaimDiInstallEntry(table[7],false),coop=ClaimDiInstallEntry(table[13],true);
+                const bool state=DiPollInstall(table[9],false),buffer=DiPollInstall(table[10],true);
+                if(acquire&&coop&&state&&buffer)g_di8ProbeRoles.fetch_or(1u<<(wide*2+mouse));
+                ClaimDiReleaseBorrowed(device);
+            }
+        }
+        ClaimDiReleaseBorrowed(owner);
     }
-    di->Release();
-    Log("dinput8 hooks installed");
+    g_diHooked=g_di8ProbeRoles==15;
+    Log("dinput8 keyboard/mouse A/W poll coverage: %u/15",g_di8ProbeRoles.load());
 }
 // Legacy dinput.dll (DirectInputCreateA, DirectInput 1-7: Fallout, many 1990s games). Its devices have their own vtable,
 // so dinput8 hooks never see them. Keyboard and mouse may share implementation functions: each distinct one is hooked once.
@@ -2025,6 +2035,13 @@ std::string StatusJson() {
     EdgeFields(o);o.raw("input_precision","{\"edge_guard\":true,\"release_poll\":true,\"placement_drag\":true}");
     o.raw("self_raw",SelfRawStatusJson());
     o.num("relative_accounting_version",1);o.str("di_pending_dx",std::to_string(g_diDX.load()));o.str("di_pending_dy",std::to_string(g_diDY.load()));o.num("raw_unread_overwrites",(double)g_rawRingOverwrites.load());
+    {JOut mouse;const bool state=C.di_mouse>0,buffer=C.di_data_mouse>0;
+    mouse.str("poll_channel",state?(buffer?"state_and_buffer":"GetDeviceState"):(buffer?"GetDeviceData":"none"));
+    mouse.num("state_polls",C.di_mouse);mouse.num("buffer_polls",C.di_data_mouse);mouse.num("di8_probe_roles",g_di8ProbeRoles);
+    mouse.num("poll_hook_failures",(double)g_diPollHookFailures.load());mouse.num("moves_since_poll",(double)g_diMouseMovesSincePoll.load());
+    mouse.bol("mouse_poll_unobserved",g_diMouseMovesSincePoll>=3);
+    if(g_diMouseMovesSincePoll>=3)mouse.str("warning","mouse has not polled DirectInput since at least three moves; queued input does not establish game consumption");
+    o.raw("directinput_mouse",mouse.done());}
     RawReg rr = QueryRawReg();
     o.bol("raw_kbd", rr.kbd); o.bol("raw_kbd_nolegacy", rr.kbdNoLegacy); o.bol("raw_mouse", rr.mouse); o.bol("raw_mouse_nolegacy", rr.mouseNoLegacy);
     {JOut raw;raw.bol("query_ok",rr.queryOk);raw.num("query_error",rr.queryError);raw.num("count",rr.count);char k[32],m[32];sprintf_s(k,"0x%llX",(unsigned long long)(ULONG_PTR)rr.kbdTarget);sprintf_s(m,"0x%llX",(unsigned long long)(ULONG_PTR)rr.mouseTarget);raw.str("keyboard_target",k);raw.str("mouse_target",m);raw.bol("keyboard_target_owned",RawOwnTarget(rr.kbdTarget));raw.bol("mouse_target_owned",RawOwnTarget(rr.mouseTarget));char fallback[32];sprintf_s(fallback,"0x%llX",(unsigned long long)(ULONG_PTR)g_hwnd);raw.str("fallback_target",fallback);raw.bol("fallback_target_owned",RawOwnTarget(g_hwnd));unsigned long long last=g_rawLastRegistrationResult;raw.bol("last_registration_observed",(last&(1ULL<<63))!=0);raw.bol("last_registration_ok",(last&(1ULL<<32))!=0);raw.num("last_registration_error",(DWORD)last);o.raw("raw_registration",raw.done());}
