@@ -33,7 +33,7 @@ import { loadedLaunchFailure } from "./launchstate.js";
 import { launcherFollowAction } from "./launcherfollow.js";
 import { prepareSequenceConditions, guardSequence, type PreparedConditions } from "./sequenceconditions.js";
 
-const VERSION = "0.2.7";
+const VERSION = "0.2.8";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -998,8 +998,9 @@ tool("drag", "Drag",
       "messages); plain drag works there. The reply's evidence shows "+
       "what was observed; it is still not proof the game placed the item."),
     poll_timeout_ms: z.number().int().min(1).max(5000).optional().describe("placement: how long to wait for each read (default 1000)."),
-    ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema, ...mouseModifiers },
+    ...coordArgs, ...edgeArgs, ...parkArg, ...actionCaptureArgs, ...mouseModifiers },
   async (a) => {
+    const captureError=actionCaptureError(a);if(captureError)return fail(captureError);const observation=actionObservation(a);
     if(a.modifier_hold_ms!==undefined&&!a.modifiers?.length)return fail('modifier_hold_ms requires nonempty modifiers; no input was sent');
     const m = await mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
     if ("error" in m) return fail(m.error);
@@ -1021,7 +1022,7 @@ tool("drag", "Drag",
         const parked = a.park_cursor && ok ? await parkCursor(a.pid) : undefined;
         const evidence = inputEvidence(pr.json);
         return look(a.pid, reply(pr, { placement: true, steps: Math.min(128, steps), ms, hold_start_ms: holdStart, hold_end_ms: holdEnd,
-          ...(evidence ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after);
+          ...(evidence ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after,observation);
       }
       placementFallback = notSeen
         ? `${notSeen}: this game does not read mouse buttons through DirectInput (Unity-style window messages), so the placement drag could not confirm the press; used the plain press / move / release drag instead`
@@ -1043,20 +1044,21 @@ tool("drag", "Drag",
     return look(a.pid, reply({ ok, exitCode: ok ? 0 : 1, stderr: [mv.stderr, up.stderr].filter(Boolean).join("\n"), timedOut: false, argv: [],
       json: { ok, steps, ms, hold_start_ms: holdStart, hold_end_ms: holdEnd, down: down.json, move: mv.json, up: up.json,
         ...(ok ? {} : { error: !mv.ok ? `drag: move failed (the button was released): ${JSON.stringify((mv.json as { error?: string }).error ?? mv.json)}` : "drag: mouse up failed" }) } },
-      { ...(placementFallback ? { placement_fallback: placementFallback } : {}), ...(Object.keys(evidence).length ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after);
+      { ...(placementFallback ? { placement_fallback: placementFallback } : {}), ...(Object.keys(evidence).length ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after,observation);
     },runVinput,at,a.modifier_hold_ms);
   });
 
 tool("scroll", "Scroll the mouse wheel",
   "Scroll N wheel notches (positive = up / away, negative = down) at the virtual cursor, after moving it to x,y if given.",
   { pid, notches: z.number().int().min(-100).max(100), x: z.number().optional(), y: z.number().optional(),
-    horizontal: z.boolean().optional(), ...edgeArgs, ...mouseModifiers },
+    horizontal: z.boolean().optional(), ...edgeArgs, ...actionCaptureArgs, ...mouseModifiers },
   async (a) => {
+    const captureError=actionCaptureError(a);if(captureError)return fail(captureError);const observation=actionObservation(a);
     if(a.modifier_hold_ms!==undefined&&!a.modifiers?.length)return fail('modifier_hold_ms requires nonempty modifiers; no input was sent');
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     const pos = a.x === undefined ? [] : [String(a.x), String(a.y)];
     const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "scroll position", x: a.x, y: a.y as number }], a.edge_margin);
-    return withMouseModifiers(a.pid,a.modifiers,async()=>reply(await runVinput([...at(a.pid), "scroll", String(a.notches), ...pos, ...opt("--horizontal", a.horizontal)], 60000), warnings.length ? { warnings } : undefined),runVinput,at,a.modifier_hold_ms);
+    return withMouseModifiers(a.pid,a.modifiers,async()=>look(a.pid,reply(await runVinput([...at(a.pid), "scroll", String(a.notches), ...pos, ...opt("--horizontal", a.horizontal)], 60000), warnings.length ? { warnings } : undefined),a.capture_after,observation),runVinput,at,a.modifier_hold_ms);
   });
 
 // ---------------------------------------------------------------- keyboard / pad
@@ -1346,7 +1348,7 @@ const seqStep = z.object({
   key: keyCombo.optional().describe("Key or chord (hold / key only), e.g. 'w' or 'w+space'."),
   ms: z.number().int().min(1).max(118000),
 }).strict();
-const seqCondition = z.object({kind:z.enum(['frame_change','region_change','text']),region:regionRect.optional(),text:z.string().min(1).max(512).optional(),exact:z.boolean().optional(),
+const seqCondition = z.object({kind:z.enum(['frame_change','region_change','text','image']),region:regionRect.optional(),text:z.string().min(1).max(512).optional(),exact:z.boolean().optional(),fuzzy:z.number().min(.01).max(1).optional(),template:z.string().min(1).max(32768).optional(),threshold:z.number().min(.01).max(1).optional(),grace_ms:z.number().int().min(0).max(30000).optional(),
   timeout_ms:z.number().int().min(100).max(60000).optional(),poll_ms:z.number().int().min(20).max(1000).optional()}).strict();
 tool("key_sequence", "Run a keyboard sequence",
   "Run a validated keyboard sequence as ONE background job inside the game: each step presses a key or chord for ms (hold / key) " +
@@ -1356,7 +1358,7 @@ tool("key_sequence", "Run a keyboard sequence",
   { pid, steps: z.array(seqStep).min(1).max(1024).optional(),
     schedule: z.object({at_ms:z.array(z.number().int().min(0).max(118000)).min(1).max(1024),key:keyCombo,hold_ms:z.number().int().min(1).max(118000).optional()}).strict().optional(), replace: replaceArg, ...actionCaptureArgs,
     start_on:seqCondition.optional().describe('Bounded scoped capture/OCR event before admission; frame/region compares against first observation, text matches visible normalized text. Default timeout10000ms. No audio onset or exact game-event alignment.'),
-    abort_on:seqCondition.omit({timeout_ms:true}).optional().describe('Requires wait:true. Stop the exact job on a scoped hash change or matching text. Polling may miss short events; native observer expiry bounds cleanup after disconnect.'),
+    abort_on:seqCondition.omit({timeout_ms:true}).optional().describe('Requires wait:true. Stop the exact job on a scoped hash change, text (optional fuzzy score), or PNG template. Prefer a small region and image/hash for faster observation without OCR. grace_ms arms after the native job starts and rebaselines hash changes after grace. The matched frame is retained when supported. Polling latency and native observer expiry remain bounded, not hard real-time.'),
     progress_check:z.object({region:regionRect.optional(),max_unchanged_ms:z.number().int().min(100).max(20000)}).strict().optional().describe('Requires wait:true. Stop if the selected frame/region hash remains unchanged; choose a meaningful region. This does not establish gameplay success.'),
     max_lateness_ms:z.number().int().min(1).max(5000).optional().describe('Abort the entire native sequence before an overdue key edge exceeds this bound. start_on defaults1000ms. No input edge is silently skipped or replayed.'),
     wait: z.boolean().optional().describe("Wait for this exact generation-bound native sequence job. Default false; does not replay input or prove game consumption."),
@@ -1405,7 +1407,9 @@ tool("key_sequence", "Run a keyboard sequence",
       let observed: CliResult;
       try { observed = guarded&&conditions?await guardSequence(r,context,conditions,a.wait_timeout_ms):await waitSequence(r, context, a.wait_timeout_ms); }
       catch (error) { observed = sequenceWaitError(r, "observation_error", `sequence observation failed; no input was retried: ${String(error)}`, 0, a.wait_timeout_ms); }
-      return look(a.pid, reply(observed,startExtra), a.capture_after,
+      const out=reply(observed,startExtra),matchedPath=(observed.json as {sequence_guard?:{matched_frame_path?:unknown}}|undefined)?.sequence_guard?.matched_frame_path;
+      if(typeof matchedPath==='string')try{const info=statSync(matchedPath);if(info.size<=MAX_IMAGE_BYTES)out.content.push({type:'text',text:'Matched sequence abort observation frame:'},{type:'image',data:readFileSync(matchedPath).toString('base64'),mimeType:'image/png'});else out.content.push({type:'text',text:`Matched observation frame saved at ${matchedPath}; attachment exceeds image limit.`});}catch(e){out.content.push({type:'text',text:`Matched observation frame could not be attached: ${String(e)}`});}
+      return look(a.pid, out, a.capture_after,
         { ...observation, action_state: "native_sequence_completed_game_consumption_unmeasured" });
     } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
   });

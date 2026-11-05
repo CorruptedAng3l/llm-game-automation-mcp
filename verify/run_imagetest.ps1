@@ -11,6 +11,8 @@ try {
   $m = $r.matches[0]
   Require ($r.ok -and $r.match_count -eq 1 -and [math]::Abs($m.box[0] - 600) -le 2 -and [math]::Abs($m.box[1] - 110) -le 2 -and $m.score -gt 0.95) 'find-image finds the icon at its exact position with score > 0.95'
   Require ([math]::Abs($m.scale - 1.0) -lt 0.001) 'same-size match reports scale 1'
+  $observed=Vi $a.Pid @('find-image',"$Out\icon.png",'--no-scale','--preserve-map','--observation-only=true','--observation-capture',"$Out\matched_template_frame.png")
+  Require ($observed.ok-and$observed.observation_frame_path-eq"$Out\matched_template_frame.png"-and$observed.capture_space_preserved-and(Test-Path -LiteralPath $observed.observation_frame_path)) 'template match retains the exact observed native frame without another capture or click'
   $r = Vi $a.Pid @('click-image', "$Out\icon.png")
   $clicks = Get-Clicks $a
   Require ($r.ok -and $r.clicked -and $clicks.Count -eq 1 -and $clicks[0].Name -eq 'ICON' -and (In-Rect $clicks[0].X $clicks[0].Y 600 110 664 174)) 'click-image clicks the icon (target logged ICON)'

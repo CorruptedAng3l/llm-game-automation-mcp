@@ -24,12 +24,14 @@ struct InputJob {
  unsigned long long generation[257]={};unsigned transitions=0,updates=0,skipped=0;ULONGLONG maxLate=0;long firstFrame=0,lastFrame=0;ULONGLONG lastApply=0;
  CaptureScope captureScope;bool captureBound=false;std::uint64_t admissionDeadlineQpc=0;
  vi_input_reads::State readObservation;
+ vi_sequence_edges::Trace sequenceEdges;
  PointerPath pointerPath;POINT pointerStart{},pointerEnd{},expected{};int pointerSteps=0,consumed=0,buttonIndex=0;
  unsigned long long motionToken=0,pressToken=0,releaseToken=0;ULONGLONG phaseAt=0,pressedAt=0,releasedAt=0,finalAt=0,pollCap=1000,dwell=200,stepMs=0;
  bool downSeen=false,upSeen=false,finalSeen=false,finalBeforeRelease=false,edgeContact=false,positionSeen=false;int pointerReader=0;
  HANDLE completion=nullptr;~InputJob(){if(completion)CloseHandle(completion);}
 };
 void JobRunSequence(InputJob&,ULONGLONG);
+void JobSequenceRecordEdge(InputJob& job,int vk,bool down,std::uint64_t qpc){vi_sequence_edges::Record(job.sequenceEdges,(unsigned)job.sequenceStep,job.sequence[job.sequenceStep].line,(unsigned)vk,down,qpc,CompletedPresentAt(job.target,qpc));}
 void JobRunStaggeredTimeline(InputJob&,ULONGLONG);
 void JobTimelinePublish(InputJob&,WORD,int,const int*,ULONGLONG);
 void JobTimelineRecord(InputJob&,size_t,ULONGLONG,bool);
@@ -187,6 +189,9 @@ std::string JobReplyLocked(const InputJob& job,bool accepted=false,bool details=
   if(job.eventAnchor&&job.qpcFirst)out.num("observed_to_first_apply_ms",vi_qpc::DeltaMs(job.qpcFirst,job.qpcAnchor,job.qpcFrequency));else out.raw("observed_to_first_apply_ms","null");
   out.bol("deadline_anchored",true);out.bol("sequence_lateness_measured",job.qpcLast!=0);if(job.qpcLast)out.num("sequence_max_lateness_ms",vi_qpc::DeltaMs(job.qpcMaxLate,0,job.qpcFrequency));else out.raw("sequence_max_lateness_ms","null");
   out.num("sequence_guard_version",1);out.bol("observer_guarded",job.sequenceGuard.Enabled());out.num("observer_guard_ms",(double)job.sequenceGuard.interval);out.num("guard_observation_seq",(double)job.sequenceGuard.serial);out.str("observer_qpc_ticks",std::to_string(job.observerQpc));
+  out.num("sequence_edge_trace_version",1);out.num("sequence_edge_count",(double)job.sequenceEdges.edges.size());out.num("sequence_edges_dropped",(double)job.sequenceEdges.dropped);out.bol("sequence_edge_trace_complete",job.sequenceEdges.dropped==0);out.str("finished_qpc_ticks",std::to_string(job.qpcFinished));
+  out.str("sequence_edge_scope","QPC sampled after each scheduled KeyEvent return; completed_present_index is the latest confirmed successful DXGI/D3D9 return for that live window at or before that QPC, null if unavailable; neither application consumption nor display scanout is measured; cleanup releases are outside this scheduled-edge trace");
+  if(details){std::string edges="[";for(const auto& e:job.sequenceEdges.edges){if(edges.size()>1)edges+=",";JOut edge;edge.num("step_index",e.step);edge.num("script_line",e.line);edge.num("vk",e.vk);edge.bol("down",e.down);edge.str("qpc_ticks",std::to_string(e.qpc));if(e.present)edge.str("completed_present_index",std::to_string(e.present));else edge.raw("completed_present_index","null");edges+=edge.done();}out.raw("sequence_edges",edges+"]");}
   if(job.qpcAnchor&&job.done&&job.state=="completed")out.num("cumulative_drift_ms",vi_qpc::DeltaMs(job.qpcFinished,job.qpcAnchor+vi_qpc::Milliseconds(job.duration,job.qpcFrequency),job.qpcFrequency));else if(job.qpcLast)out.num("cumulative_drift_ms",vi_qpc::DeltaMs(job.qpcLast,job.qpcLastDeadline,job.qpcFrequency));else out.raw("cumulative_drift_ms","null");
  }
  if(job.kind==InputJob::Placement){static const char* phases[]={"prepare","hover_poll","press_poll","move","step_poll","dwell","release_poll","complete"};out.str("placement_phase",phases[(std::min)(7,job.phase)]);out.num("steps",job.pointerSteps);out.num("steps_consumed",job.consumed);out.num("position_generation",(double)job.motionToken);out.bol("position_poll_confirmed",job.positionSeen);out.str("position_poll_channel",job.pointerReader==2?"GetPhysicalCursorPos":job.pointerReader==1?"GetCursorPos":"none");out.bol("di_poll_confirmed",job.downSeen);out.bol("di_release_confirmed",job.upSeen);out.bol("di_press_release_confirmed",job.downSeen&&job.upSeen);out.bol("final_position_seen",job.finalSeen);out.bol("final_position_before_release",job.finalBeforeRelease);out.num("dwell_ms",(double)job.dwell);out.num("final_seen_ms",job.finalAt?(double)(job.finalAt-job.start):0);out.num("release_ms",job.releasedAt?(double)(job.releasedAt-job.start):0);out.num("button_hold_ms",job.pressedAt?(double)((job.releasedAt?job.releasedAt:job.done?job.finished:HousekeepingNow())-job.pressedAt):0);out.bol("button_released",!g_vk[job.keys[0]]);out.num("x",job.expected.x);out.num("y",job.expected.y);EdgeFields(out,&job.pointerPath);out.bol("path_edge_contact",job.edgeContact);}

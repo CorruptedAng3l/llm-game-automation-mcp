@@ -70,8 +70,12 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'motion_metrics' 'run_motionmetricstest.ps1'
  New-VinputSuiteCase 'motion_helpers' 'run_mcpcontracttest.ps1' @{Test='motion_helpers'}
  New-VinputSuiteCase 'delta_cursor' 'run_deltacursortest.ps1'
+ New-VinputSuiteCase 'drag_scroll_capture' 'run_mcpcontracttest.ps1' @{Test='drag_scroll_capture'}
+ New-VinputSuiteCase 'batch_capture_receipts' 'run_mcpcontracttest.ps1' @{Test='agent_loops_model'}
  New-VinputSuiteCase 'visual_capture_build' 'run_visualcapturebuildtest.ps1'
  New-VinputSuiteCase 'sequence_guard_memory' 'run_sequenceguardmemory.ps1'
+ New-VinputSuiteCase 'sequence_condition_observer' 'run_mcpcontracttest.ps1' @{Test='sequence_conditions'}
+ New-VinputSuiteCase 'condition_text' 'run_mcpcontracttest.ps1' @{Test='condition_text'}
  New-VinputSuiteCase 'startup_activation' 'run_startupactivationtest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'xinput' 'run_xinputtest.ps1'
  New-VinputSuiteCase 'pad_readiness' 'run_padreadinessnativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}

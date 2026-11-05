@@ -16,12 +16,15 @@ static BOOL WINAPI ModelFrequency(LARGE_INTEGER* n){n->QuadPart=1000;return TRUE
 #undef QueryPerformanceCounter
 #undef QueryPerformanceFrequency
 #include "../src/vi_key_sequence.h"
+#include "../src/vi_sequence_edges.h"
 struct InputJob{
  std::vector<vi_key_sequence::Step> sequence;size_t sequenceStep=0;int index=0,phase=0;unsigned transitions=0;bool done=false;
  ULONGLONG next=0,maxLate=0,duration=0;std::uint64_t qpcFrequency=1000,qpcAnchor=0,qpcNext=0,qpcLast=0,qpcLastDeadline=0,qpcMaxLate=0,qpcFinished=0;
  std::uint64_t qpcNativeStart=0,qpcFirst=0;unsigned latenessLimit=0;
  std::string state,reason;
+ vi_sequence_edges::Trace sequenceEdges;
 };
+static void JobSequenceRecordEdge(InputJob& job,int vk,bool down,std::uint64_t qpc){vi_sequence_edges::Record(job.sequenceEdges,(unsigned)job.sequenceStep,job.sequence[job.sequenceStep].line,(unsigned)vk,down,qpc,clockTick/16);}
 struct Edge{int key;bool down;std::uint64_t at;};static std::vector<Edge> edges;
 static void KeyEvent(int key,bool down){edges.push_back({key,down,clockTick});}
 static void JobFinish(InputJob& job,const char* state,const char* reason){job.done=true;job.state=state;job.reason=reason;job.qpcFinished=clockTick;}
@@ -39,6 +42,7 @@ int main(){
  auto job=Run(script,7);
  Check(job.done&&job.state=="completed"&&edges.size()==2,"fifty waits and one tap complete through actual scheduler");
  Check(edges.size()==2&&edges[0].down&&!edges[1].down&&edges[0].key==VK_SPACE,"exact expected input edge order");
+ Check(job.sequenceEdges.edges.size()==2&&job.sequenceEdges.edges[0].qpc==edges[0].at&&job.sequenceEdges.edges[0].present==edges[0].at/16&&job.sequenceEdges.edges[0].step==50&&job.sequenceEdges.edges[0].vk==VK_SPACE&&job.sequenceEdges.edges[0].down,"per-edge trace retains actual scheduled press QPC, frame witness and step index");
  Check(edges.size()==2&&edges[0].at-first>=500&&edges[0].at-first<=507,"wait overshoot never accumulates into press deadline");
  Check(job.qpcFinished-first>=580&&job.qpcFinished-first<=594,"completion drift stays within two poll quanta");
  Check(job.qpcAnchor==first&&job.qpcLastDeadline==first+580&&job.qpcLast>=job.qpcLastDeadline,"receipt preserves original anchor and final declared deadline");
@@ -59,5 +63,7 @@ int main(){
  Check(job.done&&job.qpcAnchor==500000&&job.qpcFirst==500050&&edges.size()==2,"event-based deadlines and first-apply receipt retain observed QPC timeline");
  job={};job.sequence=plan.steps;job.duration=plan.duration;job.qpcAnchor=600000;job.qpcNext=600050;job.latenessLimit=10;clockTick=600061;edges.clear();JobRunSequence(job,clockTick);
  Check(job.done&&job.state=="cancelled"&&job.reason=="sequence_max_lateness_exceeded"&&edges.empty(),"overdue edge aborts the whole sequence explicitly before any press");
+ vi_sequence_edges::Trace limited;for(unsigned n=0;n<vi_sequence_edges::Limit+2;n++)vi_sequence_edges::Record(limited,n,1,VK_SPACE,true,n,0);
+ Check(limited.edges.size()==vi_sequence_edges::Limit&&limited.dropped==2,"edge telemetry has a finite cap with exact dropped count");
  printf("sequence deadline model: %u PASS / %u FAIL\n",passed,failed);return failed?1:0;
 }

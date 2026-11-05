@@ -43,6 +43,12 @@ void EndPresentedWindow(const vi_present_window::Proof& before,unsigned api,HRES
   ++g_presentWindowRejected;return;
  }
  found->second.observed=now;found->second.api=api;
+ if(found->second.completed!=(std::numeric_limits<std::uint64_t>::max)())++found->second.completed;found->second.completedQpc=vi_qpc::Now();
+}
+std::uint64_t CompletedPresentAt(HWND window,std::uint64_t edgeQpc){
+ if(!window)return 0;std::lock_guard<std::mutex> lock(g_presentWindowMx);auto found=g_presentWindows.find(window);
+ if(found==g_presentWindows.end())return 0;const auto& e=found->second;
+ return !e.quarantined&&e.proof.cookie==(ULONG_PTR)GetPropW(window,kPresentWindowLifetime)&&e.completedQpc&&e.completedQpc<=edgeQpc&&e.completed!=(std::numeric_limits<std::uint64_t>::max)()?e.completed:0;
 }
 struct PresentWindowSelection {vi_present_window::Selection selected;vi_present_window::Evidence evidence;std::vector<vi_present_window::Evidence> listed;};
 PresentWindowSelection HiddenPresentedWindow(){

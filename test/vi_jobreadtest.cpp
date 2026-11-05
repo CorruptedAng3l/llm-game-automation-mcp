@@ -53,5 +53,7 @@ int main(){
  ChannelTrace concurrent;concurrent.writing=1;long long count=0,down=0;Check(!concurrent.snapshot(count,down),"busy reader snapshot is bounded and unavailable");concurrent.writing=0;
  std::thread producer([&](){for(unsigned n=0;n<10000;++n)concurrent.record(0x80);});bool coherent=true;for(unsigned n=0;n<1000;++n)if(concurrent.snapshot(count,down)&&count!=down)coherent=false;producer.join();Check(coherent&&concurrent.snapshot(count,down)&&count==10000&&down==10000,"concurrent snapshots retain paired actual reader counts");
  Check(vi_launch_terminal::Verify()&&!g_hwnd&&!g_jobWorker,"terminal writers retained; no product window or worker created");
+ InputJob traced;traced.kind=InputJob::Sequence;vi_key_sequence::Step edgeStep;edgeStep.line=7;traced.sequence.push_back(edgeStep);const auto edgeQpc=vi_qpc::Now();JobSequenceRecordEdge(traced,'W',true,edgeQpc);const auto edgeReply=JobReplyLocked(traced);
+ Check(traced.sequenceEdges.edges.size()==1&&traced.sequenceEdges.edges[0].qpc==edgeQpc&&edgeReply.find("\"script_line\":7,\"vk\":87,\"down\":true")!=std::string::npos&&edgeReply.find("\"completed_present_index\":null")!=std::string::npos,"actual native edge receipt retains exact QPC/line/key and leaves absent presentation evidence null");
  printf("job reader observation: %u PASS / %u FAIL\n",passed,failed);return failed?1:0;
 }

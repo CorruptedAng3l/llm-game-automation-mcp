@@ -45,7 +45,7 @@ static Reply CmdImage(DWORD pid, const Args& a, int mode) {
         std::string list = "[";
         for (size_t i = 0; i < m.size() && i < 20; ++i) list += (i ? "," : "") + ImageHitJson(f, m[i], (int)i + 1);
         list += "]";
-        if (mode == 2) return {!m.empty(), std::string("{\"ok\":") + (m.empty() ? "false" : "true") + ",\"match_count\":" + std::to_string(m.size()) + ",\"matches\":" + list + ",\"threshold\":" + Num(q.opt.threshold) + "," + stats +
+        if (mode == 2) return {!m.empty(), std::string("{\"ok\":") + (m.empty() ? "false" : "true") + ",\"match_count\":" + std::to_string(m.size()) + ",\"matches\":" + list + ",\"threshold\":" + Num(q.opt.threshold) + "," + stats + (!m.empty()?ObservationImageFields(f,a):std::string())+
             (m.empty() ? ",\"error\":\"template not found at the threshold\"" : "") + "}"};
         if (mode == 0) {
             if (!m.empty()) {

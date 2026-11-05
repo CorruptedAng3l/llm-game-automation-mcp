@@ -27,6 +27,12 @@ foreach($arch in @('','32')){
    Check ($rawHash.ok -and $rawHash.hash -eq $plain.hash) "capture$arch default PNG and untransformed frame-hash retain source hash semantics"
    $motionHash=& $v --json --pid $gamePid json '{"cmd":"frame-hash","motion_sample":true}'|ConvertFrom-Json;$proofs.Add($motionHash)
    Check ($motionHash.ok-and$motionHash.motion_sample_version-eq1-and$motionHash.motion_sample_w-eq16-and$motionHash.motion_sample_h-eq16-and$motionHash.motion_sample_rgb-match'^[0-9A-F]{1536}$'-and$motionHash.capture_space_updated-eq$false-and$motionHash.hash-eq$rawHash.hash) "capture$arch optional native motion grid preserves original hash and coordinate map semantics"
+   $keptPath=Join-Path $dir 'matched_hash_frame.png';$kept=& $v --json --pid $gamePid json (@{cmd='frame-hash';path=$keptPath;retain_changed_from='0000000000000000'}|ConvertTo-Json -Compress)|ConvertFrom-Json;$proofs.Add($kept)
+   Check ($kept.ok-and$kept.observation_frame_saved-and$kept.observation_frame_path-eq$keptPath-and$kept.hash-eq$rawHash.hash-and(ImageInfo $keptPath).w-eq800) "capture$arch changed hash saves the exact observed pixels with its original hash/QPC receipt"
+   $noFrame=Join-Path $dir ('unchanged_'+[guid]::NewGuid().ToString('N')+'.png');$unchanged=& $v --json --pid $gamePid json (@{cmd='frame-hash';path=$noFrame;retain_changed_from=$rawHash.hash}|ConvertTo-Json -Compress)|ConvertFrom-Json;$proofs.Add($unchanged)
+   Check ($unchanged.ok-and-not$unchanged.observation_frame_saved-and-not(Test-Path -LiteralPath $noFrame)) "capture$arch unchanged hash never writes a matched-frame artifact"
+   $ocrPath=Join-Path $dir 'observed_ocr_frame.png';$ocrFrame=& $v --json --pid $gamePid ocr --lines-only --observation-only=true --observation-capture $ocrPath|ConvertFrom-Json;$proofs.Add($ocrFrame)
+   Check ($ocrFrame.ok-and$ocrFrame.observation_frame_path-eq$ocrPath-and$ocrFrame.capture_space_updated-eq$false-and(ImageInfo $ocrPath).w-eq800) "capture$arch OCR retains its observed image without recapturing or changing the coordinate map"
    $print=& $v --json --pid $gamePid capture "$dir\printwindow.png" --method printwindow --scale 0.5|ConvertFrom-Json
    Check ($print.ok -and $print.method -eq 'printwindow' -and $print.w -eq 400 -and (ImageInfo "$dir\printwindow.png").h -eq 225) "capture$arch optional transform also works after PrintWindow readback"
   }

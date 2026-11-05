@@ -43,7 +43,7 @@ async function status(ctx:LoopContext,s:Session,button:number,ownHold=false){
  if(!ownHold&&j.virtual_down.includes(button))throw new Error('mouse_button_already_held');return j;
 }
 async function idleJobs(ctx:LoopContext,s:Session){const r=await ctx.run([...ctx.at(s.pid),'jobs'],budget(ctx,s));check(ctx,s);const j=obj(r.json);if(!r.ok||!Array.isArray(j?.jobs)||j.jobs.some(v=>obj(v)?.job_complete!==true))throw new NativeFailure('other_input_job_active_or_unknown',r.json);}
-async function finish(ctx:LoopContext,a:Options,out:Reply,s:Session){try{return await ctx.finish(a.pid,out,a,s.epoch);}catch(e){const original=JSON.parse((out.content[0] as {text:string}).text);return reply({...original,ok:false,post_capture_error:String(e)});}finally{sessions.delete(a.pid);}}
+async function finish(ctx:LoopContext,a:Options,out:Reply,s:Session){try{return await ctx.finish(a.pid,out,a,s.epoch);}catch(e){const original=JSON.parse((out.content[0] as {text:string}).text);return reply({...original,input_ok:original.ok===true,capture_after_ok:false,capture_after_error:String(e),post_capture_error:String(e),capture_after_warning:'Input receipts are retained. The observation failed after input; do not repeat any point because of this capture error.'});}finally{sessions.delete(a.pid);}}
 const nativeFields=(s:Session)=>({expected_capture_scope:s.scope,admit_before_qpc_ticks:s.nativeDeadline,admit_qpc_frequency:s.frequency});
 const qualified=(ctx:LoopContext,r:CliResult)=>ctx.qualifyInput?.(r)??r;
 async function points(ctx:LoopContext,s:Session,a:Options,input:Point[]):Promise<Point[]>{

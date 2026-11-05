@@ -1,0 +1,12 @@
+import {conditionTextMatch} from '../build/conditiontext.js';
+import {makeChecker} from './lib.mjs';
+const {check,state}=makeChecker();
+check(conditionTextMatch('Game Comp(ete','Complete',false,.8),'one OCR substitution can match the fail phrase fuzzily');
+check(!conditionTextMatch('Game Comp(ete','Complete',false,.95),'stricter fuzzy threshold rejects the same corruption');
+check(conditionTextMatch('  READY\n to GO  ','ready to go',true),'NFKC and whitespace normalization preserve exact full-string matching');
+check(!conditionTextMatch('not complete','complete',true),'exact mode cannot borrow a matching substring');
+check(conditionTextMatch('Save & Quit','save and quit',true),'ampersand and spelled conjunction normalize consistently');
+check(!conditionTextMatch('ready','complete',false,.8),'unrelated text does not become a fuzzy match');
+check(!conditionTextMatch('anything','',false,.8),'empty normalized condition never matches');
+let threw=false;try{conditionTextMatch('x'.repeat(20000),'complete',false,.8)}catch{threw=true}check(threw,'oversized fuzzy observations refuse instead of silently clipping text');
+console.log(`condition text: ${state.passes} PASS / ${state.failures} FAIL`);process.exitCode=state.failures?1:0;

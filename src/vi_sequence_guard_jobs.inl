@@ -7,7 +7,7 @@ std::string SequenceObserve(const JObj& request){
  if(job->owner.empty()||job->owner!=JStr(request,"owner"))return ErrJ("sequence observer owner mismatch; no input was changed");
  double serial;if(!JobNumber(request,"observation_seq",0,1,1000000000,serial)||serial!=std::floor(serial)||!JHas(request,"abort")||request.find("abort")->second.t!=3)return ErrJ("sequence observation needs integer serial and boolean abort; no input was changed");
  const bool abort=JBool(request,"abort",false);const auto reason=JStr(request,"reason");
- if(abort&&reason!="frame_change"&&reason!="region_change"&&reason!="text"&&reason!="progress_stalled"&&reason!="observer_error")return ErrJ("unknown sequence abort reason; no input was changed");
+ if(abort&&reason!="frame_change"&&reason!="region_change"&&reason!="text"&&reason!="image"&&reason!="progress_stalled"&&reason!="observer_error")return ErrJ("unknown sequence abort reason; no input was changed");
  bool renewed=false;
  if(!job->done){const auto now=HousekeepingNow();
   if(job->claimEpoch!=g_jobClaimEpoch||(job->claimed&&now>=g_jobClaimExpiry))JobFinish(*job,"cancelled","claim_expired_or_changed");

@@ -11,6 +11,7 @@
 #include <string>
 #include <cstdio>
 #include "../src/vi_present_window.h"
+#include "../src/vi_qpc.h"
 struct Window {DWORD pid=77,thread=10;bool alive=true,visible=false;LONG_PTR style=(LONG_PTR)WS_POPUP,extended=0;HWND parent=nullptr,owner=nullptr,root=nullptr,actualParent=(HWND)(ULONG_PTR)9999;LONG width=640,height=480;std::wstring name=L"OwnedGame";ULONG_PTR cookie=0;};
 static std::map<HWND,Window> windows;static DWORD g_pid=77;static unsigned long long born=100;static ULONGLONG nowMs=1000;static unsigned propertyWrites=0;static bool changeAfterStamp=false;static std::atomic<const char*> g_acProduct{nullptr};
 static HWND New(unsigned number){const auto h=(HWND)(ULONG_PTR)number;auto& w=windows[h];w.root=h;return h;}

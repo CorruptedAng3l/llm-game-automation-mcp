@@ -20,6 +20,12 @@ struct Frame {
     std::string qpcFrequency,captureQpc,frameQpc,captureScope;
     double nativeFrame=0,presentBefore=0;
 };
+static std::string ObservationImageFields(const Frame& f,const Args& a){
+    if(!HasOpt(a,"observation-capture"))return {};
+    wchar_t full[32768]{};const auto path=U2W(GetOpt(a,"observation-capture"));const DWORD n=GetFullPathNameW(path.c_str(),32768,full,nullptr);std::string error;
+    if(!n||n>=32768||!vi_image::Save(full,f.img,"png",85,error))return ",\"observation_frame_error\":\""+JEsc(error.empty()?"invalid observation image path":error)+"\"";
+    return ",\"observation_frame_path\":\""+JEsc(W2U(full))+"\"";
+}
 static vi_text::Box ToClient(const Frame& f, const vi_text::Box& b) {
     const int x0 = (int)std::lround(f.ox + b.x * f.sx), y0 = (int)std::lround(f.oy + b.y * f.sy);
     const int x1 = (int)std::lround(f.ox + (b.x + b.w) * f.sx), y1 = (int)std::lround(f.oy + (b.y + b.h) * f.sy);
@@ -177,6 +183,7 @@ static Reply CmdOcr(DWORD pid, const Args& a) {
     j+=",\"capture_scope\":"+(f.captureScope.empty()?std::string("null"):f.captureScope)+",\"timing_clock\":\"QueryPerformanceCounter\",\"qpc_frequency\":\""+JEsc(f.qpcFrequency)+"\",\"capture_qpc_ticks\":\""+JEsc(f.captureQpc)+"\",\"frame_qpc_ticks\":"+(f.frameQpc.empty()?std::string("null"):"\""+JEsc(f.frameQpc)+"\"");
     std::wstring text; for (auto& l : lines) { if (!text.empty()) text += L"\n"; text += l.text; }
     j += ",\"text\":\"" + JU(text) + "\"";
+    j += ObservationImageFields(f,a);
     if(!compact){j+=",\"lines\":[";for(size_t i=0;i<lines.size();++i)j+=(i?",":"")+LineJson(f,lines[i],words);j+="]";}
     j += "}";
     if (HasOpt(a, "out")) {

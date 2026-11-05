@@ -21,6 +21,7 @@
 #include <chrono>
 #include <memory>
 #include "vi_cli_deadline.h"
+#include "vi_launch_exposure.h"
 #include "vi_keys.h"
 #include "vi_sessions.h"
 #include "vi_text.h"
@@ -844,7 +845,7 @@ static int Launch(const Args& a) {
     DWORD guardAppliedMs=0,settleAppliedMs=0,guardRequestedMs=0,settleRequestedMs=0;const DWORD finalReserveMs=1500;
     ULONGLONG budgetStarted=0;DWORD budgetRequested=0;
     DWORD followedFrom=0,launcherPid=0;
-    unsigned long long selectedCreated=0;
+    unsigned long long selectedCreated=0;DWORD pid=0,preResumeGuardPid=0;
     std::string waitingFor;
     // Every launch result adds the actual latest injection record. Early hooks-only
     // setup remains separate from the full window/queue handshake after resume.
@@ -861,6 +862,7 @@ static int Launch(const Args& a) {
         result+=",\"process_created\":\""+std::to_string(selectedCreated)+"\"";
         result+=",\"launch_state\":\""+std::string(launcherPid?"launcher_ready":"game")+"\"";
         result+=",\"waiting_for\":"+(waitingFor.empty()?std::string("null"):"\""+JEsc(waitingFor)+"\"")+"}";
+        result.pop_back();result+=vi_launch_exposure::Fields(pid,preResumeGuardPid,budgetStarted!=0,g_launchSawTargetForeground)+"}";
         result.pop_back();result+=",\"final_command_line\":"+(finalCommandLine.empty()?std::string("null"):"\""+JEsc(finalCommandLine)+"\"");
         result+=",\"spawned_pid\":"+(spawnedPid?std::to_string(spawnedPid):"null")+",\"requested_cpu_affinity\":"+(HasOpt(a,"cpu-affinity")?"\""+JEsc(GetOpt(a,"cpu-affinity"))+"\"":"null");
         result+=",\"applied_cpu_affinity\":"+(appliedAffinity.empty()?std::string("null"):"\""+appliedAffinity+"\"")+",\"cpu_affinity_applied\":"+(affinityApplied?"true":"false")+"}";
@@ -922,7 +924,7 @@ static int Launch(const Args& a) {
     std::atomic<bool> watching{true};
     g_launchUserIntent.Configure({GetAsyncKeyState,GetCursorPos,WindowFromPoint,GetForegroundWindow});
     std::thread watcher([&] { g_launchUserIntent.InstallEvents();while (watching) { {std::lock_guard<std::recursive_mutex> guard(g_restoreMx);g_launchUserIntent.Pump();GuardForeground(0, g_launchPhase.load());} Sleep(10); }g_launchUserIntent.StopEvents(); });
-    int rc = 2; DWORD pid = 0; bool earlyInjected = false;
+    int rc = 2; bool earlyInjected = false;
     LaunchProcessHandles processHandles;
     vi_launch_follow::Process rootProcess{};
     const auto initialProcesses=LaunchSnapshot(nullptr,waitExe);
@@ -973,6 +975,7 @@ static int Launch(const Args& a) {
                     launchResult("{\"ok\":false,\"pid\":%lu,\"error\":\"early inject into the suspended process failed; process terminated\"}\n", pid); break;
                 }
                 earlyInjected = true;
+                preResumeGuardPid=pid;
                 g_acSuspended = false;
                 if(!CliBudget(1)||ResumeThread(pi.hThread)==(DWORD)-1){const auto error=CliBudget(1)?GetLastError():ERROR_TIMEOUT;const bool requested=TerminateProcess(pi.hProcess,1)!=FALSE;const bool terminated=requested&&WaitForSingleObject(pi.hProcess,1500)==WAIT_OBJECT_0;CloseHandle(pi.hThread);CloseHandle(pi.hProcess);launchResult("{\"ok\":false,\"pid\":%lu,\"injected\":true,\"suspended_child_termination_requested\":%s,\"suspended_child_terminated\":%s,\"win32_error\":%lu,\"error\":\"early hooks loaded but main-thread resume was refused or launch deadline expired; inspect owned suspended-child cleanup\"}",pid,requested?"true":"false",terminated?"true":"false",error);break;}
                 fprintf(stderr, "[vinput] early inject ok in %lu ms, main thread resumed\n", GetTickCount() - ti);

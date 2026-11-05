@@ -43,6 +43,7 @@
 #include "vi_cursor_guard.h"
 #include "vi_pad_buttons.h"
 #include "vi_key_sequence.h"
+#include "vi_sequence_edges.h"
 #include "vi_qpc.h"
 #include "vi_trace.h"
 #include "vi_vision.h"
@@ -2064,7 +2065,7 @@ bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_raw_buffer_json.inl"
 std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
-    o.num("key_sequence_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("input_scope_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
+    o.num("key_sequence_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("sequence_abort_image_version",1);o.num("input_scope_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
     o.num("relative_scope_version",1);o.num("pointer_scope_version",1);o.num("input_admission_version",1);o.num("relative_scope_refused",(double)g_relativeScopeRefused.load());
     o.num("pad_api_census_version",1);o.raw("pad_api_census",PadApiCensusJson());o.raw("directinput_readers",DiReaderStatusJson());
     o.num("claimed_di_guard_version",1);o.raw("claimed_di_guard",ClaimedDiStatusJson());
@@ -2180,6 +2181,8 @@ std::string DoCapture(const JObj& j) {
     CaptureDiagReset();
     std::string path = JStr(j, "path");
     bool hashOnly = JBool(j, "hash_only", false);
+    const bool retainChanged=JHas(j,"retain_changed_from");const auto retainedBaseline=JStr(j,"retain_changed_from");
+    if(retainChanged&&(!hashOnly||path.empty()||retainedBaseline.size()!=16||!std::all_of(retainedBaseline.begin(),retainedBaseline.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F');})))return ErrJ("retain_changed_from requires frame-hash, path and a 16-digit baseline hash");
     if (path.empty() && !hashOnly) return ErrJ("capture needs path");
     const bool preserveMap=JBool(j,"preserve_capture_space",false);
     const bool outputOptions=JHas(j,"scale")||JHas(j,"max_width")||JHas(j,"format")||JHas(j,"quality");
@@ -2283,6 +2286,8 @@ std::string DoCapture(const JObj& j) {
     if(hashOnly&&JBool(j,"motion_sample",false)){motionSample=vi_motion::Sample(g_capPix,g_capW,g_capH,motionW,motionH);if(motionSample.empty())return ErrJ("motion sample image unavailable");}
     std::wstring wp = U2W(path);
     std::string e3;
+    bool observationSaved=false;
+    if(retainChanged&&_stricmp(hashText,retainedBaseline.c_str())){if(!SavePng(wp,g_capPix,g_capW,g_capH,e3))return ErrJ(e3);observationSaved=true;}
     UINT outputW=g_capW,outputH=g_capH;
     if(outputOptions){int w=0,h=0;if(!vi_image::OutputSize((int)g_capW,(int)g_capH,scale,(int)maxWidthValue,w,h,e3))return ErrJ(e3);outputW=w;outputH=h;}
     if(!hashOnly){
@@ -2294,7 +2299,7 @@ std::string DoCapture(const JObj& j) {
         if(!CaptureScopeCurrent(captureScope,&scopeReason))return CaptureScopeFailure(scopeReason,&captureScope,true);
 
     }
-    if(!CaptureScopeCurrent(captureScope,&scopeReason))return CaptureScopeFailure(scopeReason,&captureScope,!hashOnly);
+    if(!CaptureScopeCurrent(captureScope,&scopeReason))return CaptureScopeFailure(scopeReason,&captureScope,!hashOnly||observationSaved);
     SavedCaptureMap committedMap;unsigned long long committedMapSerial=0;
     if(!hashOnly&&!preserveMap){std::lock_guard<std::recursive_mutex> input(g_inputMx);
         if(!CaptureScopeCurrent(captureScope,&scopeReason))return CaptureScopeFailure(scopeReason,&captureScope,true);
@@ -2311,6 +2316,7 @@ std::string DoCapture(const JObj& j) {
     if(format=="jpeg")o.num("quality",qualityValue);
     o.num("frame", used == "printwindow" ? (double)C.present_ours.load() : (double)g_capturedPresent.load());
     o.str("hash", hashText); o.num("present_before", frameBefore); o.num("captured_present", g_capturedPresent);
+    if(retainChanged){o.bol("observation_frame_saved",observationSaved);if(observationSaved)o.str("observation_frame_path",path);}
     if(!motionSample.empty()){o.num("motion_sample_version",1);o.num("motion_sample_w",motionW);o.num("motion_sample_h",motionH);o.str("motion_sample_rgb",motionSample);o.str("motion_sample_scope","area-averaged 16x16 RGB grid of the selected source region; coarse pixel change, not optical flow or gameplay movement");}
     o.num("after_frames", requestedFrames); o.num("origin_x", mapOx); o.num("origin_y", mapOy);
     o.num("region_client_w", mapCw); o.num("region_client_h", mapCh);

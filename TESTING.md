@@ -178,6 +178,13 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
 - Commit 281961b (2026-11-04): `click_text` / text clicks match whole OCR words by default, so "PLAY" no longer
   clicks "Player". Gate: `build.bat` x64 + x86 OK; `mcp` `npm test` 39 files PASS; `run_textwordmodeltest.ps1`
   22 / 0; background plan (89 cases): 86 passed, 3 not_measured (capture_diagnostics, cursor_guard, legacy_focus).
+- Batch v0.2.7..0.2.8 (2026-11-05, vinput through 75b3f86): hidden-window adoption, DI8 keyboard formats, batch
+  clicks, any-of OCR waits, per-key reader channels in hold replies, delta-cursor clicks and motion helpers,
+  launcher follow, pixel-change metrics, scoped image aborts, sequence condition observers, matched-text frame
+  receipts, and completed batch input kept when a capture fails. Gate: `build.bat` x64 + x86 OK; `mcp` `npm test`
+  PASS; background plan (137 cases): 123 passed, 1 not_measured (capture_diagnostics); `owner_input` failed once
+  with the desk in use and the 12 lane-8 cases behind it did not run, then all 13 passed alone except
+  `legacy_focus` not_measured, so 135 passed / 2 not_measured.
 
 ## Real games
 
