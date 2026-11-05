@@ -8,7 +8,7 @@ if(request?.cmd==='frame-hash'||request?.cmd==='sequence-observe'||command==='oc
  if(command==='seq'){
   const flag=f=>{const i=rest.indexOf(f);return i<0?undefined:rest[i+1];};
   out={...scenario.replies.seq,...(flag('--scope-json')?{capture_scope_checked:true}:{}),...(flag('--guard-ms')?{sequence_guard_version:1,observer_guarded:true,observer_guard_ms:Number(flag('--guard-ms')),guard_observation_seq:0}:{}),
-   ...(flag('--start-qpc')?{anchor_source:'observed_capture',anchor_qpc_ticks:flag('--start-qpc'),qpc_frequency:flag('--start-frequency')}:{}),...(scenario.initial_patch??{})};
+   ...(flag('--start-qpc')?{anchor_source:'observed_capture',anchor_qpc_ticks:flag('--start-qpc'),qpc_frequency:flag('--start-frequency')}:{}),...(flag('--start-hook-frame')?{sequence_frame_anchor_version:1,present_anchor_target_index:flag('--start-hook-frame'),anchor_source:'pending_present_hook',sequence_waiting_for_present:true,anchor_qpc_ticks:'0',qpc_frequency:flag('--start-frequency')}:{}),...(scenario.initial_patch??{})};
  }else if(request?.cmd==='sequence-observe'){
   const n=before.filter(x=>{try{return JSON.parse(x.argv[x.argv.indexOf('json')+1]).cmd==='sequence-observe';}catch{return false;}}).length;
   const state=request.abort?(scenario.abort_completed?'completed':'cancelled'):(scenario.guard_states?.[Math.min(n,scenario.guard_states.length-1)]??'running');

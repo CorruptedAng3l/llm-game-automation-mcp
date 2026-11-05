@@ -46,6 +46,17 @@ inline std::wstring StripSpace(const std::wstring& s) {
     for (wchar_t c : s) if (!iswspace(c)) o += c;
     return o;
 }
+// OCR often omits a label's '&'. Fold that optional conjunction (also whole
+// word 'and') only in non-exact searches; preserve all word-owner geometry.
+inline std::wstring LabelText(const std::wstring& s){
+ std::wstring o;const auto lower=Lower(s);
+ for(size_t i=0;i<s.size();){
+  if(s[i]==L'&'){++i;continue;}
+  if(lower.compare(i,3,L"and")==0&&(i==0||(!iswalnum(lower[i-1])&&lower[i-1]!=L'_'))&&(i+3==s.size()||(!iswalnum(lower[i+3])&&lower[i+3]!=L'_'))){i+=3;continue;}
+  o+=s[i++];
+ }
+ return StripSpace(o);
+}
 inline Box Union(const Box& a, const Box& b) {
     const int l = (std::min)(a.x, b.x), t = (std::min)(a.y, b.y);
     const int r = (std::max)(a.x + a.w, b.x + b.w), bo = (std::max)(a.y + a.h, b.y + b.h);
@@ -65,11 +76,12 @@ inline int Edits(const std::wstring& a, const std::wstring& b) {
 
 // Hits inside ONE line, in word order.
 inline void FindInLine(const Line& line, int lineIndex, const std::wstring& query, const Options& opt, std::vector<Hit>& out) {
-    const std::wstring q = opt.exact ? StripSpace(query) : Lower(StripSpace(query));
+    const auto literal=Lower(StripSpace(query));const bool label=!opt.exact&&literal!=L"and"&&literal!=L"&";
+    const std::wstring q = opt.exact ? StripSpace(query) : Lower(label?LabelText(query):StripSpace(query));
     if (q.empty() || line.words.empty()) return;
     std::wstring s; std::vector<int> owner; std::vector<char> wordStart, wordEnd;
     for (size_t w = 0; w < line.words.size(); ++w) {
-        std::wstring t = StripSpace(line.words[w].text);
+        std::wstring t = label?LabelText(line.words[w].text):StripSpace(line.words[w].text);
         if (!opt.exact) t = Lower(t);
         for (size_t i = 0; i < t.size(); ++i) {
             s += t[i]; owner.push_back(static_cast<int>(w));
@@ -94,7 +106,7 @@ inline void FindInLine(const Line& line, int lineIndex, const std::wstring& quer
         for (int i = 0; i < n; ++i) {
             std::wstring joined;
             for (int j = i; j < n; ++j) {
-                std::wstring t = StripSpace(line.words[j].text);
+                std::wstring t = label?LabelText(line.words[j].text):StripSpace(line.words[j].text);
                 joined += opt.exact ? t : Lower(t);
                 if (joined.size() > q.size() + static_cast<size_t>(opt.fuzzy)) break;
                 if (joined.size() + static_cast<size_t>(opt.fuzzy) < q.size()) continue;

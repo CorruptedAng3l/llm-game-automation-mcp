@@ -1,0 +1,12 @@
+import {measureTimedInput} from '../build/holdmotion.js';
+import {makeChecker} from './lib.mjs';
+const {state,check}=makeChecker(),scope={hwnd:'0x123',thread:1,adoption_generation:'1',geometry_epoch:'0',lifetime_cookie:'99',client_w:800,client_h:600,geometry_witness:'client dimensions plus adopted WndProc WM_SIZE/WM_DPICHANGED epoch'},region={x:1,y:2,w:20,h:30};
+const result=json=>({ok:json.ok!==false,json,argv:[],stderr:'',timedOut:false,exitCode:0}),snap=(rgb='000000',patch={})=>result({ok:true,capture_scope:scope,capture_space_updated:false,timing_clock:'QueryPerformanceCounter',capture_qpc_ticks:'1000',qpc_frequency:'1000',motion_sample_version:1,motion_sample_w:1,motion_sample_h:1,motion_sample_rgb:rgb,...patch});
+async function model(observations,input=result({ok:true,transitions:2,input_read_observation:{version:1}})){let samples=0,inputs=0,admitted;const r=await measureTimedInput([],region,()=>0,async s=>{inputs++;admitted=s;return input;},async()=>observations[Math.min(samples++,observations.length-1)]);return {r,inputs,samples,admitted};}
+let m=await model([snap(),snap('ffffff')]);check(m.r.ok&&m.inputs===1&&m.r.json.input_motion.changed_pct===100&&m.r.json.input_motion.avatar_movement_measured===false&&JSON.parse(m.admitted).hwnd===scope.hwnd&&m.r.json.transitions===2&&m.r.json.input_read_observation.version===1,'one scoped timed key retains native/per-key receipts and a pixel metric');
+m=await model([snap(),snap()]);check(m.r.ok&&m.r.json.input_motion.changed_pct===0&&m.inputs===1,'unchanged region is an honest zero observation with successful input');
+m=await model([snap('000000',{motion_sample_version:0})]);check(!m.r.ok&&m.r.json.input_injected===false&&m.inputs===0,'unsupported metric refuses before input');
+m=await model([snap(),result({ok:false,error:'capture lost'})]);check(m.r.ok&&m.r.json.transitions===2&&!m.r.json.input_motion.measured&&m.r.json.input_motion_warning&&m.inputs===1,'following capture failure preserves delivered input without replay');
+m=await model([snap(),snap('ffffff',{capture_scope:{...scope,geometry_epoch:'1'}})]);check(m.r.ok&&!m.r.json.input_motion.measured&&m.inputs===1,'cross-scope pixels never become a movement score');
+m=await model([snap()],result({ok:false,error:'input refused',input_injected:false}));check(!m.r.ok&&m.samples===1&&m.inputs===1&&m.r.json.error==='input refused','native refusal remains failure and skips post-input observation');
+console.log(`hold motion: ${state.passes} PASS / ${state.failures} FAIL`);if(state.failures)process.exitCode=1;

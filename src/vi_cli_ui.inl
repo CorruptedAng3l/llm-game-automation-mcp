@@ -31,6 +31,14 @@ static vi_text::Box ToClient(const Frame& f, const vi_text::Box& b) {
     const int x1 = (int)std::lround(f.ox + (b.x + b.w) * f.sx), y1 = (int)std::lround(f.oy + (b.y + b.h) * f.sy);
     return {x0, y0, x1 - x0, y1 - y0};
 }
+static std::string FrameTimingFields(const Frame& f){return "\"timing_clock\":\"QueryPerformanceCounter\",\"qpc_frequency\":\""+JEsc(f.qpcFrequency)+"\",\"capture_qpc_ticks\":\""+JEsc(f.captureQpc)+"\",\"frame_qpc_ticks\":"+(f.frameQpc.empty()?std::string("null"):"\""+JEsc(f.frameQpc)+"\"")+",\"captured_present\":"+(f.frameQpc.empty()?std::string("null"):Num(f.nativeFrame))+",\"capture_scope\":"+(f.captureScope.empty()?std::string("null"):f.captureScope);}
+static bool ClientRegion(const std::string& text,vi_vision::Region& r){int consumed=0;return text.size()<=128&&sscanf_s(text.c_str(),"%d,%d,%d,%d%n",&r.x,&r.y,&r.w,&r.h,&consumed)==4&&consumed==(int)text.size()&&r.x>=0&&r.y>=0&&r.w>0&&r.h>0&&(long long)r.x+r.w<=32768&&(long long)r.y+r.h<=32768;}
+static bool CropClientFrame(const Frame& source,const std::string& region,Frame& out,std::string& error){
+ vi_vision::Region r;if(!ClientRegion(region,r)||!std::isfinite(source.ox)||!std::isfinite(source.oy)||!std::isfinite(source.sx)||!std::isfinite(source.sy)||source.sx<=0||source.sy<=0){error="invalid client context region";return false;}
+ const int x=(int)std::floor((r.x-source.ox)/source.sx),y=(int)std::floor((r.y-source.oy)/source.sy),right=(int)std::ceil((r.x+r.w-source.ox)/source.sx),bottom=(int)std::ceil((r.y+r.h-source.oy)/source.sy);
+ if(x<0||y<0||right>source.img.w||bottom>source.img.h){error="client context region lies outside the captured frame";return false;}
+ out=source;if(!vi_vision::Crop(source.img,{x,y,right-x,bottom-y},out.img,error))return false;out.ox=source.ox+x*source.sx;out.oy=source.oy+y*source.sy;return true;
+}
 static std::string BoxJ(const vi_text::Box& b) { return "[" + std::to_string(b.x) + "," + std::to_string(b.y) + "," + std::to_string(b.w) + "," + std::to_string(b.h) + "]"; }
 
 // <dist>\run\logs, created and granted to AppContainers (a UWP target can only write there).
@@ -180,7 +188,7 @@ static Reply CmdOcr(DWORD pid, const Args& a) {
         for(size_t i=0;i<result.attempts.size();++i){const auto& attempt=result.attempts[i];j+=(i?",":"")+std::string("{\"scale\":")+Num(attempt.pass.scale)+",\"preprocess\":\""+JEsc(attempt.pass.preprocessing)+"\",\"ok\":"+(attempt.ok?"true":"false")+",\"line_count\":"+std::to_string(attempt.lines);if(!attempt.error.empty())j+=",\"error\":\""+JEsc(attempt.error)+"\"";j+="}";}
         j+="]";
     }else j+=",\"ocr_confidence\":null";
-    j+=",\"capture_scope\":"+(f.captureScope.empty()?std::string("null"):f.captureScope)+",\"timing_clock\":\"QueryPerformanceCounter\",\"qpc_frequency\":\""+JEsc(f.qpcFrequency)+"\",\"capture_qpc_ticks\":\""+JEsc(f.captureQpc)+"\",\"frame_qpc_ticks\":"+(f.frameQpc.empty()?std::string("null"):"\""+JEsc(f.frameQpc)+"\"");
+    j+=",\"captured_present\":"+Num(f.nativeFrame)+",\"capture_scope\":"+(f.captureScope.empty()?std::string("null"):f.captureScope)+",\"timing_clock\":\"QueryPerformanceCounter\",\"qpc_frequency\":\""+JEsc(f.qpcFrequency)+"\",\"capture_qpc_ticks\":\""+JEsc(f.captureQpc)+"\",\"frame_qpc_ticks\":"+(f.frameQpc.empty()?std::string("null"):"\""+JEsc(f.frameQpc)+"\"");
     std::wstring text; for (auto& l : lines) { if (!text.empty()) text += L"\n"; text += l.text; }
     j += ",\"text\":\"" + JU(text) + "\"";
     j += ObservationImageFields(f,a);

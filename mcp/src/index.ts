@@ -31,9 +31,12 @@ import { waitTextQuery, presentWaitTextAny } from "./waittextany.js";
 import { registerAgentLoops, noteOtherInput } from "./agentloops.js";
 import { loadedLaunchFailure } from "./launchstate.js";
 import { launcherFollowAction } from "./launcherfollow.js";
+import {captureDestination,destinationError,type CaptureDestination} from './capturedestination.js';
+import {compactRenderBackends} from './backendview.js';
+import {measureTimedInput} from './holdmotion.js';
 import { prepareSequenceConditions, guardSequence, type PreparedConditions } from "./sequenceconditions.js";
 
-const VERSION = "0.2.8";
+const VERSION = "0.2.9";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -148,6 +151,7 @@ const server = new McpServer(
 
 function tool<S extends z.ZodRawShape>(name: string, title: string, description: string, shape: S,
   run: (a: z.objectOutputType<S, z.ZodTypeAny>, runtime?: {signal?:AbortSignal}) => Promise<ToolReply>, readOnly = false) {
+  if(name==='type_text')tool('type',title,'Alias of type_text. '+description,shape,run,readOnly);
   server.registerTool(name, { title, description, inputSchema: shape, annotations: { title, readOnlyHint: readOnly, openWorldHint: false } },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (async (a: any, extra: {signal?:AbortSignal}) => {
@@ -191,6 +195,7 @@ tool("launch", "Launch a game",
   "anticheat_refused:true if the game or the machine has a known anti-cheat. Interactive Steam launchers return launch_state:'launcher_ready' and waiting_for; click Play, then call launch with follow_pid, follow_created and wait_exe from that receipt to adopt the game without starting another copy. For Steam load error 5:0000065434 use steam_appid + wait_exe.",
   {
     exe: z.string().optional().describe("Full path of the game executable."),
+    verbose:z.boolean().optional().describe('Return inactive backend diagnostic blocks too. Default omits inactive ddraw/d3d9 blocks only when another frame backend is known and the block has no activity or failure evidence.'),
     follow_pid: z.number().int().positive().optional().describe("Continue an existing launch after clicking Play; use instead of exe/aumid/steam_appid. Does not start another process."),
     follow_created: z.string().regex(/^\d+$/).optional().describe("process_created from the launcher receipt; decimal string retains its identity after the launcher exits."),
     args: z.string().optional().describe("Command line arguments for the game, e.g. \"-windowed -width 1280 -height 720\". Many games ignore size switches because a saved setting wins: launch then warns (warnings, requested_size_ignored) when the window's client size differs from the size you asked for, so set the size in the game's own options."),
@@ -268,7 +273,7 @@ tool("launch", "Launch a game",
     if (lp && (r.json as {input_ready?:unknown}).input_ready!==false) Object.assign(extra, await frameHealth(lp, a.args));
     else if(lp)extra.render_health_unmeasured_reason='input queue readiness is unconfirmed; full status may require its UI thread; inspect native launch/presentation receipts';
     if (r.ok && !compoundOk) { extra.ok = false; extra.launch_ok = true; extra.launched = true; }
-    return reply({ ...r, ok: compoundOk }, extra);
+    const presented={...(r.json as Record<string,unknown>),...extra};return reply({ ...r, ok: compoundOk,json:a.verbose?presented:compactRenderBackends(presented) });
   });
 
 tool("claim", "Claim or renew a game",
@@ -413,11 +418,14 @@ const captureImageArgs = {
     "Downscale the RETURNED image to at most this many pixels wide (never upscales) to save tokens, e.g. 960. The reply's image " +
     "{scale, offset_x, offset_y} maps it back: client = offset + image / scale. click / move / drag take coord_space:\"capture\" to " +
     "do that for you."),
-  scale: z.number().min(0.05).max(8).optional().describe("Explicit resize factor for the returned image (0.5 = half size). Give only one of scale, max_width / zoom (max_width may be combined with zoom as a cap)."),
+  scale: z.number().min(0.05).max(64).optional().describe("Explicit resize factor 0.05..64 for the returned PNG (0.5 = half size). Output remains bounded to 32768 per side and 64 million pixels. Give only one of scale, max_width / zoom."),
+  upscale: z.boolean().optional().describe('With max_width, explicitly resize a PNG crop up to that width as well as shrinking. Default false preserves the width cap. Enlargement applies to the returned preview, with an updated image-to-client mapping.'),
+  save_path: z.string().min(1).optional().describe('Exact saved capture path; alias of capture.path. Give only one destination.'),
+  out_dir: z.string().min(1).optional().describe('Save a uniquely named capture in this directory (created if needed), instead of the default captures folder.'),
   format: z.enum(["png", "jpeg"]).optional().describe("png (default, exact pixels) or jpeg (much smaller, lossy: do not use it to compare colours). jpeg needs a vinput build with capture output support and cannot be combined with grid or zoom (both are drawn on the decoded PNG; for a small labelled image use format png with max_width or scale instead)."),
   quality: z.number().int().min(1).max(100).optional().describe("JPEG quality 1..100 (default 85)."),
 };
-type CaptureImageOptions = { region?: z.infer<typeof regionSchema>; max_width?: number; scale?: number; format?: "png" | "jpeg"; quality?: number };
+type CaptureImageOptions = CaptureDestination & { region?: z.infer<typeof regionSchema>; max_width?: number; scale?: number; upscale?:boolean;format?: "png" | "jpeg"; quality?: number };
 tool("capture", "Capture a frame",
   "Screenshot of the game's own frame (D3D11/D3D12/OpenGL/Vulkan swapchain, PrintWindow fallback) taken in the background. " +
   "Returns the PNG (or JPEG) as an image plus JSON {path, w, h, method, capture_path, frame}. Unscaled image pixels = client " +
@@ -435,17 +443,19 @@ tool("capture", "Capture a frame",
       "Draw a labelled coordinate grid on the RETURNED image only (the saved PNG stays clean): a line every N client pixels, " +
       "labelled with the client x (top edge) and y (left edge). Read exact coordinates off it instead of guessing: 100 for a " +
       "full frame, 20-50 inside a region."),
-    zoom: z.number().min(1).max(8).optional().describe("Enlarge the returned image (crisp pixels) to read small text / icons: use with region, e.g. region 200x100 + zoom 4. Combine with max_width to cap the zoomed width (the zoom is reduced to fit, e.g. region 400 wide + zoom 4 + max_width 960 returns 960 px). Not with scale. Needs format png."),
+    zoom: z.number().min(1).max(64).optional().describe("Enlarge the returned PNG 1..64 times; output is bounded to 32768 per side and 64 million pixels. Combine with max_width to cap zoomed width. Not with scale."),
   },
   async (a) => {
     if (a.scale !== undefined && (a.max_width !== undefined || a.zoom !== undefined)) return fail("give only one of scale, max_width / zoom (max_width may be combined with zoom as a cap on the zoomed width)");
     const v = validateFormat(a);
     if (v) return fail(v);
-    const g = await grabFrame(a.pid, { path: a.path, region: a.region, after_frames: a.after_frames, method: a.method, include_image: a.include_image, grid: a.grid, max_width: a.max_width, scale: a.scale, zoom: a.zoom, format: a.format, quality: a.quality });
+    const pathError=destinationError(a);if(pathError)return fail(pathError);
+    const g = await grabFrame(a.pid, a);
     return g.out;
   });
 
-function validateFormat(a: { format?: "png" | "jpeg"; quality?: number; grid?: number; zoom?: number; scale?: number }): string | undefined {
+function validateFormat(a: { format?: "png" | "jpeg"; quality?: number; grid?: number; zoom?: number; scale?: number;upscale?:boolean;max_width?:number;include_image?:boolean }): string | undefined {
+  if(a.upscale&&(a.format==='jpeg'||a.max_width===undefined||a.scale!==undefined||a.zoom!==undefined||a.include_image===false))return 'upscale:true requires max_width and an included PNG preview, without scale/zoom; JPEG supports shrinking only';
   if (a.quality !== undefined && a.format !== "jpeg") return "quality applies only to format jpeg";
   if (a.format === "jpeg" && a.grid !== undefined) return "grid needs format png: the grid is drawn on the decoded image and only PNG can be decoded here. Drop format (png) and shrink with max_width or scale instead, or keep jpeg and drop grid (read coordinates from a png capture first)";
   if (a.format === "jpeg" && a.zoom !== undefined) return "zoom needs format png: the enlargement is done on the decoded image and only PNG can be decoded here. Drop format (png) and cap the size with max_width, or keep jpeg and drop zoom (use max_width / scale with jpeg)";
@@ -464,11 +474,11 @@ function advanceCaptureSession(pid: number) { captureSessionEpoch.set(pid, (capt
 async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; after_frames?: number; method?: "auto" | "native" | "printwindow"; include_image?: boolean; grid?: number; zoom?: number }) {
   const captureEpoch=captureSessionEpoch.get(pid)??0;
   const jpeg = o.format === "jpeg";
-  const path = resolve(o.path ?? defaultCapturePath(pid, jpeg ? "jpg" : "png"));
+  const path = captureDestination(o,pid,jpeg?'jpg':'png',()=>defaultCapturePath(pid,jpeg?'jpg':'png'));
   const base = [...at(pid), "capture", path, ...region(o.region), ...opt("--after-frames", o.after_frames), ...opt("--method", o.method === "native" ? "swapchain" : o.method)];
   // vinput's own output transform (capture_output_version 1): it can only shrink, and it also re-bases vinput's capture-space
   // map on the saved image. zoom (enlarging) stays here.
-  const coreArgs = o.zoom !== undefined ? [] : [
+  const coreArgs = o.zoom !== undefined||o.upscale ? [] : [
     ...(o.max_width !== undefined ? ["--max-width", String(o.max_width)] : []),
     ...(o.scale !== undefined && o.scale <= 1 ? ["--scale", String(o.scale)] : []),
     ...(jpeg ? ["--format", "jpeg", ...opt("--quality", o.quality)] : [])];
@@ -488,7 +498,7 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
     if (coreRan && (o.max_width !== undefined || o.scale !== undefined)) scaledBy = "vinput";
   }
   const j0 = (r.json && typeof r.json === "object" ? r.json : {}) as { method?: string; path?: string; error?: string };
-  let extra: Record<string, unknown> = {};
+  let extra: Record<string, unknown> = o.region?{requested_region:o.region,region_coordinate_system:'client_pixels'}:{};
   let stuck = false;
   if (!r.ok || j0.method === "printwindow") {
     const st = await runVinput([...at(pid), "status"], 15000);
@@ -532,7 +542,7 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
         try {
           let im = decodePng(png);
           let factor = wantScale ?? 1;
-          if (wantW !== undefined && im.width * factor > wantW) factor = wantW / im.width;   // max_width caps the final (zoomed) width
+          if (wantW !== undefined && (o.upscale||im.width * factor > wantW)) factor = wantW / im.width;
           if (factor !== 1) {
             const { width: nw, height: nh } = imageOutputSize(Math.max(1, Math.round(im.width * factor)), Math.max(1, Math.round(im.height * factor)));
             mapping.scale = baseMapping.scale * nw / im.width;
@@ -653,8 +663,8 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
 
 const actionCaptureArgs = {
   ...captureImageArgs,
-  max_width: captureImageArgs.max_width.describe("Action image width cap (default 960 unless scale is explicit); never upscales. Same image-to-client mapping as capture."),
-  scale: captureImageArgs.scale.describe("Action image factor: PNG 0.05..8 (MCP enlargement), JPEG 0.05..1; give only one of scale and max_width."),
+  max_width: captureImageArgs.max_width.describe("Action image width cap (default 960 unless scale is explicit); upscale:true explicitly enlarges PNG crops. Same image-to-client mapping as capture."),
+  scale: captureImageArgs.scale.describe("Action image factor: PNG 0.05..64 within output bounds, JPEG 0.05..1; give only one of scale and max_width."),
   format: captureImageArgs.format.describe("png (default, exact pixels) or jpeg (lossy observation, requires native capture output support). quality applies only to jpeg."),
   region: captureImageArgs.region.describe("Pre-scale client-pixel rectangle for the action observation, not coordinates in a previous image."),
   capture_after: captureAfterSchema,
@@ -662,9 +672,10 @@ const actionCaptureArgs = {
     "Extra timer delay after a successful CLI reply, before capture_after (default 0). Requires capture_after. Async jobs may still run and hold:true remains held; this does not wait for their completion."),
 };
 function actionCaptureError(a: CaptureImageOptions & { capture_after?: boolean | number; capture_settle_ms?: number }): string | undefined {
+  const destination=destinationError(a);if(destination)return destination;
   const disabled = a.capture_after === undefined || a.capture_after === false;
   if (a.capture_settle_ms !== undefined && disabled) return "capture_settle_ms requires capture_after";
-  if (disabled && [a.region, a.max_width, a.scale, a.format, a.quality].some((v) => v !== undefined))
+  if (disabled && [a.region, a.max_width, a.scale, a.format, a.quality,a.upscale,a.save_path,a.out_dir].some((v) => v !== undefined))
     return "action image options require enabled capture_after";
   if (a.scale !== undefined && a.max_width !== undefined) return "give only one of scale, max_width";
   if (a.format === "jpeg" && a.scale !== undefined && a.scale > 1) return "JPEG action images support scale <= 1; use PNG for MCP enlargement";
@@ -674,7 +685,7 @@ const actionObservation = (a: CaptureImageOptions & { pid: number; capture_settl
   settle_ms_requested: a.capture_settle_ms ?? 0, attachment_epoch: captureSessionEpoch.get(a.pid) ?? 0,
   action_state: a.async ? "async_job_may_be_running" : a.hold ? "held_until_changed" : "action_reply",
   image_options: { region: a.region, max_width: a.max_width ?? (a.scale === undefined ? 960 : undefined),
-    scale: a.scale, format: a.format, quality: a.quality },
+    scale: a.scale, format: a.format, quality: a.quality,upscale:a.upscale,save_path:a.save_path,out_dir:a.out_dir },
 });
 
 
@@ -737,11 +748,12 @@ tool("click_text", "Click text on screen",
 
 tool("wait_text", "Wait for text",
   "Wait until visible OCR text matches one string or ANY of a list, e.g. text:['VICTORY','DEFEAT'], in an optional region. All alternatives share each native capture/OCR poll; matched_text identifies the matching query. gone:true waits until ALL listed alternatives are absent. Times out with timed_out:true and ocr_saw. Use observe_settle separately to wait for selected pixels to become stable.",
-  { pid, text: z.union([textMatch.text,z.array(z.string().min(1).max(256)).min(1).max(16)]).describe('One text string or any-of alternatives (1..16); list entries cannot contain |.'), region: regionSchema.optional(), gone: z.boolean().optional().describe("Wait until every requested text is NOT on screen."),
+  { pid, text: z.union([textMatch.text,z.array(z.string().min(1).max(256)).min(1).max(16)]).describe('One text string or any-of alternatives (1..16); list entries cannot contain |.'), region: regionSchema.optional(),context_region:regionSchema.optional().describe('Also OCR this client-pixel rectangle (e.g. level title) from the SAME full captured frame that matched. Native receipt includes capture/frame QPC and Present index; old clients or OCR failure produce an explicit context warning.'),gone: z.boolean().optional().describe("Wait until every requested text is NOT on screen."),
     exact_line:textMatch.exact_line,
     timeout_ms: timeoutMs(15000), optional: z.boolean().optional().describe("Succeed with skipped:true on timeout.") },
-  async (a) => {const query=waitTextQuery(a.text);if(query.error)return fail(query.error);const unsupported=await requireTextBoundary(false,false,a.exact_line);if(unsupported)return reply(unsupported);return reply(presentWaitTextAny(await runVinput([...at(a.pid), "wait-text", ...query.argv, ...region(a.region), ...opt("--gone", a.gone),...(a.exact_line===undefined?[]:[`--exact-line=${a.exact_line}`]),
-    ...opt("--timeout", a.timeout_ms), ...opt("--optional", a.optional)], (a.timeout_ms ?? 15000) + 60000),query.queries));}, true);
+  async (a) => {const query=waitTextQuery(a.text);if(query.error)return fail(query.error);const unsupported=await requireTextBoundary(false,false,a.exact_line);if(unsupported)return reply(unsupported);const r=presentWaitTextAny(await runVinput([...at(a.pid), "wait-text", ...query.argv, ...region(a.region),...(a.context_region?['--context-region',`${a.context_region.x},${a.context_region.y},${a.context_region.w},${a.context_region.h}`]:[]), ...opt("--gone", a.gone),...(a.exact_line===undefined?[]:[`--exact-line=${a.exact_line}`]),
+    ...opt("--timeout", a.timeout_ms), ...opt("--optional", a.optional)], (a.timeout_ms ?? 15000) + 60000),query.queries);const j=r.json as Record<string,unknown>,context=j?.context as Record<string,unknown>|undefined;
+    return reply(r,a.context_region?{wait_text_context_available:context?.ok===true&&context.same_capture===true&&typeof j.capture_qpc_ticks==='string'&&context.capture_qpc_ticks===j.capture_qpc_ticks,...(context?.ok===true&&context.same_capture===true&&typeof j.capture_qpc_ticks==='string'&&context.capture_qpc_ticks===j.capture_qpc_ticks?{}:{context_warning:'Outcome observation retained; same-frame context OCR is unavailable or unconfirmed. Do not infer a level/title from a later capture.'})}:undefined);}, true);
 
 const imageArgs = {
   template: z.string().min(1).describe("Path of a PNG template (e.g. an icon cut from an earlier capture with region)."),
@@ -790,6 +802,7 @@ tool("capture_burst", "Capture a contact sheet",
   {
     pid,
     path: z.string().optional().describe("Where to save the sheet (default: a new file in the captures folder)."),
+    save_path:captureImageArgs.save_path,out_dir:captureImageArgs.out_dir,
     frames: z.number().int().min(1).max(16).optional().describe("Number of tiles, 1..16 (default 8)."),
     interval_ms: z.number().int().min(10).max(5000).optional().describe("Time between tiles, 10..5000 ms (default 250). frames x interval is at most 30 s."),
     columns: z.number().int().min(1).max(16).optional().describe("Tiles per row (default min(4, frames))."),
@@ -801,11 +814,12 @@ tool("capture_burst", "Capture a contact sheet",
     include_image: z.boolean().optional().describe("Return the sheet as an image (default true)."),
   },
   async (a) => {
+    const destination=destinationError(a);if(destination)return fail(destination);
     if (a.max_width !== undefined && a.scale !== undefined) return fail("give only one of max_width, scale");
     if (a.quality !== undefined && a.format !== "jpeg") return fail("quality applies only to format jpeg");
     if (a.columns !== undefined && a.columns > (a.frames ?? 8)) return fail("columns cannot exceed frames");
     const jpeg = a.format === "jpeg";
-    const path = resolve(a.path ?? defaultCapturePath(a.pid, jpeg ? "jpg" : "png", "_burst"));
+    const path = captureDestination(a,a.pid,jpeg?'jpg':'png',()=>defaultCapturePath(a.pid,jpeg?'jpg':'png','_burst'));
     const r = await runVinput([...at(a.pid), "capture-burst", path, ...opt("--frames", a.frames), ...opt("--interval-ms", a.interval_ms),
       ...opt("--columns", a.columns), ...opt("--max-width", a.max_width), ...opt("--scale", a.scale), ...opt("--format", a.format),
       ...opt("--quality", a.quality), ...region(a.region)], 120000);
@@ -1050,15 +1064,16 @@ tool("drag", "Drag",
 
 tool("scroll", "Scroll the mouse wheel",
   "Scroll N wheel notches (positive = up / away, negative = down) at the virtual cursor, after moving it to x,y if given.",
-  { pid, notches: z.number().int().min(-100).max(100), x: z.number().optional(), y: z.number().optional(),
+  { pid, notches: z.number().int().min(-100).max(100).optional().describe('Wheel notches: positive up, negative down. Give exactly one of notches/delta/amount/clicks.'),delta:z.number().int().min(-100).max(100).optional(),amount:z.number().int().min(-100).max(100).optional(),clicks:z.number().int().min(-100).max(100).optional(),x: z.number().optional(), y: z.number().optional(),
     horizontal: z.boolean().optional(), ...edgeArgs, ...actionCaptureArgs, ...mouseModifiers },
   async (a) => {
+    const wheel=[a.notches,a.delta,a.amount,a.clicks].filter((v):v is number=>v!==undefined);if(wheel.length!==1)return fail('scroll expects {pid, notches: N} (positive up, negative down), or exactly one alias delta/amount/clicks; no input was sent');
     const captureError=actionCaptureError(a);if(captureError)return fail(captureError);const observation=actionObservation(a);
     if(a.modifier_hold_ms!==undefined&&!a.modifiers?.length)return fail('modifier_hold_ms requires nonempty modifiers; no input was sent');
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     const pos = a.x === undefined ? [] : [String(a.x), String(a.y)];
     const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "scroll position", x: a.x, y: a.y as number }], a.edge_margin);
-    return withMouseModifiers(a.pid,a.modifiers,async()=>look(a.pid,reply(await runVinput([...at(a.pid), "scroll", String(a.notches), ...pos, ...opt("--horizontal", a.horizontal)], 60000), warnings.length ? { warnings } : undefined),a.capture_after,observation),runVinput,at,a.modifier_hold_ms);
+    return withMouseModifiers(a.pid,a.modifiers,async()=>look(a.pid,reply(await runVinput([...at(a.pid), "scroll", String(wheel[0]), ...pos, ...opt("--horizontal", a.horizontal)], 60000), warnings.length ? { warnings } : undefined),a.capture_after,observation),runVinput,at,a.modifier_hold_ms);
   });
 
 // ---------------------------------------------------------------- keyboard / pad
@@ -1079,6 +1094,7 @@ tool("key", "Press a key",
   "Press and release a key or chord in the game (delivered on every channel the game may read: messages, raw input, " +
   "DirectInput, GetAsyncKeyState). hold_ms keeps it down longer (e.g. walking).",
   { pid, key: keyCombo, hold_ms: z.number().int().min(1).max(60000).optional().describe("How long the key stays down (default ~80)."),
+    measure_region:regionSchema.optional().describe('Optional client-pixel RGB region difference before/after this completed timed key. Disallows async. Reports pixel change and per-key reader receipts, without inferring avatar movement or distance.'),
     count: z.number().int().min(1).max(100).optional(), gap_ms: z.number().int().min(0).max(10000).optional().describe("Pause between repeats."),
     async: asyncArg, replace: replaceArg, ...actionCaptureArgs },
   async (a) => {
@@ -1087,8 +1103,10 @@ tool("key", "Press a key",
     const observation = actionObservation(a);
     if (a.async && !a.hold_ms) return fail("async needs hold_ms (a bounded hold)");
     if (a.async && (a.count ?? 1) > 1) return fail("async holds one press; count is not supported with async");
-    const r = await runVinput([...at(a.pid), "key", a.key, ...(a.hold_ms ? [String(a.hold_ms)] : []), ...opt("--count", a.count), ...opt("--gap", a.gap_ms),
-      ...opt("--async", a.async), ...opt("--replace", a.replace)], a.async ? 60000 : (a.hold_ms ?? 0) * (a.count ?? 1) + (a.gap_ms ?? 0) * (a.count ?? 1) + 60000);
+    if(a.async&&a.measure_region)return fail('measure_region requires a completed key; omit async or use hold_until_change');
+    const inputBudget=a.async?60000:(a.hold_ms??0)*(a.count??1)+(a.gap_ms??0)*(a.count??1)+60000;
+    const r = a.measure_region?await measureTimedInput(at(a.pid),a.measure_region,()=>captureSessionEpoch.get(a.pid)??0,scope=>runVinput([...at(a.pid),'json',JSON.stringify({cmd:'key',key:a.key,ms:a.hold_ms??80,count:a.count??1,gap:a.gap_ms??80,expected_capture_scope:scope,...(a.replace?{replace:true}:{})})],inputBudget)):await runVinput([...at(a.pid), "key", a.key, ...(a.hold_ms ? [String(a.hold_ms)] : []), ...opt("--count", a.count), ...opt("--gap", a.gap_ms),
+      ...opt("--async", a.async), ...opt("--replace", a.replace)],inputBudget);
     return look(a.pid, reply(r, a.async ? jobExtra(r) : undefined), a.capture_after, observation);
   });
 
@@ -1349,7 +1367,7 @@ const seqStep = z.object({
   ms: z.number().int().min(1).max(118000),
 }).strict();
 const seqCondition = z.object({kind:z.enum(['frame_change','region_change','text','image']),region:regionRect.optional(),text:z.string().min(1).max(512).optional(),exact:z.boolean().optional(),fuzzy:z.number().min(.01).max(1).optional(),template:z.string().min(1).max(32768).optional(),threshold:z.number().min(.01).max(1).optional(),grace_ms:z.number().int().min(0).max(30000).optional(),
-  timeout_ms:z.number().int().min(100).max(60000).optional(),poll_ms:z.number().int().min(20).max(1000).optional()}).strict();
+  timeout_ms:z.number().int().min(100).max(60000).optional(),poll_ms:z.number().int().min(20).max(1000).optional(),after_frames:z.number().int().min(1).max(3600).optional(),present_timeout_ms:z.number().int().min(100).max(60000).optional()}).strict();
 tool("key_sequence", "Run a keyboard sequence",
   "Run a validated keyboard sequence as ONE background job inside the game: each step presses a key or chord for ms (hold / key) " +
   "or waits (wait), e.g. [{action:'hold',key:'w+space',ms:1500},{action:'wait',ms:100},{action:'key',key:'d',ms:300}]. Returns a job_id at once; " +
@@ -1357,8 +1375,8 @@ tool("key_sequence", "Run a keyboard sequence",
   "so pressing one of them by hand cancels the rest. Updated DLLs use one QPC anchor for every deadline and expose cumulative_drift_ms and absolute QPC receipts. Wait-only sequences inject no input. Alternatively give schedule:{at_ms:[0,405,810],key:'space',hold_ms:20} for absolute offsets (requires sequence_timing_version>=1). Limits: 1024 steps, 118000 ms of declared timing. Needs a vinput DLL with key sequences. Default is asynchronous; wait:true observes this exact native job until completed or another terminal outcome. capture_after follows successful completion when waiting, otherwise it observes the queued/running job. Native completion does not prove game consumption.",
   { pid, steps: z.array(seqStep).min(1).max(1024).optional(),
     schedule: z.object({at_ms:z.array(z.number().int().min(0).max(118000)).min(1).max(1024),key:keyCombo,hold_ms:z.number().int().min(1).max(118000).optional()}).strict().optional(), replace: replaceArg, ...actionCaptureArgs,
-    start_on:seqCondition.optional().describe('Bounded scoped capture/OCR event before admission; frame/region compares against first observation, text matches visible normalized text. Default timeout10000ms. No audio onset or exact game-event alignment.'),
-    abort_on:seqCondition.omit({timeout_ms:true}).optional().describe('Requires wait:true. Stop the exact job on a scoped hash change, text (optional fuzzy score), or PNG template. Prefer a small region and image/hash for faster observation without OCR. grace_ms arms after the native job starts and rebaselines hash changes after grace. The matched frame is retained when supported. Polling latency and native observer expiry remain bounded, not hard real-time.'),
+    start_on:seqCondition.optional().describe('Bounded scoped capture/OCR event before admission; frame/region compares against first observation, text matches visible normalized text. Optional after_frames:1..3600 anchors deadlines at that future native Present hook index after the matched native capture. present_timeout_ms defaults5000; wait plus declared duration must fit118000ms. An already missed frame refuses/cancels without starting late. PrintWindow cannot supply this anchor. No display scanout, audio onset or exact game-event alignment.'),
+    abort_on:seqCondition.omit({timeout_ms:true,after_frames:true,present_timeout_ms:true}).optional().describe('Requires wait:true. Stop the exact job on a scoped hash change, text (optional fuzzy score), or PNG template. Prefer a small region and image/hash for faster observation without OCR. grace_ms arms after the native job starts and rebaselines hash changes after grace. The matched frame is retained when supported. Polling latency and native observer expiry remain bounded, not hard real-time.'),
     progress_check:z.object({region:regionRect.optional(),max_unchanged_ms:z.number().int().min(100).max(20000)}).strict().optional().describe('Requires wait:true. Stop if the selected frame/region hash remains unchanged; choose a meaningful region. This does not establish gameplay success.'),
     max_lateness_ms:z.number().int().min(1).max(5000).optional().describe('Abort the entire native sequence before an overdue key edge exceeds this bound. start_on defaults1000ms. No input edge is silently skipped or replayed.'),
     wait: z.boolean().optional().describe("Wait for this exact generation-bound native sequence job. Default false; does not replay input or prove game consumption."),
@@ -1388,14 +1406,14 @@ tool("key_sequence", "Run a keyboard sequence",
     if(a.start_on||a.abort_on||a.progress_check){const prepared=await prepareSequenceConditions(context,{start_on:a.start_on,abort_on:a.abort_on,progress_check:a.progress_check});
       if('ok' in prepared)return reply(prepared);conditions=prepared;}
     const guarded=!!(a.abort_on||a.progress_check);
-    const startExtra=conditions?.start?{sequence_start:{observed:true,observations:conditions.observations,observed_capture_qpc_ticks:conditions.start.qpc,qpc_frequency:conditions.start.frequency,capture_scope:JSON.parse(conditions.start.scope),native_deadlines_anchor:'observed_capture',game_event_onset_measured:false,scope:'capture/OCR observation time; event may precede capture and polling may miss brief events'}}:{};
+    const startExtra=conditions?.start?{sequence_start:{observed:true,observations:conditions.observations,observed_capture_qpc_ticks:conditions.start.qpc,qpc_frequency:conditions.start.frequency,capture_scope:JSON.parse(conditions.start.scope),native_deadlines_anchor:conditions.presentTarget?'native_present_hook':'observed_capture',present_anchor_target_index:conditions.presentTarget??null,game_event_onset_measured:false,scope:'capture/OCR observation time or explicit future native Present hook; neither measures display scanout/game-event onset; missed frame is never rebased'}}:{};
     const dir = mkdtempSync(join(tmpdir(), "vinput-seq-"));
     const file = join(dir, "sequence.vin");
     try {
       writeFileSync(file, lines.join("\n") + "\n");
       const r = await runVinput([...at(a.pid), "seq", file, ...(a.replace ? ["--replace=true"] : []),...(conditions?.scope?['--scope-json',conditions.scope]:[]),...(guarded?['--guard-ms','4000']:[]),
-        ...(conditions?.start?['--start-qpc',conditions.start.qpc,'--start-frequency',conditions.start.frequency]:[]),...opt('--max-lateness-ms',a.max_lateness_ms??(conditions?.start?1000:undefined))], 60000);
-      if(conditions?.start&&r.ok){const j=sequenceJob(r.json,context,true);if(!j||j.anchor_source!=='observed_capture'||j.anchor_qpc_ticks!==conditions.start.qpc||j.qpc_frequency!==conditions.start.frequency||j.capture_scope_checked!==true)
+        ...(conditions?.start?[...(conditions.presentTarget?['--start-hook-frame',conditions.presentTarget,...opt('--start-hook-timeout-ms',a.start_on?.present_timeout_ms)]:['--start-qpc',conditions.start.qpc]),'--start-frequency',conditions.start.frequency]:[]),...opt('--max-lateness-ms',a.max_lateness_ms??(conditions?.start?1000:undefined))], 60000);
+      if(conditions?.start&&r.ok){const j=sequenceJob(r.json,context,true);if(!j||j.qpc_frequency!==conditions.start.frequency||j.capture_scope_checked!==true||(conditions.presentTarget?(j.sequence_frame_anchor_version!==1||j.present_anchor_target_index!==conditions.presentTarget||!['pending_present_hook','native_present_hook'].includes(String(j.anchor_source))):j.anchor_source!=='observed_capture'||j.anchor_qpc_ticks!==conditions.start.qpc))
         return reply(sequenceWaitError(r,'event_anchor_ack_unavailable','sequence event-anchor acknowledgement is inconsistent; no input or control was retried',0,a.wait_timeout_ms),startExtra);}
       if (!a.wait) return look(a.pid, reply(r, {...jobExtra(r),...startExtra}), a.capture_after, observation);
       if (!r.ok) {

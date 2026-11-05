@@ -79,7 +79,7 @@ try {
     check(r.isError && actionCount() === 0 && t.callsOf("capture").length === 0, `${name} refuses incompatible options before input: ${JSON.stringify(options)}`, r.text);
   }
   for (const options of [
-    { max_width: 63 }, { max_width: 8193 }, { scale: 0.01 }, { scale: 8.1 }, { format: "webp" },
+    { max_width: 63 }, { max_width: 8193 }, { scale: 0.01 }, { scale: 64.1 }, { format: "webp" },
     { region: { x: -1, y: 0, w: 10, h: 10 } }, { region: { x: 0, y: 0, w: 0, h: 10 } },
     { format: "jpeg", quality: 0 }, { format: "jpeg", quality: 101 }, { format: "jpeg", scale: 2 },
   ]) {

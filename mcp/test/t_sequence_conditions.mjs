@@ -9,6 +9,13 @@ const t=await startFake(scene(),{VINPUT_EXE:fileURLToPath(new URL('./fake_sequen
 const base={pid,steps:[{action:'key',key:'space',ms:5000}]},set=s=>{t.setScenario(s);t.clearCalls();};
 const nativeCalls=()=>t.callsOf('json').map(a=>JSON.parse(cmdOf(a)[1])),heartbeats=()=>nativeCalls().filter(x=>x.cmd==='sequence-observe');
 try{
+ const frameScene=scene({observations:[snap('a',{captured_present:10,frame_qpc_ticks:'999'}),snap('b',{capture_qpc_ticks:'1010',captured_present:11,frame_qpc_ticks:'1009'})]});frameScene.replies.status.sequence_frame_anchor_version=1;set(frameScene);
+ let anchored=await t.call('key_sequence',{...base,start_on:{kind:'frame_change',after_frames:60,present_timeout_ms:2000,poll_ms:20}});let frameCmd=cmdOf(t.callsOf('seq')[0]??[]);
+ check(!anchored.isError&&anchored.json.sequence_start.native_deadlines_anchor==='native_present_hook'&&anchored.json.sequence_start.present_anchor_target_index==='71'&&frameCmd[frameCmd.indexOf('--start-hook-frame')+1]==='71'&&frameCmd.includes('--start-hook-timeout-ms')&&!frameCmd.includes('--start-qpc'),'future native frame anchor uses exact matched captured index plus requested frames once',anchored.text);
+ for(const patch of [{frame_qpc_ticks:null},{captured_present:0},{captured_present:2147483647}]){const s=structuredClone(frameScene);s.observations=[snap('a',{text:'ready',frame_qpc_ticks:'999',captured_present:10,...patch})];set(s);anchored=await t.call('key_sequence',{...base,start_on:{kind:'text',text:'ready',after_frames:60}});check(anchored.isError&&!t.callsOf('seq').length,'unavailable/overflow native frame source refuses before sequence: '+JSON.stringify(patch));}
+ const oldFrame=structuredClone(frameScene);delete oldFrame.replies.status.sequence_frame_anchor_version;set(oldFrame);anchored=await t.call('key_sequence',{...base,start_on:{kind:'text',text:'ready',after_frames:60}});check(anchored.isError&&!t.callsOf('seq').length,'old native frame capability refuses before sequence');
+ const badFrame=structuredClone(frameScene);badFrame.initial_patch={present_anchor_target_index:'72'};set(badFrame);anchored=await t.call('key_sequence',{...base,start_on:{kind:'frame_change',after_frames:60,poll_ms:20}});check(anchored.isError&&t.callsOf('seq').length===1&&!heartbeats().length,'wrong native frame anchor acknowledgement is uncertain and never replayed');
+ set(scene());
  let r=await t.call('key_sequence',{...base,start_on:{kind:'frame_change',timeout_ms:1000,poll_ms:20}});
  check(!r.isError&&r.json.sequence_start?.observed_capture_qpc_ticks==='1010'&&r.json.anchor_qpc_ticks==='1010'&&r.json.sequence_start?.game_event_onset_measured===false,'start event uses observed capture QPC as checked native anchor',r.text);
  const seq=cmdOf(t.callsOf('seq')[0]??[]);

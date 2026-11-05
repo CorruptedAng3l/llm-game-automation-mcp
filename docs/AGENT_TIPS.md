@@ -182,3 +182,21 @@ Generic and factual; check each against your build of the game.
 | Terraria (XNA, D3D9) | Mouse, long click-holds, keys and `type` work in the background. Capture comes through PrintWindow and can be one frame stale. Wait for a text prompt to appear before `type`. Hold left-click (`ms` 15000+) on a tree trunk to chop; the reach is about 5 tiles and a miss still returns `ok:true`. |
 | Detroit: Become Human (Vulkan) | Needs `launch early:true` for capture. Use `attach {arm_pad:true}` so the first pad press counts. `pad_move` with `screen_rotation_deg:180` when the fixed camera faces the character; re-check after every camera cut. `pad_rotate` handles "rotate the stick" prompts (read the start angle and direction from the glyph). Hold A about 1500 ms for "hold" prompts. |
 | Fallout Shelter (Unity) | Capture and OCR work, but the game currently ignores all background input (cause unknown). |
+
+## Playtest notes (session 9)
+- Cities: Skylines: right-click cancels the active build tool. Escape did not
+  cancel it in the Cities run 2 playtest. This is an inherited game-specific
+  observation; check the current UI after cancelling.
+- Successful native input and completed_injected_points describe delivered
+  virtual input. Placement/game acceptance remains unknown. Never resend a
+  delivered point just because its following capture failed.
+- click_many accepts {x,y} objects or [x,y] pairs. Optional verify_change with a
+  small verify_region stops remaining points on unchanged scoped pixels;
+  changed pixels alone do not prove placement. hover_many can inspect several
+  connection/placement tooltips with per-point hash and optional OCR.
+- UI transitions may ignore delivered clicks. Use observe_settle on the relevant
+  region before a deliberate click, then click verify_change or wait_text to
+  inspect its result. Automatic repeated clicking can double-toggle controls.
+- Capture region uses client pixels before scaling. Read image scale/scale_y and
+  offsets to map the preview, or use coord_space:"capture". upscale:true plus
+  max_width explicitly enlarges small PNG crops; save_path/out_dir select files.

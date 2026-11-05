@@ -1,0 +1,17 @@
+import {fileURLToPath} from 'node:url';
+import {makeChecker,startFake,cmdOf} from './lib.mjs';
+const {state,check}=makeChecker(),pid=process.pid,t=await startFake({}, {VINPUT_EXE:fileURLToPath(new URL('./fake_agent_loops.mjs',import.meta.url))});
+const actions=()=>t.callsOf('json').map(a=>JSON.parse(cmdOf(a)[1])).filter(r=>['click','mouse','key'].includes(r.cmd));
+const set=s=>{t.setScenario(s);t.clearCalls();},points=[[10,20],[30,40]],region={x:0,y:0,w:100,h:100};
+try{
+ let r=await t.call('click_many',{pid,points,timeout_ms:10000});check(!r.isError&&r.json.completed_injected_points===2&&r.json.game_accepted_points===null&&r.json.points.every(p=>p.delivery_confirmed&&p.placement_confirmed===null),'coordinate pairs normalize once and completed count explicitly means native clicks');
+ set({motion_samples:['000000','000000','ffffff','000000','ffffff']});r=await t.call('click_many',{pid,points,timeout_ms:10000,verify_change:true,verify_region:region});check(!r.isError&&r.json.points.length===2&&r.json.points.every(p=>p.region_diff.changed_pct===100&&p.region_diff.application_response===null)&&actions().length===2,'each point retains its scoped RGB diff without claiming accepted placement');
+ set({motion_samples:['000000','000000','000000']});r=await t.call('click_many',{pid,points,timeout_ms:10000,verify_change:true,verify_region:region});check(r.isError&&r.json.completed_injected_points===1&&r.json.points[0].delivery_confirmed&&r.json.error==='point_region_unchanged_after_delivered_click'&&actions().length===1&&r.json.do_not_repeat_delivered_points,'unchanged point stops later clicks and preserves its delivered receipt without replay');
+ set({capture_patches:{1:{motion_sample_version:0}}});r=await t.call('click_many',{pid,points,verify_change:true,verify_region:region});check(r.isError&&!actions().length,'unsupported motion sample refuses verification before first click');
+ set({});r=await t.call('click_many',{pid,points,verify_change:true});check(r.isError&&!actions().length&&!t.callsOf('status').length,'missing verification region refuses before native I/O');
+ set({hover_texts:['no connection','connection available']});r=await t.call('hover_many',{pid,points,probe_region:region,ocr:true,hover_ms:0,timeout_ms:10000});check(!r.isError&&r.json.observed_points===2&&r.json.points[1].tooltip_ocr.text==='connection available'&&r.json.points.every(p=>p.observation.capture_qpc_ticks&&p.tooltip_ocr.capture_qpc_ticks),'one hover batch retains each tooltip/hash and separate QPC provenance');
+ check(actions().length===2&&actions().every(r=>r.cmd==='mouse'&&r.expected_capture_scope&&r.admit_before_qpc_ticks)&&t.callsOf('ocr').length===2&&!t.callsOf('click').length,'tooltip probe emits one scoped mouse move per point and no clicks');
+ set({status_patches:{2:{owner_active:true}}});r=await t.call('hover_many',{pid,points,hover_ms:0});check(r.isError&&actions().length===1&&r.json.error==='user_controls_target','manual activity interrupts future hover moves');
+ set({ocr_patch:{capture_scope:{hwnd:'0x456'}}});r=await t.call('hover_many',{pid,points,ocr:true,hover_ms:0});check(r.isError&&actions().length===1&&r.json.points[0].move_receipt.ok&&r.json.failure_receipt.text,'wrong-scope OCR stops without discarding or replaying the moved point');
+}finally{await t.close();}
+console.log(`batch probes: ${state.passes} PASS / ${state.failures} FAIL`);if(state.failures)process.exitCode=1;

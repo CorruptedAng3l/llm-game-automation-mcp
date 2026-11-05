@@ -8,7 +8,7 @@ $env:TEMP="$run\temp";$env:TMP=$env:TEMP
 $body=[IO.File]::ReadAllText($SchedulerSource);$start=$body.IndexOf('void JobRunSequence(');if($start-lt0){throw 'actual scheduler marker missing'};$brace=$body.IndexOf('{',$start);$depth=1;$at=$brace+1
 while($at-lt$body.Length-and$depth){if($body[$at]-eq'{'){$depth++};if($body[$at]-eq'}'){$depth--};$at++};if($depth){throw 'actual scheduler body incomplete'}
 [IO.File]::WriteAllText("$run\actual_sequence.inl",$body.Substring($start,$at-$start),[Text.UTF8Encoding]::new($false))
-$pins=@($PSCommandPath,$SchedulerSource,"$root\test\vi_sequence_deadline_model.cpp","$root\src\vi_qpc.h","$root\src\vi_key_sequence.h")|ForEach-Object {@{path=$_;sha256=(Get-FileHash -LiteralPath $_).Hash}}
+$pins=@($PSCommandPath,$SchedulerSource,"$root\test\vi_sequence_deadline_model.cpp","$root\src\vi_qpc.h","$root\src\vi_key_sequence.h","$root\src\vi_sequence_frame.h")|ForEach-Object {@{path=$_;sha256=(Get-FileHash -LiteralPath $_).Hash}}
 $cases=@();foreach($arch in @('x64','x86')){
  $folder=Join-Path $run $arch;[void](New-Item -ItemType Directory -Force $folder);$vc=if($arch-eq'x64'){'vcvars64.bat'}else{'vcvars32.bat'}
  @"

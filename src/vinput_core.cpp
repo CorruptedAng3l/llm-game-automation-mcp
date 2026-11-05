@@ -1341,13 +1341,14 @@ std::atomic<int> g_capApi{0};          // API that served the last capture reque
 std::atomic<int> g_lastCaptureApi{0};  // last successful request, including PrintWindow; failed attempts do not change it
 std::atomic<std::uint64_t> g_lastFrameQpc{0},g_capturedFrameQpc{0};
 thread_local std::uint64_t t_frameQpc=0;
+thread_local long t_frameIndex=0;
 std::atomic<int> g_capPending{0};      // API whose GPU readback the requester must finish (12 / vk), 0 = pixels ready
 std::atomic<bool> g_capRetryable{false}; // the hook failed for a transient reason (queue hook still installing)
 std::atomic<long> g_frameDd{0}, g_frameGl{0}, g_frameVk{0}, g_frame9{0}, g_frame11{0}, g_frame12{0}, g_frameForeign{0};
 bool HookAddr(const char* name, void* target, void* det, void** orig);
 void OnFrame(int api) {
     t_frameQpc=vi_qpc::Now();g_lastFrameQpc=t_frameQpc;
-    C.present_ours++;
+    t_frameIndex=++C.present_ours;
     g_frameApi = api;
     JobsFrame();
     switch (api) { case API_DDRAW: g_frameDd++; break; case API_GL: g_frameGl++; break; case API_VK: g_frameVk++; break; case API_D3D9: g_frame9++; break; case API_D3D11: g_frame11++; break; case API_D3D12: g_frame12++; break; }
@@ -1362,7 +1363,7 @@ bool BeginCaptureClaim() {
 }
 void EndCapture(int api) {
     g_capApi = api;
-    g_capturedPresent = C.present_ours.load();
+    g_capturedPresent = t_frameIndex;
     g_capturedFrameQpc=t_frameQpc;
     g_capReq = 0;
     SetEvent(g_capEvent);
@@ -2065,7 +2066,7 @@ bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_raw_buffer_json.inl"
 std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
-    o.num("key_sequence_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("sequence_abort_image_version",1);o.num("input_scope_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
+    o.num("key_sequence_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("sequence_abort_image_version",1);o.num("sequence_frame_anchor_version",1);o.num("input_scope_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
     o.num("relative_scope_version",1);o.num("pointer_scope_version",1);o.num("input_admission_version",1);o.num("relative_scope_refused",(double)g_relativeScopeRefused.load());
     o.num("pad_api_census_version",1);o.raw("pad_api_census",PadApiCensusJson());o.raw("directinput_readers",DiReaderStatusJson());
     o.num("claimed_di_guard_version",1);o.raw("claimed_di_guard",ClaimedDiStatusJson());

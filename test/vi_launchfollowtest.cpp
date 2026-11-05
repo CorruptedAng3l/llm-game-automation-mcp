@@ -27,6 +27,11 @@ static int Actor(int argc,wchar_t** argv){
         if(!vi_launch_ack::ArmNoActivation())return 111;
         WNDCLASSW c{};c.hInstance=GetModuleHandleW(nullptr);c.lpfnWndProc=WindowProc;c.lpszClassName=L"ViFollowOwned";
         if(!RegisterClassW(&c))return 111;
+        if(mode==L"splash"||mode==L"hidden"){
+            HWND owner=CreateWindowExW(WS_EX_NOACTIVATE,c.lpszClassName,L"",WS_OVERLAPPEDWINDOW,-28000,600,400,250,nullptr,nullptr,c.hInstance,nullptr);
+            HWND splash=mode==L"splash"?CreateWindowExW(WS_EX_NOACTIVATE,c.lpszClassName,L"",WS_POPUP|WS_VISIBLE,-28000,600,400,250,owner,nullptr,c.hInstance,nullptr):nullptr;
+            Sleep(mode==L"splash"?1600:4000);if(splash)DestroyWindow(splash);if(owner)DestroyWindow(owner);
+        }
         HWND h=CreateWindowExW(WS_EX_NOACTIVATE,c.lpszClassName,L"Owned follow fixture",WS_OVERLAPPEDWINDOW|WS_VISIBLE,-28000,600,400,250,nullptr,nullptr,c.hInstance,nullptr);
         if(!h)return 111;
         FILE* out=nullptr;_wfopen_s(&out,receipt.c_str(),L"w");if(!out)return 111;
@@ -67,7 +72,7 @@ int wmain(int argc,wchar_t** argv){
     if(argc==2&&!wcscmp(argv[1],L"--await-start")){char line[8]{};if(!fgets(line,sizeof(line),stdin)||strcmp(line,"RUN\n"))return 111;}
     else if(argc>1)return Actor(argc,argv);
     Model();wchar_t own[32768]{};GetModuleFileNameW(nullptr,own,32768);
-    for(const wchar_t* mode:{L"same",L"java",L"chain",L"interactive"}){
+    for(const wchar_t* mode:{L"same",L"java",L"chain",L"interactive",L"splash",L"hidden"}){
         const auto receipt=ExeDir()+L"\\"+mode+L".pid";
         const bool interactive=!wcscmp(mode,L"interactive");
         Args a;a.opt={{"exe",W2U(interactive?ExeDir()+L"\\SkyrimSELauncher.exe":own)},{"args",W2U((interactive?L"--window ":L"--stub ")+std::wstring(mode)+L" \""+receipt+L"\"")},{"no-inject","true"},{"settle","0"},{"fg-guard","0"},{"timeout","8"}};

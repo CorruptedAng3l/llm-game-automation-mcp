@@ -74,8 +74,9 @@ static void RememberOcr(const std::vector<vi_text::Line>& found, std::vector<vi_
 struct TextScan { std::string preprocessing = "none"; double scale = 1; unsigned passes = 0; };
 // Ordinary OCR first, then bounded fallback passes. A successful pass is used on its own: alternate readings cannot
 // manufacture duplicate clickable hits. Miss diagnostics retain distinct actual OCR readings across the passes.
-static bool SearchText(DWORD pid, const Args& a, const TextQuery& q, Frame& f, std::vector<vi_text::Line>& lines, std::vector<vi_text::Hit>& hits, TextScan& scan, std::string& err) {
-    if (!Grab(pid, a, f, err, true)) return false;
+static bool SearchText(DWORD pid, const Args& a, const TextQuery& q, Frame& f, std::vector<vi_text::Line>& lines, std::vector<vi_text::Hit>& hits, TextScan& scan, std::string& err,Frame* fullFrame=nullptr) {
+    if(fullFrame){Args full=a;full.opt.erase(std::remove_if(full.opt.begin(),full.opt.end(),[](const auto& o){return o.first=="region";}),full.opt.end());if(!Grab(pid,full,*fullFrame,err,true))return false;if(HasOpt(a,"region")){if(!CropClientFrame(*fullFrame,GetOpt(a,"region"),f,err))return false;}else f=*fullFrame;}
+    else if (!Grab(pid, a, f, err, true)) return false;
     std::string lang; bool analyzed = false; lines.clear(); hits.clear(); scan = TextScan{};
     struct Pass { double scale; std::string mode; bool tiles; };
     std::vector<Pass> plan;
@@ -169,19 +170,22 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
     const char* name = mode == 0 ? "click-text" : mode == 1 ? "wait-text" : "assert-text";
     TextQuery q; std::string err;
     if (!ParseTextQuery(a, name, q, err)) return Fail(err);
+    const auto contextRegion=GetOpt(a,"context-region");vi_vision::Region contextRect;
+    if(HasOpt(a,"context-region")&&(mode!=1||!ClientRegion(contextRegion,contextRect)))return Fail("--context-region is a bounded client x,y,w,h rectangle for wait-text only");
     int nth; if (!ParseNth(a, nth, err)) return Fail(err);
     const bool gone = HasOpt(a, "gone") || HasOpt(a, "absent");
     if (mode == 0 && gone) return Fail("--gone only applies to wait-text / assert-text");
     double timeout = atof(GetOpt(a, "timeout", mode == 0 ? "5000" : mode == 1 ? "15000" : "0").c_str());
     if (!(timeout >= 0 && timeout <= 600000)) return Fail("--timeout is milliseconds, 0..600000");
     const DWORD t0 = GetTickCount(); unsigned polls = 0;
-    Frame f; std::vector<vi_text::Line> lines; std::vector<vi_text::Hit> hits; TextScan scan;
+    Frame f,fullFrame; std::vector<vi_text::Line> lines; std::vector<vi_text::Hit> hits; TextScan scan;
     for (;;) {
-        if (!SearchText(pid, a, q, f, lines, hits, scan, err)) return Fail(err, "\"polls\":" + std::to_string(polls));
+        if (!SearchText(pid, a, q, f, lines, hits, scan, err,contextRegion.empty()?nullptr:&fullFrame)) return Fail(err, "\"polls\":" + std::to_string(polls));
         ++polls;
         const DWORD elapsed = GetTickCount() - t0;
         std::string stats = "\"elapsed_ms\":" + std::to_string(elapsed) + ",\"polls\":" + std::to_string(polls) +
             ",\"ocr_pass\":\"" + scan.preprocessing + "\",\"ocr_scale\":" + Num(scan.scale) + ",\"ocr_passes\":" + std::to_string(scan.passes) + ",\"capture_space_updated\":false,\"text_word_boundary_version\":1,\"whole_word\":" + (q.opt.whole_word || q.opt.exact ? "true" : "false") + ",\"case_sensitive\":" + (q.opt.exact ? "true" : "false")+",\"text_line_match_version\":1,\"exact_line\":"+(q.opt.exact_line?"true":"false")+",\"candidate_limit\":20,\"candidates_truncated\":"+(hits.size()>20?"true":"false");
+        stats+=","+FrameTimingFields(f);
         if (mode == 0) {
             if (!hits.empty()) {
                 if (nth == 0 && hits.size() > 1)
@@ -197,6 +201,12 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
                 return {ok, std::string("{\"ok\":") + (ok ? "true" : "false") + ",\"clicked\":" + (ok ? "true" : "false") + ",\"match\":" + match + ",\"match_count\":" + std::to_string(hits.size()) + ",\"candidates\":"+CandidatesJson(f,lines,hits)+"," + kNoConfidence + "," + stats + ",\"click\":" + resp + "}"};
             }
         } else if (gone ? hits.empty() : !hits.empty()) {
+            if(!contextRegion.empty()){
+                Frame context;std::string contextError,lang;std::vector<vi_text::Line> contextLines;
+                bool contextOk=CropClientFrame(fullFrame,contextRegion,context,contextError);
+                if(contextOk)contextOk=OcrOnce(context,1,a,contextLines,lang,contextError);
+                stats+=",\"context\":{\"ok\":"+std::string(contextOk?"true":"false")+",\"same_capture\":true,\"region\":\""+JEsc(contextRegion)+"\",\"text\":\""+(contextOk?AllText(contextLines):std::string())+"\","+FrameTimingFields(fullFrame)+(contextOk?std::string():",\"error\":\""+JEsc(contextError)+"\"")+"}";
+            }
             std::string match = hits.empty() ? "null" : HitJson(f, lines, hits[(size_t)((nth ? nth : 1) <= (int)hits.size() ? (nth ? nth : 1) : 1) - 1], nth ? nth : 1);
             return {true, std::string("{\"ok\":true,\"found\":") + (hits.empty() ? "false" : "true") + ",\"gone\":" + (hits.empty() ? "true" : "false") + ",\"match\":" + match + ",\"match_count\":" + std::to_string(hits.size()) + "," + stats + "}"};
         }

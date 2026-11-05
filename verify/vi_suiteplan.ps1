@@ -54,6 +54,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'launch_affinity' 'run_launchaffinitytest.ps1'
  New-VinputSuiteCase 'launch_snapshot_model' 'run_launchsnapshotmodel.ps1'
  New-VinputSuiteCase 'sequence_deadline_model' 'run_sequencedeadlinemodel.ps1'
+  New-VinputSuiteCase 'sequence_present_anchor' 'run_mcpcontracttest.ps1' @{Test='sequence_conditions'}
  New-VinputSuiteCase 'input_scope_memory' 'run_inputscopememory.ps1'
  New-VinputSuiteCase 'pointer_scope_model' 'run_pointerscopemodel.ps1'
  New-VinputSuiteCase 'pointer_widen_model' 'run_pointerwidenmodel.ps1'
@@ -71,7 +72,12 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'motion_helpers' 'run_mcpcontracttest.ps1' @{Test='motion_helpers'}
  New-VinputSuiteCase 'delta_cursor' 'run_deltacursortest.ps1'
  New-VinputSuiteCase 'drag_scroll_capture' 'run_mcpcontracttest.ps1' @{Test='drag_scroll_capture'}
+  New-VinputSuiteCase 'capture_destinations' 'run_mcpcontracttest.ps1' @{Test='capture_destinations'}
+  New-VinputSuiteCase 'backend_reply_view' 'run_mcpcontracttest.ps1' @{Test='backend_view'}
+  New-VinputSuiteCase 'text_context' 'run_textcontexttest.ps1'
+  New-VinputSuiteCase 'hold_region_motion' 'run_mcpcontracttest.ps1' @{Test='hold_motion'}
  New-VinputSuiteCase 'batch_capture_receipts' 'run_mcpcontracttest.ps1' @{Test='agent_loops_model'}
+  New-VinputSuiteCase 'batch_tooltip_probes' 'run_mcpcontracttest.ps1' @{Test='batch_probes'}
  New-VinputSuiteCase 'visual_capture_build' 'run_visualcapturebuildtest.ps1'
  New-VinputSuiteCase 'sequence_guard_memory' 'run_sequenceguardmemory.ps1'
  New-VinputSuiteCase 'sequence_condition_observer' 'run_mcpcontracttest.ps1' @{Test='sequence_conditions'}

@@ -1,7 +1,10 @@
 #include "../src/vi_launch_live.h"
 #include "../src/vi_launch_exposure.h"
+#include "../src/vi_launch_splash.h"
 #include <cstdio>
 int main(){unsigned pass=0,fail=0;auto check=[&](bool v,const char* n){printf("%s %s\n",v?"PASS":"FAIL",n);v?++pass:++fail;};
+ check(vi_launch_splash::Pending(true,true,true,false,true),"same-process empty borderless owned splash remains starting");
+ check(!vi_launch_splash::Pending(true,true,true,true,true)&&!vi_launch_splash::Pending(true,true,true,false,false)&&!vi_launch_splash::Pending(true,false,true,false,true)&&!vi_launch_splash::Pending(true,true,false,false,true)&&!vi_launch_splash::Pending(false,true,true,false,true),"real dialog classes, text, foreign owner and framed/unowned windows retain original policy");
  const std::string valid="{\"ok\":false,\"pid\":123,\"readiness_version\":1,\"hook_ready\":true,\"window_ready\":true,\"queue_ready\":false,\"cursor_hooks_ready\":true,\"keybd_event_hooks_ready\":true,\"keybd_event_guard_version\":1,\"cursor_guard_version\":1,\"readiness_reason\":\"queue_not_progressing\",\"window_generation\":2,\"hwnd\":\"0x123\"}";
  std::uint64_t hwnd=0;check(vi_launch_live::QueuePending(valid,123,hwnd)&&hwnd==0x123,"positive queue-pending launch classification");
  check(!vi_launch_live::QueuePending(valid,124,hwnd),"wrong process identity refused");

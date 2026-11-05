@@ -390,6 +390,14 @@ static std::string LaunchDialogFields(HWND window) {
     char owner[32];sprintf_s(owner,"0x%llX",(unsigned long long)(ULONG_PTR)GetWindow(window,GW_OWNER));
     return WindowFields(window)+",\"dialog_owned_popup\":"+(OwnedPopupWindow(window)?"true":"false")+",\"dialog_owner_hwnd\":\""+owner+"\"";
 }
+#include "vi_launch_splash.h"
+static bool PendingStartupSplash(HWND window,DWORD pid){
+ DWORD actual=0,owner=0;if(!window||!GetWindowThreadProcessId(window,&actual)||actual!=pid)return false;
+ const HWND parent=GetWindow(window,GW_OWNER);if(parent)GetWindowThreadProcessId(parent,&owner);
+ DialogText text;text.pid=pid;EnumChildWindows(window,DialogTextEnum,(LPARAM)&text);
+ const auto style=(DWORD)GetWindowLongW(window,GWL_STYLE);
+ return vi_launch_splash::Pending(OwnedPopupWindow(window),owner==pid,(style&(WS_CAPTION|WS_THICKFRAME))==0,WindowClass(window)=="#32770",text.text.empty());
+}
 // The process that owns the foreground "for" a target: the target itself, or ApplicationFrameHost hosting its CoreWindow.
 static bool ForegroundIsTarget(HWND fg, DWORD target) {
     if (!fg || !target) return false;
@@ -841,7 +849,7 @@ static Reply WaitChange(DWORD pid, const Args& a) {
 static int Launch(const Args& a) {
     std::string injectReply,earlyInjectReply,dialogInjectReply,launchReadiness;
     std::string finalCommandLine,appliedAffinity,hiddenProbeInject,hiddenReason,showHiddenReply,showHiddenStatus;DWORD spawnedPid=0;bool affinityApplied=false,showHidden=false;
-    bool windowHiddenKnown=false,windowHidden=false,windowAdopted=false,showHiddenConfirmed=false;
+    bool windowHiddenKnown=false,windowHidden=false,windowAdopted=false,showHiddenConfirmed=false,startupSplashSeen=false;
     DWORD guardAppliedMs=0,settleAppliedMs=0,guardRequestedMs=0,settleRequestedMs=0;const DWORD finalReserveMs=1500;
     ULONGLONG budgetStarted=0;DWORD budgetRequested=0;
     DWORD followedFrom=0,launcherPid=0;
@@ -857,6 +865,7 @@ static int Launch(const Args& a) {
         result+=",\"early_inject\":"+(earlyInjectReply.empty()?std::string("null"):earlyInjectReply);
         result+=",\"dialog_inject\":"+(dialogInjectReply.empty()?std::string("null"):dialogInjectReply)+"}";
         result.pop_back();
+        result+=",\"startup_splash_observed\":"+std::string(startupSplashSeen?"true":"false");
         result+=",\"followed_from\":"+(followedFrom?std::to_string(followedFrom):"null");
         result+=",\"launcher_pid\":"+(launcherPid?std::to_string(launcherPid):"null");
         result+=",\"process_created\":\""+std::to_string(selectedCreated)+"\"";
@@ -1048,6 +1057,7 @@ static int Launch(const Args& a) {
                 // executable already expresses the caller's selection.
                 if(GetTickCount()-stableSince>=(waitExe.empty()?750u:250u)){
                     pid=p.pid;selectedCreated=p.born;g_launchPid=pid;w=VisibleWindowOf(pid);
+                    if(w&&!allowDialog&&pid!=launcherPid&&!launcher&&PendingStartupSplash(w,pid)){startupSplashSeen=true;w=nullptr;}
                     if(!w&&hiddenCandidates){
                         HANDLE retained=processHandles.Find(pid,p.born);const auto observed=vi_launch_hidden::Observe(retained,pid,p.born);
                         if(!observed.process_matched||!observed.complete||!observed.hidden_count){hiddenObservedAt=0;hiddenSeen=false;windowHiddenKnown=false;continue;}
@@ -1064,7 +1074,7 @@ static int Launch(const Args& a) {
                             const auto native=vi_launch_hidden::Parse(state,retained,pid,p.born);
                             if(native.valid&&native.adopted&&native.hidden_known&&native.hidden&&native.presentation_proven){w=native.window;windowAdopted=true;hiddenReason="presenting_hidden_window_adopted";}
                         }
-                        if(!w&&GetTickCount64()-hiddenObservedAt>=3000){hiddenReason=HasOpt(a,"no-inject")?"hidden_window_unproven_no_injection_requested":"hidden_window_presenting_proof_unconfirmed";break;}
+                        if(!w&&GetTickCount64()-hiddenObservedAt>=3000)hiddenReason=HasOpt(a,"no-inject")?"hidden_window_still_starting_no_injection_requested":"hidden_window_still_starting_presenting_proof_unconfirmed";
                     }
                     if(w){if(rootProcess.pid&&pid!=rootProcess.pid)followedFrom=rootProcess.pid;
                         if(IsWindowVisible(w)){windowHiddenKnown=true;windowHidden=false;}
@@ -1078,7 +1088,7 @@ static int Launch(const Args& a) {
         if(!w){
             if(windowHiddenKnown){const auto current=vi_launch_hidden::Observe(processHandles.Find(pid,selectedCreated),pid,selectedCreated);if(!current.process_matched||!current.complete||!current.hidden_count)windowHiddenKnown=false;}
             const auto loaded=vi_launch_injection::Observe(pid,injectReply);const char* injected=loaded.injectedKnown?(loaded.injected?"true":"false"):earlyInjected?"true":"null";
-            launchResult("{\"ok\":false,\"pid\":%lu,\"injected\":%s,\"ready\":false,\"keep_pid\":true,\"error\":\"%s\",\"waiting_for_exe\":\"%s\"}",pid,injected,hiddenSeen?"hidden window observed; presenting adoption is unconfirmed; inspect this PID and follow it later instead of relaunching":ambiguous?"multiple fresh game windows matched; target selection is unconfirmed; inspect retained PID":"no matching game window within launch timeout; existing processes were left running",JEsc(W2U(waitExe)).c_str());break;
+            launchResult("{\"ok\":false,\"pid\":%lu,\"injected\":%s,\"ready\":false,\"keep_pid\":true,\"still_starting\":%s,\"error\":\"%s\",\"waiting_for_exe\":\"%s\"}",pid,injected,(hiddenSeen||startupSplashSeen)?"true":"false",startupSplashSeen?"startup splash observed; real game window not selected within launch budget; follow this retained PID instead of relaunching":hiddenSeen?"hidden window still starting at launch budget expiry; presenting adoption is unconfirmed; inspect this PID and follow it instead of relaunching":ambiguous?"multiple fresh game windows matched; target selection is unconfirmed; inspect retained PID":"no matching game window within launch timeout; existing processes were left running",JEsc(W2U(waitExe)).c_str());break;
         }
         // Early injection applies only to the original suspended process.
         earlyInjected=earlyInjected&&pid==rootProcess.pid;

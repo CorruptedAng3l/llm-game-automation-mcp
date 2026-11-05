@@ -1,4 +1,5 @@
 // Views over vinput's `status` reply (vinput_core.cpp StatusJson): names instead of enum numbers.
+import {compactRenderBackends} from './backendview.js';
 type Obj = Record<string, unknown>;
 
 export const CURSOR_NAMES = ["auto", "virtual", "real"] as const;
@@ -150,6 +151,7 @@ export function hiddenWindowView(s: Obj): Obj {
 
 /** The essentials of a status reply (about 0.5 KB instead of 3 KB) plus warnings; `verbose` on the tool gives the raw reply. */
 export function compactStatus(s: Obj): Obj {
+  s=compactRenderBackends(s) as Obj;
   const c = (s.counters ?? {}) as Record<string, unknown>;
   const nonzero: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(c)) if (typeof v === "number" && v !== 0) nonzero[k] = v;

@@ -39,7 +39,7 @@ static Reply CmdImage(DWORD pid, const Args& a, int mode) {
         std::vector<vi_ncc::Match> m; for (auto& h : order) m.push_back(r.matches[(size_t)h.first]);
         const DWORD elapsed = GetTickCount() - t0;
         std::string stats = "\"elapsed_ms\":" + std::to_string(elapsed) + ",\"polls\":" + std::to_string(polls);
-        if(mode==2)stats+=",\"capture_scope\":"+(f.captureScope.empty()?std::string("null"):f.captureScope)+",\"capture_space_preserved\":"+(preserveMap?"true":"false")+
+        if(mode==2)stats+=",\"captured_present\":"+Num(f.nativeFrame)+",\"capture_scope\":"+(f.captureScope.empty()?std::string("null"):f.captureScope)+",\"capture_space_preserved\":"+(preserveMap?"true":"false")+
             ",\"timing_clock\":\"QueryPerformanceCounter\",\"qpc_frequency\":"+(f.qpcFrequency.empty()?std::string("null"):"\""+JEsc(f.qpcFrequency)+"\"")+
             ",\"capture_qpc_ticks\":"+(f.captureQpc.empty()?std::string("null"):"\""+JEsc(f.captureQpc)+"\"")+",\"frame_qpc_ticks\":"+(f.frameQpc.empty()?std::string("null"):"\""+JEsc(f.frameQpc)+"\"");
         std::string list = "[";

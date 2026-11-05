@@ -36,6 +36,12 @@ int main(){
  hits=vi_text::Find({Line({L"BATTIE"})},L"BATTLE",options);
  Check(hits.size()==1&&hits[0].score<1,"explicit fuzzy still accepts whole OCR words");
  options.fuzzy=0;
+ options.exact_line=true;
+ hits=vi_text::Find({Line({L"Save",L"Quit"})},L"Save & Quit",options);Check(hits.size()==1&&hits[0].first==0&&hits[0].last==1,"omitted ampersand matches complete default label with original word geometry");
+ Check(vi_text::Find({Line({L"Save",L"and",L"Quit"})},L"Save & Quit",options).size()==1&&vi_text::Find({Line({L"Save",L"&",L"Quit"})},L"Save and Quit",options).size()==1,"whole conjunction and ampersand are equivalent default labels");
+ options.exact=true;Check(vi_text::Find({Line({L"Save",L"Quit"})},L"Save & Quit",options).empty(),"explicit exact mode retains literal punctuation");options.exact=false;options.exact_line=false;
+ Check(vi_text::Find({Line({L"candy"})},L"cy",options).empty()&&vi_text::Find({Line({L"_and_"})},L"__",options).empty(),"and inside a word/identifier is never removed");
+ Check(vi_text::Find({Line({L"and"})},L"and",options).size()==1,"standalone conjunction search remains literal");
  Check(vi_text::Find({Line({L"BATTIE"})},L"BATTLE",options).empty(),"no unrequested fuzzy fallback");
  Check(vi_text::Find(labels,L"",options).empty(),"empty query never matches");
  std::printf("{\"passed\":%u,\"failed\":%u,\"completed\":true}\n",passed,failed);return failed?1:0;

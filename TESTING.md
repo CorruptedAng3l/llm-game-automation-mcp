@@ -185,6 +185,15 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   PASS; background plan (137 cases): 123 passed, 1 not_measured (capture_diagnostics); `owner_input` failed once
   with the desk in use and the 12 lane-8 cases behind it did not run, then all 13 passed alone except
   `legacy_focus` not_measured, so 135 passed / 2 not_measured.
+- Batch 0.2.8..0.2.9 (2026-11-05, vinput through 21fcb61): `hover_many` (per-point hash and optional tooltip OCR),
+  `click_many` accepts [x,y] pairs and an optional verify_change stop, caller capture destinations
+  (out_dir/save_path), PNG upscale and bounded scale/zoom, scroll/type aliases, compact default launch/status,
+  matched-text replies with the same frame's QPC and an optional context region, Present-anchored sequences, a
+  key `measure_region` motion score, and AGENT_TIPS playtest notes. Gate: `build.bat` x64 + x86 OK; `mcp` `npm test`
+  PASS; background plan (143 cases): 115 passed on the first run (`launch_follow` failed once while another test
+  run shared the box, `owner_input` failed with the desk in use, and 25 cases queued behind them did not run); on
+  reruns alone `launch_follow` and every queued case passed, so 139 passed, 3 not_measured (capture_diagnostics,
+  cursor_guard, legacy_focus) and `owner_input` still fails while the real mouse is in use (logged as VB6).
 
 ## Real games
 

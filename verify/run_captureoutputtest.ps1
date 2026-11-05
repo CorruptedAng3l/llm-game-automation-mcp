@@ -33,6 +33,8 @@ foreach($arch in @('','32')){
    Check ($unchanged.ok-and-not$unchanged.observation_frame_saved-and-not(Test-Path -LiteralPath $noFrame)) "capture$arch unchanged hash never writes a matched-frame artifact"
    $ocrPath=Join-Path $dir 'observed_ocr_frame.png';$ocrFrame=& $v --json --pid $gamePid ocr --lines-only --observation-only=true --observation-capture $ocrPath|ConvertFrom-Json;$proofs.Add($ocrFrame)
    Check ($ocrFrame.ok-and$ocrFrame.observation_frame_path-eq$ocrPath-and$ocrFrame.capture_space_updated-eq$false-and(ImageInfo $ocrPath).w-eq800) "capture$arch OCR retains its observed image without recapturing or changing the coordinate map"
+   $matchedText=& $v --json --pid $gamePid wait-text PLAY --region '60,110,200,60' --context-region '60,190,200,60' --timeout 1000|ConvertFrom-Json;$proofs.Add($matchedText)
+   Check ($matchedText.ok-and$matchedText.found-and$matchedText.context.ok-and$matchedText.context.same_capture-and$matchedText.context.text-match'OPTIONS'-and$matchedText.context.capture_qpc_ticks-eq$matchedText.capture_qpc_ticks-and$matchedText.timing_clock-eq'QueryPerformanceCounter'-and$matchedText.capture_space_updated-eq$false) "capture$arch actual OCR matches primary PLAY and reads OPTIONS context from the exact same captured frame"
    $print=& $v --json --pid $gamePid capture "$dir\printwindow.png" --method printwindow --scale 0.5|ConvertFrom-Json
    Check ($print.ok -and $print.method -eq 'printwindow' -and $print.w -eq 400 -and (ImageInfo "$dir\printwindow.png").h -eq 225) "capture$arch optional transform also works after PrintWindow readback"
   }

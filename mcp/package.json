@@ -1,6 +1,6 @@
 {
   "name": "llm-game-automation-mcp",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "MCP server that lets an LLM agent play single-player / offline Windows games through vinput: per-process background input and frame capture.",
   "license": "MIT",
   "author": "CorruptedAngel",

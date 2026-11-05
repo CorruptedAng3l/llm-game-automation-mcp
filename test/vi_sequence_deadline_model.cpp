@@ -17,6 +17,7 @@ static BOOL WINAPI ModelFrequency(LARGE_INTEGER* n){n->QuadPart=1000;return TRUE
 #undef QueryPerformanceFrequency
 #include "../src/vi_key_sequence.h"
 #include "../src/vi_sequence_edges.h"
+#include "../src/vi_sequence_frame.h"
 struct InputJob{
  std::vector<vi_key_sequence::Step> sequence;size_t sequenceStep=0;int index=0,phase=0;unsigned transitions=0;bool done=false;
  ULONGLONG next=0,maxLate=0,duration=0;std::uint64_t qpcFrequency=1000,qpcAnchor=0,qpcNext=0,qpcLast=0,qpcLastDeadline=0,qpcMaxLate=0,qpcFinished=0;
@@ -38,6 +39,10 @@ static InputJob Run(const std::string& script,unsigned quantum){
  do{JobRunSequence(job,clockTick);if(!job.done)clockTick+=quantum;}while(!job.done&&clockTick<limit);return job;
 }
 int main(){
+ using namespace vi_sequence_frame;
+ Check(Evaluate(12,11,100,200,50,true)==Waiting&&Evaluate(12,12,100,200,50,false)==Waiting,"future frame and worker-only equality never start frame anchored input");
+ Check(Evaluate(12,12,100,200,50,true)==Fire&&Evaluate(12,13,100,200,50,true)==Missed,"only exact native frame checkpoint fires; missed target refuses");
+ Check(Evaluate(12,12,200,200,50,true)==Expired&&Evaluate(12,12,100,200,0,true)==Invalid&&Evaluate(0,1,100,200,50,true)==Invalid,"deadline wins at boundary and unavailable frame clocks refuse");
  const auto first=clockTick;std::string script;for(unsigned i=0;i<50;i++)script+="wait 10\n";script+="key space 80\n";
  auto job=Run(script,7);
  Check(job.done&&job.state=="completed"&&edges.size()==2,"fifty waits and one tap complete through actual scheduler");

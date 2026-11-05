@@ -48,7 +48,8 @@ export function sequenceWaitError(initial: CliResult, outcome: string, error: st
 export async function waitSequence(initial: CliResult, ctx: SequenceWaitContext, explicitTimeout?: number): Promise<CliResult> {
   const start = performance.now(), admitted = sequenceJob(initial.json, ctx, true);
   if (!admitted) return sequenceWaitError(initial, "invalid_ack", "sequence may have started, but its generation-bound acknowledgement is invalid; no input was retried", 0, explicitTimeout);
-  const timeout = explicitTimeout ?? Math.min(120000, Math.ceil(admitted.requested_ms) + 5000), deadline = start + timeout;
+  const frameWait=typeof admitted.present_anchor_timeout_ms==='number'&&Number.isInteger(admitted.present_anchor_timeout_ms)&&admitted.present_anchor_timeout_ms>=100&&admitted.present_anchor_timeout_ms<=60000?admitted.present_anchor_timeout_ms:0;
+  const timeout = explicitTimeout ?? Math.min(120000, Math.ceil(admitted.requested_ms) + frameWait + 5000), deadline = start + timeout;
   let last = admitted;
   for (;;) {
     if (ctx.currentEpoch() !== ctx.epoch) return sequenceWaitError(initial, "attachment_changed", "attachment changed while waiting; the sequence was not cancelled or replayed", performance.now() - start, timeout, last);
