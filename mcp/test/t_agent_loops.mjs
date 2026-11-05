@@ -2,12 +2,13 @@ import {fileURLToPath} from 'node:url';
 import {makeChecker,startFake,cmdOf} from './lib.mjs';
 const {state,check}=makeChecker(),pid=process.pid,t=await startFake({}, {VINPUT_EXE:fileURLToPath(new URL('./fake_agent_loops.mjs',import.meta.url))});
 const calls=()=>t.callsOf('json').map(a=>JSON.parse(cmdOf(a)[1])),actions=()=>calls().filter(x=>['click','mouse','key'].includes(x.cmd));
+const witness=(good,label,r)=>{if(!good)console.error('AGENT_LOOP_DIAGNOSTIC '+JSON.stringify({reply:r,timed_cli_calls:t.timedCalls()}));check(good,label,r.text);};
 const set=s=>{t.setScenario(s);t.clearCalls();},pts=[{x:10,y:20},{x:30,y:40},{x:50,y:60}],base={pid,points:pts,timeout_ms:10000};
 try{
  let r=await t.call('click_many',base);
  check(!r.isError&&r.json.completed_points===3&&r.json.points.length===3&&r.json.input_session.native_batch===false&&r.json.game_response_measured===false,'one MCP batch reports all point receipts without claiming native batching or game response',r.text);
  check(actions().length===3&&actions().every(x=>x.cmd==='click'&&x.count===1&&x.expected_capture_scope&&x.admit_before_qpc_ticks&&x.admit_qpc_frequency==='1000')&&new Set(actions().map(x=>x.admit_before_qpc_ticks)).size===1,'each normal native point carries one exact scope and shared bounded QPC deadline');
- set({});r=await t.call('click_grid',{pid,x0:10,y0:20,dx:5,dy:7,cols:2,rows:2,timeout_ms:10000});check(!r.isError&&JSON.stringify(actions().map(x=>[x.x,x.y]))==='[[10,20],[15,20],[10,27],[15,27]]','grid emits intended row-major client points once',r.text);
+ set({});r=await t.call('click_grid',{pid,x0:10,y0:20,dx:5,dy:7,cols:2,rows:2,timeout_ms:10000});witness(!r.isError&&JSON.stringify(actions().map(x=>[x.x,x.y]))==='[[10,20],[15,20],[10,27],[15,27]]','grid emits intended row-major client points once',r);
  set({});r=await t.call('click_grid',{pid,x0:10,y0:20,dx:1,dy:1,cols:256,rows:2});check(r.isError&&!actions().length&&!t.callsOf('status').length,'oversized grid refuses before native I/O');
  set({click_patches:{2:{ok:false,input_injected:null,delivery_unknown:true,reply_raw:'partial'}}});r=await t.call('click_many',base);check(r.isError&&actions().length===2&&r.json.completed_points===1&&r.json.points[1].receipt.reply_raw==='partial','uncertain second point stops third point and preserves original uncertain receipt',r.text);
  set({click_patches:{1:{button_released:false}}});r=await t.call('click_many',base);check(r.isError&&actions().length===1&&!r.json.points[0].confirmed,'unconfirmed release stops without broad cleanup or replay',r.text);

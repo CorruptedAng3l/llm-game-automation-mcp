@@ -14,7 +14,8 @@ keyboard, mouse, gamepad and eyes:
   named pipe. Input is delivered *inside* that process on every channel games read; frames are captured from the
   game's own swapchain.
 - **MCP server** (`mcp/`) - wraps the CLI as [Model Context Protocol](https://modelcontextprotocol.io) tools
-  (`launch`, `capture`, `click_text`, `key`, `pad`, ...), so Claude or any MCP client can look at a game and act on it.
+  (62 tools: `launch`, `capture`, `click_text`, `key`, `pad`, `key_sequence`, `move_until_stuck`, `turn`,
+  `click_many`, ...), so Claude or any MCP client can look at a game and act on it.
 
 ## Why it is different
 
@@ -35,7 +36,7 @@ game in front, steals your mouse and keyboard, and allows exactly one game at a 
 
 | | supported | notes |
 |---|---|---|
-| **Capture** | Direct3D 11, Direct3D 12, OpenGL, Vulkan, DirectDraw (virtual primary surface), `PrintWindow` fallback | HDR formats (R10G10B10A2, RGBA16F) converted to 8-bit; PNG or JPEG, optionally scaled inside the game; contact sheets (`capture-burst`); Vulkan needs early injection (`launch --early`); D3D9/D3D10 fall back to `PrintWindow` |
+| **Capture** | Direct3D 9 (`Present` hook), Direct3D 11, Direct3D 12, OpenGL, Vulkan, DirectDraw (virtual primary surface), `PrintWindow` fallback (also reads a DirectDraw wrapper's `...PresentationWindow`) | HDR formats (R10G10B10A2, RGBA16F) converted to 8-bit; PNG or JPEG, optionally scaled inside the game; contact sheets (`capture-burst`); Vulkan needs early injection (`launch --early`); D3D10 falls back to `PrintWindow`; D3D9 capture is tested on synthetic targets only |
 | **Keyboard** | window messages (`WM_KEYDOWN`/`WM_CHAR`, with the game's own `TranslateMessage`), Raw Input (`WM_INPUT`, `GetRawInputBuffer` on x64), DirectInput 8 and legacy `dinput.dll` (DirectInput 1-7), `GetAsyncKeyState`/`GetKeyState`/`GetKeyboardState` | mirrors the game's own `RegisterRawInputDevices` choices (e.g. `RIDEV_NOLEGACY`) |
 | **Mouse** | messages, Raw Input, DirectInput 8, virtual cursor behind `GetCursorPos` / `WindowFromPoint` | absolute (`click`, `move`) and relative (`move_relative`, mouse-look) |
 | **Gamepad** | XInput pad 0 (`XInputGetState`, `XInputGetStateEx`) | buttons, both sticks, triggers; timed ramps and state timelines for proportional steering |
@@ -100,7 +101,8 @@ npm run build
 npm test
 ```
 
-`npm test` is the MCP handshake test (`tools/list` against the built server); it needs no game. Self-tests: see
+`npm test` runs the MCP handshake test (`tools/list` against the built server) and the MCP-layer tests against a fake
+vinput (`mcp\test\t_*.mjs`); it needs no game. Self-tests: see
 [TESTING.md](TESTING.md).
 
 ## CLI quick start
@@ -160,7 +162,8 @@ dist\vinput.exe --pid 1234 click left 120 80 --capture-space
   uses). `application_ready` is always `null`: vinput cannot know that a game or a program inside it has finished
   starting, so verify the first action on screen. `ping` keeps its meaning (the pipe is alive).
 - **Async key sequences.** `seq FILE` (alias `sequence`) validates the whole file first, then returns a background job
-  ID at once. Lines are `hold CHORD MS`, `key CHORD MS`, `wait MS` or `sleep MS`; `#` starts a comment. Cancelling
+  ID at once. Lines are `hold CHORD MS`, `key CHORD MS`, `wait MS`, `sleep MS` or
+  `retap CHORD KEY MS EVERY_MS GAP_MS` (keep CHORD held, re-press only KEY); `#` starts a comment. Cancelling
   (`job-cancel`) releases the active chord; the keys of later steps are reserved, so pressing one by hand cancels the
   rest. At most 32768 bytes, 1024 steps and 118000 ms of declared timing; the 120-second job lifetime cap still applies.
 - **Gamepad.** `lt` and `rt` are button-list aliases for the triggers (`pad a+lt 300` presses LT fully; a partial
@@ -307,8 +310,9 @@ anti-cheat that stays resident (for example Vanguard's `vgc` service) blocks vin
 - **Inputs vinput does not reach:** direct syscall / `NtUserGetAsyncKeyState` readers; Windows.Gaming.Input,
   GameInput and WinRT `CoreWindow` keyboard events (many UWP games: use `pad`); HID read directly; DirectInput
   joysticks; Steam Input; `GetRawInputBuffer` in 32-bit processes; XInput users 1-3.
-- **Capture:** Vulkan only when vinput is injected before the game creates its device (`launch --early`); D3D9 and
-  D3D10 are not captured natively; `PrintWindow` can be black or white for some surfaces.
+- **Capture:** Vulkan only when vinput is injected before the game creates its device (`launch --early`); D3D10 is
+  not captured natively, and D3D9 native capture has not been verified in a real game (field runs on D3D9 games used
+  `PrintWindow`); `PrintWindow` can be black or white for some surfaces.
 - **OCR** has no confidence score and can misread stylised or very small text: use `--region`, `--scale 2` or image
   matching. Image matching does not handle rotation and finds scales within about +-20 % by default.
 - **Text:** `type` posts `WM_CHAR` (right for text boxes); games that only read raw keys need `type --keys`, which does

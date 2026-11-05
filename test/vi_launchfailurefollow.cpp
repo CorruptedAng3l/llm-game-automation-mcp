@@ -88,7 +88,7 @@ int wmain(int argc,wchar_t** argv){
  for(const wchar_t* mode:{L"same",L"ambiguous",L"sibling"}){
   const auto receipt=ExeDir()+L"\\"+mode+L".pid",json=receipt+L".json";
   if(!wcscmp(mode,L"sibling")){actorReceipt=receipt;Check(SpawnChild(L".outsider"),"unrelated same-image sibling control starts outside the launched root");}
-  Args args;args.opt={{"exe",W2U(own)},{"dll",W2U(own)},{"args",W2U(L"--stub "+std::wstring(mode)+L" \""+receipt+L"\"")},{"timeout","7"},{"settle","0"},{"fg-guard","0"}};
+  Args args;args.opt={{"exe",W2U(own)},{"new-instance","true"},{"dll",W2U(own)},{"args",W2U(L"--stub "+std::wstring(mode)+L" \""+receipt+L"\"")},{"timeout","7"},{"settle","0"},{"fg-guard","0"}};
   FILE* output=_wfsopen(json.c_str(),L"w",_SH_DENYNO);if(!output)return 111;fflush(stdout);const int saved=_dup(_fileno(stdout));if(saved<0||_dup2(_fileno(output),_fileno(stdout)))return 111;
   loaderAttempts=0;const auto began=GetTickCount64();const int result=Launch(args);fflush(stdout);_dup2(saved,_fileno(stdout));_close(saved);fclose(output);
   const auto raw=Read(json);vi_ready_json::Reader parsed{raw,0,{},128};const bool valid=parsed.Parse();const DWORD child=Published(receipt+L".child");

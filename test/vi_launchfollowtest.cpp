@@ -5,7 +5,7 @@
 #undef wmain
 #include "vi_launch_terminal.h"
 #include "vi_launch_ack.h"
-#include "../src/vi_launch_follow.h"
+#include <vi_launch_follow.h>
 static int pass=0,fail=0;
 static void Check(bool b,const char* n){printf("%s %s\n",b?"PASS":"FAIL",n);b?++pass:++fail;}
 static std::wstring handoffReceipt;
@@ -75,7 +75,7 @@ int wmain(int argc,wchar_t** argv){
     for(const wchar_t* mode:{L"same",L"java",L"chain",L"interactive",L"splash",L"hidden"}){
         const auto receipt=ExeDir()+L"\\"+mode+L".pid";
         const bool interactive=!wcscmp(mode,L"interactive");
-        Args a;a.opt={{"exe",W2U(interactive?ExeDir()+L"\\SkyrimSELauncher.exe":own)},{"args",W2U((interactive?L"--window ":L"--stub ")+std::wstring(mode)+L" \""+receipt+L"\"")},{"no-inject","true"},{"settle","0"},{"fg-guard","0"},{"timeout","8"}};
+        Args a;a.opt={{"exe",W2U(interactive?ExeDir()+L"\\SkyrimSELauncher.exe":own)},{"new-instance","true"},{"args",W2U((interactive?L"--window ":L"--stub ")+std::wstring(mode)+L" \""+receipt+L"\"")},{"no-inject","true"},{"settle","0"},{"fg-guard","0"},{"timeout","8"}};
         if(interactive)a.opt.push_back({"wait-exe","SkyrimSE.exe"});
         const auto started=GetTickCount64();const int result=Launch(a);const auto elapsed=GetTickCount64()-started;
         FILE* input=nullptr;unsigned long expected=0;const auto publicationDeadline=GetTickCount64()+6000;

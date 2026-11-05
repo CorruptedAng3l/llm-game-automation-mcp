@@ -37,6 +37,15 @@ try {
   check(val(cap, "--scale") === undefined && val(cap, "--format") === undefined && r.json?.image?.scaled_by === undefined && r.image?.mimeType === "image/png",
     "plain capture: no output options, PNG, no scaled_by", JSON.stringify(cap));
 
+  r=await t.call('capture',{pid,region:{x:100,y:40,w:80,h:60},scale:3});
+  im=decodePng(Buffer.from(r.image.data,'base64'));
+  check(!r.isError&&im.width===240&&im.height===180&&r.json.image.scale===3&&r.json.image.offset_x===100,'scale3 enlarges a cropped inline PNG and updates its mapping');
+  check(/preview/.test(r.json.preview_note??''),'enlargement explains that path names the clean native capture');
+  for(const options of [{scale:3},{zoom:3},{grid:50}]){
+    t.clearCalls();const noImage=await t.call('capture',{pid,include_image:false,...options});
+    check(noImage.isError&&/preview/.test(noImage.text)&&t.callsOf('capture').length===0,'disabled preview cannot silently ignore an enlargement/grid request');
+  }
+
   r = await t.call("capture", { pid, format: "jpeg", quality: 70 });
   cap = t.callsOf("capture").at(-1);
   check(!r.isError && val(cap, "--format") === "jpeg" && val(cap, "--quality") === "70" && /\.jpg$/.test(cap[cap.indexOf("capture") + 1]), "jpeg: --format jpeg --quality 70, .jpg path", JSON.stringify(cap));

@@ -45,7 +45,8 @@ try{
  let r=await t.call('capture',{pid,zoom:2});const writes=t.callsOf('json').map(a=>JSON.parse(cmdOf(a)[1]));
  check(!r.isError&&r.json.mapping.scale===1&&r.json.mapping.scale_y===0.5&&r.json.capture_mapping_persisted===true,'host enlargement composes native per-axis scales and confirms persistence',r.text);
  check(writes.length===1&&writes[0].cmd==='capture-map-resize'&&writes[0].image_w===200&&writes[0].image_h===100&&writes[0].capture_map_id===saved.capture_map_id,'postprocess publishes only dimensions with exact map identity and scope');
- t.clearCalls();r=await t.call('capture',{pid,include_image:false,zoom:2});check(!r.isError&&r.json.mapping.scale===0.5&&r.json.capture_mapping_persisted===true&&t.callsOf('json').length===0,'file-only capture remembers the saved native image without applying an undisplayed zoom',r.text);
+ t.clearCalls();r=await t.call('capture',{pid,include_image:false,zoom:2});check(r.isError&&/preview/.test(r.text)&&t.callsOf('capture').length===0&&t.callsOf('json').length===0,'file-only preview zoom refuses explicitly before capture or mapping mutation',r.text);
+ t.clearCalls();r=await t.call('capture',{pid,include_image:false});check(!r.isError&&r.json.mapping.scale===0.5&&r.json.capture_mapping_persisted===true&&t.callsOf('json').length===0,'plain file-only capture still remembers the exact saved native image mapping',r.text);
  t.setScenario({png:{w:100,h:50},replies:{capture:{...saved,w:100,h:50,method:'swapchain'},json:{ok:false,error:'map changed'}}});t.clearCalls();r=await t.call('capture',{pid,zoom:2});check(!r.isError&&r.json.capture_mapping_persisted===false&&r.json.capture_mapping_warning&&t.callsOf('capture').length===1&&t.callsOf('json').length===1,'lost map CAS is explicit and never replays capture or input',r.text);
 }finally{await t.close();}
 const explicit=await startFake({replies:{json:observation,click:{ok:true}}});

@@ -168,7 +168,14 @@ async function settle(ctx: CameraContext, a: SettleOptions, epoch: number, basel
   return { stable: false, samples, changes, elapsed_ms: Math.round(performance.now() - started), last_change_ms: Math.round(changedAt - started), stable_window_ms: Math.round(performance.now() - changedAt), sample: last,stability_metric:(a.max_change_pct??0)>0?'area_averaged_rgb_grid':'exact_region_hash',max_change_pct:a.max_change_pct??0,pixel_tolerance:a.pixel_tolerance??8 };
 }
 const settleView = (r: SettleResult) => ({ ...r, sample: r.sample.receipt, queue_drain_measured: false, camera_angle_measured: false, raw_queue_remaining_counts: null, scope: "selected-region pixel stability at the stated metric/tolerance; no causal camera/gameplay claim" });
-function captureValidation(ctx: CameraContext, a: CaptureOptions) { return ctx.captureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region }); }
+function captureValidation(ctx: CameraContext, a: CaptureOptions) {
+  if(a.capture_after!==undefined&&a.capture_after!==false)return ctx.captureError(a);
+  const preview={...a} as CaptureOptions&Record<string,unknown>;
+  // region still selects observation pixels; these options only affect the
+  // optional image, which the caller/default declined.
+  for(const key of ['region','max_width','scale','format','quality','upscale','save_path','out_dir','capture_stable'])delete preview[key];
+  return ctx.captureError(preview);
+}
 export async function observeSettle(ctx: CameraContext, a: SettleOptions): Promise<Reply> {
   const invalid = captureValidation(ctx, a);if (invalid) return response({ ok: false, error: invalid });
   const epoch = ctx.epoch(a.pid), started = performance.now();
@@ -176,7 +183,8 @@ export async function observeSettle(ctx: CameraContext, a: SettleOptions): Promi
     await preflight(ctx, a.pid, epoch, "observe");const baseline = await hashFrame(ctx, a.pid, a.region, 1500,(a.max_change_pct??0)>0);
     const observed = await settle(ctx, a, epoch, baseline, performance.now() + (a.timeout_ms ?? 5000));
     return ctx.finish(a.pid, response({ ok: observed.stable, pid: a.pid, settled: observed.stable, observation: settleView(observed),
-      ...(!observed.stable ? { error: "region did not remain hash-stable within the observation deadline" } : {}),
+      ...(!observed.stable ? { timed_out:true,stop_reason:'region_stability_timeout',error:`selected region exceeded ${observed.stability_metric} tolerance before the observation deadline; exclude animated background/HUD pixels or choose max_change_pct/pixel_tolerance` } : {}),
+      ...((a.capture_after===undefined||a.capture_after===false)&&a.max_width!==undefined?{preview_note:'max_width and other preview image options are ignored without capture_after; region still selects observed client pixels'}:{}),
       elapsed_ms: Math.round(performance.now() - started), hint: smoothingHint }), a, epoch);
   } catch (e) { return ctx.finish(a.pid, response({ ok: false, pid: a.pid, settled: false, error: e instanceof Error ? e.message : String(e), hint: smoothingHint }), a, epoch); }
 }
@@ -383,7 +391,7 @@ export function registerCameraHelpers(register: Register, ctx: CameraContext, ac
   const observe = { ...actionCaptureArgs, pid: z.number().int().positive(), region: regionSchema.optional(),
     timeout_ms: z.number().int().min(100).max(60000).optional(), poll_ms: z.number().int().min(50).max(1000).optional(),
     stable_samples: z.number().int().min(2).max(10).optional().describe("Consecutive stable scoped samples, default 3; excludes neither pauses nor animation outside the region."),max_change_pct:z.number().min(0).max(100).optional().describe('Optional noise tolerance: percent of changed cells in a 16x16 area-averaged RGB grid. Default zero uses exact hashes; this is not object or camera motion.'),pixel_tolerance:z.number().int().min(0).max(255).optional() };
-  register("observe_settle", "Observe region stability", "Observe until a selected region has repeated identical hashes or the deadline expires. Reports changes and stable-window timing without moving input. A quiet region does not prove the native queue drained or a camera settled; avoid animated HUD/overlays.",
+  register("observe_settle", "Observe region stability", "Observe until a selected client region has repeated identical hashes, or stays within max_change_pct/pixel_tolerance, or the deadline expires. Exclude animated backgrounds/HUD with region; full-frame animation can prevent settling. Reports metric, tolerance and timeout reason without moving input. A quiet region does not prove the native queue drained or a camera settled. Preview options such as max_width are ignored without capture_after.",
     observe, async a => observeSettle(ctx, a as SettleOptions), true);
   const targetArgs = { ...observe, template: z.string().min(1).max(32768).describe("PNG template of a unique static visual landmark, reidentified after every probe; ambiguity/missing target stops motion."),
     threshold: z.number().min(0.01).max(1).optional(), settle_timeout_ms: z.number().int().min(100).max(10000).optional().describe("Per-probe pixel-stability observation budget, default 1500 ms; the overall deadline still bounds the helper.") };

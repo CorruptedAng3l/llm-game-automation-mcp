@@ -9,11 +9,20 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 export const serverJs = process.env.VINPUT_TEST_SERVER ? resolve(process.env.VINPUT_TEST_SERVER) : resolve(here, "..", "build", "index.js");
 export const fakeExe = resolve(here, "fake_vinput.mjs");
+let latestFakeCall;
 
 export function makeChecker() {
   const state = { failures: 0, passes: 0 };
   const check = (cond, what, detail = "") => {
     console.log(`${cond ? "PASS" : "FAIL"} ${what}${!cond && detail ? " :: " + String(detail).slice(0, 400) : ""}`);
+    if (!cond && latestFakeCall) {
+      // Diagnostics only: preserve the latest owned fixture reply without changing
+      // assertions, transport timeouts, guard leases, input or retry behavior.
+      try {
+        const encoded = JSON.stringify(latestFakeCall());
+        console.error("LATEST_FAKE_CALL " + (encoded.length <= 65536 ? encoded : JSON.stringify({ truncated: true, original_characters: encoded.length, diagnostic_json_prefix: encoded.slice(0, 65536) })));
+      } catch (e) { console.error("LATEST_FAKE_CALL " + JSON.stringify({ diagnostic_unavailable: String(e) })); }
+    }
     if (cond) state.passes++; else state.failures++;
     return cond;
   };
@@ -48,6 +57,10 @@ export async function startFake(scenario = {}, extraEnv = {}) {
       const r = await client.callTool({ name, arguments: args }, undefined, { timeout: 60000 });
       const texts = r.content.filter((c) => c.type === "text").map((c) => c.text);
       let json = null; try { json = JSON.parse(texts[0] ?? ""); } catch { /* leave null */ }
+      latestFakeCall = () => {
+        const calls = api.timedCalls();
+        return { scope: "latest owned fake-CLI tool call; asynchronous assertions may concern another in-flight call", name, arguments: args, isError: !!r.isError, texts, image_count: r.content.filter(c => c.type === "image").length, fixture_call_count: calls.length, fixture_log_tail: calls.slice(-64) };
+      };
       return { r, json, text: texts.join("\n"), texts, image: r.content.find((c) => c.type === "image"), isError: !!r.isError };
     },
     async close() { await client.close().catch(() => {}); try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } },

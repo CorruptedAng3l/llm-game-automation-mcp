@@ -1,0 +1,195 @@
+{
+  "source": "E:\\Rasario\\Income\\playthroughs\\risk\\cap\\c49_1.png",
+  "sha256": "57e3f6f7ebab5c42bf0c53bc06a2435258deb05ab52e0b9925f1f9363638c476",
+  "source_size": [
+    960,
+    540
+  ],
+  "analysis": "Pinned lossless PNG-space crops; labels are human annotations, not OCR; client mapping absent.",
+  "regions": [
+    {
+      "id": "purple_one",
+      "source_png_box": [
+        390,
+        83,
+        24,
+        24
+      ],
+      "human_inspection_label": "1",
+      "selected_pixels": 19,
+      "selected_bounds_source_png": [
+        399,
+        90,
+        4,
+        8
+      ],
+      "threshold_min_channel": 170,
+      "max_channel_spread": 40,
+      "inner_disk_fraction": 0.4,
+      "ocr_executed": false,
+      "fixture_png": "purple_one.png",
+      "fixture_sha256": "5118b0eb3d2a1148e2bd272442d996a044e7d44ee101a0ad43badc61b83f88e3"
+    },
+    {
+      "id": "yellow_one",
+      "source_png_box": [
+        595,
+        77,
+        24,
+        24
+      ],
+      "human_inspection_label": "1",
+      "selected_pixels": 19,
+      "selected_bounds_source_png": [
+        605,
+        86,
+        4,
+        8
+      ],
+      "threshold_min_channel": 170,
+      "max_channel_spread": 40,
+      "inner_disk_fraction": 0.4,
+      "ocr_executed": false,
+      "fixture_png": "yellow_one.png",
+      "fixture_sha256": "088927fc2bfba00255f3aed52d29b2ad4e6ab7f4d6abf36f709d4f372108753c"
+    },
+    {
+      "id": "black_five",
+      "source_png_box": [
+        372,
+        130,
+        24,
+        24
+      ],
+      "human_inspection_label": "5",
+      "selected_pixels": 25,
+      "selected_bounds_source_png": [
+        381,
+        137,
+        5,
+        8
+      ],
+      "threshold_min_channel": 170,
+      "max_channel_spread": 40,
+      "inner_disk_fraction": 0.4,
+      "ocr_executed": false,
+      "fixture_png": "black_five.png",
+      "fixture_sha256": "82979630ed608d14025ee8fe30410aa0c43b19f8696b952b5b9eb8569cde09e1"
+    },
+    {
+      "id": "purple_three",
+      "source_png_box": [
+        285,
+        272,
+        26,
+        26
+      ],
+      "human_inspection_label": "3",
+      "selected_pixels": 38,
+      "selected_bounds_source_png": [
+        294,
+        279,
+        7,
+        10
+      ],
+      "threshold_min_channel": 170,
+      "max_channel_spread": 40,
+      "inner_disk_fraction": 0.4,
+      "ocr_executed": false,
+      "fixture_png": "purple_three.png",
+      "fixture_sha256": "c58e666b00e1bab508f60167b3d317fd611eeeda83fd37520bc56eb9a2ff19d5"
+    },
+    {
+      "id": "black_one",
+      "source_png_box": [
+        503,
+        296,
+        26,
+        26
+      ],
+      "human_inspection_label": "1",
+      "selected_pixels": 35,
+      "selected_bounds_source_png": [
+        513,
+        303,
+        5,
+        10
+      ],
+      "threshold_min_channel": 170,
+      "max_channel_spread": 40,
+      "inner_disk_fraction": 0.4,
+      "ocr_executed": false,
+      "fixture_png": "black_one.png",
+      "fixture_sha256": "a0234dba4c9298ebcee9eb0d2930e31c85ff0a2031b13ac51ba54316e5a3278f"
+    },
+    {
+      "id": "black_three",
+      "source_png_box": [
+        455,
+        389,
+        26,
+        26
+      ],
+      "human_inspection_label": "3",
+      "selected_pixels": 41,
+      "selected_bounds_source_png": [
+        464,
+        396,
+        7,
+        10
+      ],
+      "threshold_min_channel": 170,
+      "max_channel_spread": 40,
+      "inner_disk_fraction": 0.4,
+      "ocr_executed": false,
+      "fixture_png": "black_three.png",
+      "fixture_sha256": "e3f3e5d78e0c8a501c705f948e7ff122c2179efbc2569c38b291b8db38305676"
+    },
+    {
+      "id": "yellow_four",
+      "source_png_box": [
+        511,
+        215,
+        26,
+        26
+      ],
+      "human_inspection_label": "4",
+      "selected_pixels": 36,
+      "selected_bounds_source_png": [
+        520,
+        223,
+        8,
+        9
+      ],
+      "threshold_min_channel": 170,
+      "max_channel_spread": 40,
+      "inner_disk_fraction": 0.4,
+      "ocr_executed": false,
+      "fixture_png": "yellow_four.png",
+      "fixture_sha256": "04ce646de53648a0f3ee25e81b76e74baf1db9f36e425d7f72e948a7aa8fd6e4"
+    },
+    {
+      "id": "yellow_two",
+      "source_png_box": [
+        657,
+        308,
+        26,
+        26
+      ],
+      "human_inspection_label": "2",
+      "selected_pixels": 44,
+      "selected_bounds_source_png": [
+        665,
+        316,
+        7,
+        10
+      ],
+      "threshold_min_channel": 170,
+      "max_channel_spread": 40,
+      "inner_disk_fraction": 0.4,
+      "ocr_executed": false,
+      "fixture_png": "yellow_two.png",
+      "fixture_sha256": "639caab6dd74a36240b7461600265142257feefda0b82bdc2f02491735124216"
+    }
+  ]
+}

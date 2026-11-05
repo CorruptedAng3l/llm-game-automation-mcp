@@ -7,7 +7,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server (stdio transp
 `@modelcontextprotocol/sdk`) that lets any LLM agent play Windows games through vinput: input and screenshots go to
 one game process **in the background**, so the game never needs focus and you keep your mouse and keyboard.
 
-Apart from the host-timer `wait` tool, tools run `vinput.exe` and return **vinput's own JSON reply** as text. `ok` is surfaced as the MCP `isError`
+The server has **62** tools (counted from `tools/list` of the current build). Apart from the host-timer `wait` tool, tools run
+`vinput.exe` (once or several times) and return **vinput's own JSON reply** as text. `ok` is surfaced as the MCP `isError`
 flag: `ok:false` (or a crash, timeout or missing binary) always comes back as `isError: true` with the error text,
 never silently. `capture` also returns the PNG as MCP image content.
 
@@ -19,7 +20,7 @@ Requires Windows 10/11 x64, Node.js 20+, and the vinput binaries (`build.bat` in
 cd mcp
 npm ci
 npm run build
-npm test          &rem handshake: starts build\index.js, initialize + tools/list, checks every schema
+npm test          &rem handshake (initialize + tools/list, checks every schema), then every test\t_*.mjs against a fake vinput
 npm run smoke     &rem live end-to-end run against the synthetic test target (needs build.bat output)
 ```
 
@@ -33,6 +34,8 @@ The server finds `vinput.exe` at `<repo>\dist\vinput.exe`. Environment variables
 | `VINPUT_CAPTURE_DIR` | where `capture` saves PNGs when no path is given (default `<repo>\captures`) |
 | `VINPUT_OWNER` | owner name for vinput's per-game claims (default `mcp-<server pid>`) |
 | `VINPUT_MCP_MAX_IMAGE_BYTES` | larger captures are saved but not attached as images (default 8 MiB) |
+| `VINPUT_MCP_COMPACT` | `1` / `true` / `yes` / `on` makes every tool return compact replies unless a call passes `compact:false` (see [Compact replies](#compact-replies)) |
+| `VINPUT_CAMERA_PROFILE_DIR` | where `look_calibrate mode:"counts"` saves angular calibrations (default `<dir of vinput.exe>\run\camera_profiles`) |
 
 **Claude Code**
 
@@ -76,7 +79,7 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 
 | tool | what it does |
 |---|---|
-| `launch` | start a game (`exe` / `aumid` / `steam_appid`+`wait_exe`, `args` (a size in them is compared with the real window: `warnings` + `requested_size_ignored`), `cwd`, `early`, `settle_s`, `timeout_s`, `lock`, `claim`, `claim_ttl_s`, `arm_pad`, `pad_wait_ms`) and inject; returns `pid`, plus `warnings` / `nothing_presented` / `fullscreen_refusals` when no frame is being presented |
+| `launch` | start a game (`exe` / `aumid` / `steam_appid`+`wait_exe`, `args` (a size in them is compared with the real window: `warnings` + `requested_size_ignored`), `cwd`, `cpu_affinity` (hex mask such as `"0xF"`, direct `exe` only), `early`, `settle_s` (default 5), `timeout_s` (default 240), `lock`, `claim`, `claim_ttl_s`, `arm_pad`, `pad_wait_ms`, `show_hidden`, `verbose`) and inject; a direct `exe` launch refuses when that exact executable is already running and returns `existing_instances` (nothing is attached); `new_instance:true` permits another copy; `follow_pid` (+ `follow_created` from the launcher receipt) continues an existing launch after you clicked Play in a launcher, without starting another process; returns `pid`, plus `warnings` / `nothing_presented` / `fullscreen_refusals` when no frame is being presented |
 | `attach` | inject into a running game by `pid`; vinput waits for its hooks, window and message queue (`readiness`; `application_ready` is always `null`) and the tool waits until the window is adopted |
 | `claim` | claim or renew the current MCP owner without takeover; `claim_ttl_s` is native inactivity time in seconds (1..86400, default 3600) |
 | `list_targets` | games that have vinput loaded (pid, exe, owner, uptime, really_foreground) |
@@ -85,40 +88,52 @@ claude mcp add game-automation -- node C:\path\to\llm-game-automation-mcp\mcp\bu
 | `config` | change / read how vinput treats a game: `fakefocus`, `autoactivate`, `isolate`, `blockfocus`, `nofullscreen`, `keepvisible`, `cursor`, `raw`, `msgs`, `edge_margin` (vinput's edge guard), `fullscreen` (`borderless` / `refuse`), `for_ms` (only with `isolate:false`: pass the user's physical input for 1..120000 ms, then vinput restores isolation inside the game); returns the effective config. `hwnd` is CLI-only |
 | `log` | tail of vinput's log for a game (`lines`, `contains`, `source` ring/file); repeated lines collapse |
 | `trace` | per-key delivery trace (`trace key <key>`): which input channels the game read |
-| `capture` | the game's own frame as an image + `{path, w, h, method, capture_path, frame}`; `region`, `after_frames`, `method`, `include_image`, `grid` (labelled client-coordinate grid on the returned image), `max_width` / `scale` / `zoom` (resize the returned image; `zoom` may be combined with `max_width` as a cap; `grid` / `zoom` need png; reply has `image {scale, offset_x, offset_y, scaled_by}`), `format` `png` / `jpeg` + `quality`; vinput shrinks / encodes inside the game when its DLL supports it, the server does it otherwise |
-| `capture_burst` | one contact-sheet image of `frames` tiles taken `interval_ms` apart (`columns`, `max_width` / `scale`, `format`, `region`); `frames[]` has each tile's time and rectangle |
-| `ocr` | text and lines with boxes; bounded same-capture retry on empty results (`region`, `scale`, `lang`, `words`, `tiles`, `preprocess`, `retry_empty`, `text_only`) |
-| `find_text` | locate text without clicking (box, centre, match_count) |
-| `click_text` | find complete OCR lines by default and click their centre (`exact_line`, `whole_word`, `nth`, `exact`, `fuzzy`, `timeout_ms`, `button`, `region`, `optional`) |
-| `wait_text` | wait until text appears (or `gone`) |
+| `capture` | the game's own frame as an image + `{path, w, h, method, capture_path, frame}`; `region`, `after_frames`, `method`, `include_image`, `grid` (labelled client-coordinate grid on the returned image), `max_width` (64..8192) / `scale` (0.05..64) / `zoom` (1..64) resize the returned image (`zoom` may be combined with `max_width` as a cap; `upscale:true` lets `max_width` enlarge a PNG crop; `grid` / `zoom` need png; reply has `image {scale, offset_x, offset_y, scaled_by}`), `format` `png` / `jpeg` + `quality` (default 85); destination `path` / `save_path` (exact file) or `out_dir` (unique name in that folder), give only one; vinput shrinks / encodes inside the game when its DLL supports it, the server does it otherwise |
+| `capture_burst` | one contact-sheet image of `frames` tiles (1..16, default 8) taken `interval_ms` apart (default 250, frames x interval at most 30 s); `columns`, `max_width` per tile (default 320) / `scale`, `format`, `region`, `path` / `save_path` / `out_dir`; `frames[]` has each tile's time and rectangle |
+| `ocr` | text and lines with boxes; bounded same-capture retry on empty results (`region`, `scale`, `lang`, `words` (word boxes, off by default), `tiles` (default true), `preprocess`, `retry_empty`, `text_only`); `digits_only:true` reads one ASCII digit token (at most six digits) in one explicit `region` up to 512x512 and returns it in `number_read.value` only when two passes agree (otherwise null) |
+| `find_text` | locate text without clicking (box, centre, match_count); `timeout_ms` default 0 |
+| `click_text` | find complete OCR lines by default and click their centre (`exact_line`, `whole_word`, `nth`, `exact`, `fuzzy`, `timeout_ms` (default 5000), `button`, `region`, `optional`); `stable_ms` (100..3000) waits until the same OCR box has stayed put across captures for that long before one click (for sliding labels); accepts action-image options |
+| `wait_text` | wait until text appears (or `gone`); `text` is one string or a list of 1..16 alternatives (any-of; `gone` waits until all are absent; `matched_text` says which matched), `region`, `context_region` (OCR a second rectangle of the same matched frame), `exact_line`, `timeout_ms` (default 15000), `optional`; `save_match:true` saves the exact OCR frame that matched (`save_match_path` for an exact file or `out_dir`); a failed save does not change the wait result |
 | `find_image` / `click_image` / `wait_image` | template matching with a PNG (`threshold`, `scales`, `region`, `nth`) |
 | `pixel` | colour of one pixel |
-| `wait_change` | wait until the picture (or a region) changes |
-| `click` | click at `x`,`y` (client pixels, or `norm` 0..1, `capture_space`, or `coord_space:"capture"` for the image you were shown; `capture_space:true` uses vinput's own map, which is bound to one window and client size and is refused after a resize or retarget; `coord_space:"capture"` uses this server's remembered mapping of the last image and cannot see a resize: capture again after one), `button`, `count`, `hover_ms` (default 80), `hold_ms` (default 140), `di_poll_timeout_ms` / `di_release_timeout_ms` (require the game's DirectInput read), `edge_margin`, `park_cursor`; reply `evidence` |
-| `move` | move the virtual cursor (hover) |
-| `move_relative` | relative mouse motion for mouse-look (`dx`, `dy`, `raw`) |
-| `drag` | press, hold (`hold_start_ms`), stepped move (`ms`, `steps`), dwell at the destination (`hold_end_ms`), release; always releases. `placement:true` = vinput's owned polled placement drag (`poll_timeout_ms`), falls back to the normal sequence on an older DLL or when the game never reads the press, as Unity-style games that read buttons through window messages (`placement_fallback`) |
-| `scroll` | wheel notches at the cursor or at `x`,`y` |
-| `key` | press a key or chord (`hold_ms`, `count`, `gap_ms`); `async:true` (with `hold_ms`) returns a `job_id` at once, `replace` |
+| `wait_change` | wait until the picture (or a region) changes; `timeout_s` default 10 |
+| `click` | click at `x`,`y` (client pixels, or `norm` 0..1, `capture_space`, or `coord_space:"capture"` for the image you were shown; `capture_space:true` uses vinput's own map, which is bound to one window and client size and is refused after a resize or retarget; `coord_space:"capture"` uses the last capture's mapping (or an explicit `mapping`) and the reply reports it in `mapping_used`), `button`, `count`, `hover_ms` (default 80), `hold_ms` (default 140; on a Chromium window an omitted hover becomes 350 and an omitted hold 400, see below), `di_poll_timeout_ms` / `di_release_timeout_ms` (require the game's DirectInput read), `verify_change {region, timeout_ms, poll_ms}`, `modifiers` (`ctrl` / `shift` / `alt`, with `modifier_hold_ms`, default 60000), `edge_margin`, `park_cursor`; reply `evidence` |
+| `move` | move the virtual cursor (hover); `steps`, `norm`, `capture_space`, `coord_space` / `mapping` |
+| `move_relative` | relative mouse motion for mouse-look (`dx`, `dy`, `steps`, `raw`) |
+| `drag` | press, hold (`hold_start_ms`, default 150), stepped move (`ms` default 300, `steps`), dwell at the destination (`hold_end_ms`, default 250), release; always releases. `timing_profile` `auto` (default: a Unity window, `UnityWndClass`, gets 800 / 400 / 500 ms for move / pickup / drop), `default` or `unity`; explicit timings override it. `measure_region` adds a before / after pixel difference. `modifiers`, `coord_space` / `mapping`. `placement:true` = vinput's owned polled placement drag (`poll_timeout_ms`), falls back to the normal sequence on an older DLL or when the game never reads the press, as Unity-style games that read buttons through window messages (`placement_fallback`) |
+| `scroll` | wheel notches at the cursor or at `x`,`y`; give exactly one of `notches` / `delta` / `amount` / `clicks` (-100..100, positive = up); `horizontal`, `modifiers`; `settle` (`true` or `{region, timeout_ms, ...}`, default budget 5000 ms) watches pixels settle after the wheel, before `capture_after` |
+| `key` | press a key or chord (`hold_ms`, `count`, `gap_ms`); `async:true` (with `hold_ms`) returns a `job_id` at once, `replace`; `measure_region` reports an RGB difference before / after a completed timed key (not with `async`) |
 | `key_down` / `key_up` | hold / release a key (or mouse button name) |
-| `type_text` | type Unicode text (`as_keys` for games that read raw keys) |
+| `type_text` / `type` | type Unicode text (`as_keys` for games that read raw keys, `delay_ms`); `type` is an alias |
 | `pad` | XInput pad 0: `buttons` (`lt` / `rt` also work as button names), sticks `lx ly rx ry` -32768..32767, triggers `lt rt` 0..255, `ms`, `hold`, `off`; `async:true` (with `ms`) returns a `job_id`; `capture_after` plus `capture_settle_ms` (0..5000) observes after the CLI reply; pad-family images accept capture `max_width` / `scale` / client `region` / `format` / `quality` |
 | `pad_move` | finite named left-stick direction, `ms`, `speed` walk20000/run32767, normalized diagonals, explicit `screen_rotation_deg` compensation; opt-in `smooth`, `async`, `replace`; screen intent requires game calibration |
 | `pad_look` | predicted degree turn using required caller angular calibration (`rx`, `degrees_per_second`); signed `degrees`, bounded finite duration, other controls neutral; capture defaults0/100ms settle, `async`, `replace`; angle remains unverified |
 | `pad_rotate` | one stick circle/arc for prompts: `stick`, `start_deg`, `direction`, `turns`, rotation `ms`, optional `radius`, final `end_dwell_ms`; one bounded timeline, finite neutral cleanup, capture defaults0/100ms settle, `async`, `replace` |
 | `pad_ramp` | ramp one pad axis `from` -> `to` over `ms` with the other axes / `buttons` held, `end_hold_ms`, `pacing` frames / time, `async` |
 | `pad_timeline` | timed list of pad states (`at_ms`, `buttons` such as `a+lt`, `phase`, sticks, triggers), `strict_frames`, `pacing`, `stagger_ms` (new presses wait for the stick change before them), `async` |
-| `key_sequence` | a validated keyboard sequence (`steps` of `hold` / `key` / `wait` with `ms`) as one background job; returns `job_id`; `replace` |
-| `pulse` | key PWM: `key` down `duty` percent of each `period_ms` for `ms`, `async` |
-| `hold_while` | hold a key (or pad buttons / sticks) until `until_text` appears or `timeout_ms`; always releases |
-| `hold_until_change` | one bounded native key/chord job until scoped region pixels change or timeout; exact-job cancellation and explicit uncertain admission/release receipts |
-| `observe_settle` | read-only scoped pixel-hash stability observation; camera angles and raw input draining remain unmeasured |
-| `look_calibrate` | two small scope-fenced raw probes with unique landmark reidentification; returns a local signed screen-pixel/count matrix |
-| `look_at` | center a reidentified unique landmark using a same-scope calibration, bounded corrections, settle checks and no-progress stops |
-| `job_status` / `job_cancel` | follow / stop a background input job, including a `key_sequence` (no `id`: list all jobs) |
+| `pad_drive` | one timed XInput job for throttle (RT), steering (LX) and brake (LT): `ms` plus `throttle` / `steer` / `brake`, or up to 16 `phases`; `brake_after`, `async`, `replace` (see [Driving in one job](#driving-in-one-job)) |
+| `key_sequence` | a validated keyboard sequence (`steps` of `hold` / `key` / `wait` / `retap`, or an absolute `schedule`) as one background job; returns `job_id`; `replace`; `wait:true` (+ `wait_timeout_ms`) waits for that exact job; with `wait:true` also `abort_on`, `progress_check`, `capture_every_ms` recordings; `start_on`, `max_lateness_ms` (see [Waiting for one keyboard sequence](#waiting-for-one-keyboard-sequence)) |
+| `pulse` | key PWM: `key` down `duty` percent of each `period_ms` (default 100) for `ms`, `async` |
+| `hold_while` | hold a key (or pad buttons / sticks) until `until_text` appears or `timeout_ms` (default 5000); always releases |
+| `hold_until_change` | one bounded native key/chord job until scoped region pixels change or timeout (`timeout_ms` default 5000, `baseline_ms` default 250, `min_change_pct`, `pixel_tolerance`); exact-job cancellation and explicit uncertain admission/release receipts |
+| `pad_move_until_stuck` | the same for one left-stick `direction` (`speed` walk / run, `screen_rotation_deg`) with the same stop rules and defaults |
+| `move_until_stuck` | hold one movement key/chord (`timeout_ms` default 3000) and stop its job when a selected `region` stays quiet (`still_ms` default 500, `grace_ms` 250, `max_change_pct` 1, `pixel_tolerance` 8); `stopped:"no_motion"` measures pixels, not position |
+| `observe_settle` | read-only scoped pixel-hash stability observation (`stable_samples` default 3, `timeout_ms` default 5000, `poll_ms` default 100, optional `max_change_pct`); camera angles and raw input draining remain unmeasured |
+| `look_calibrate` | default `mode:"visual"`: two small scope-fenced raw probes (`counts` default 80) with unique landmark (`template`) reidentification; returns a local signed screen-pixel/count matrix for `look_at`. `mode:"counts"`: save a signed `counts_per_degree` (+ optional `pitch_counts_per_degree`), or derive it from `yaw_counts` + `observed_yaw_deg`, for `turn` / `look` / `unstick`; sends no input; optional `game` label |
+| `look_at` | center a reidentified unique landmark using a same-scope calibration, bounded corrections (`max_steps` default 8, `max_counts_per_step` default 150, `tolerance_px` default 6), settle checks and no-progress stops |
+| `turn` | one bounded yaw move of `degrees` (-720..720) using the saved `mode:"counts"` calibration; `game`, `timeout_ms` (default 5000) |
+| `look` | `yaw` (default 0) and optional `pitch` together from the saved calibration; refuses before moving when pitch was not calibrated |
+| `look_turn` | one yaw move from a caller-supplied `counts_per_degree` and `yaw_deg`; needs no saved calibration or landmark |
+| `unstick` | one recipe with the default keys: `s` for `backup_ms` (default 250), a saved-calibration yaw of `degrees` (45..90 either sign, default 60), `space` (unless `jump:false`), then `w` for `retry_ms` (default 350); stops on the first uncertain step, never repeats |
+| `click_many` | up to 256 `points` (`{x,y}` or `[x,y]`) clicked in one bounded session (`timeout_ms` default 30000, `interval_ms`, `hold_ms`, `hover_ms`, `button`, `coord_space` / `mapping`); optional `verify_change` + `verify_region` with `verify_policy` (`stop` after `unchanged_limit` unchanged clicks, default 1, or `report_only`); `verify:"tooltip"` + `reject_texts` hovers and OCRs before each click and skips matching or empty points (`tooltip_hover_ms` default 400, `probe_region`); every receipt returned, nothing replayed; `next_index` is the zero-based next unprocessed point |
+| `click_grid` | the same for a row-major grid: `x0`, `y0`, `dx`, `dy`, `cols`, `rows` (at most 256 points) |
+| `hover_many` | hover up to 64 `points` once each (`hover_ms` default 500); per-point hash of `probe_region` (default a 400x200 box around each point, clamped to the client) and optional tooltip `ocr`; no clicks |
+| `click_delta_cursor` | for games that draw their own cursor: find the cursor sprite (`cursor_template`, `hotspot_dx` / `hotspot_dy`), move it toward `x`,`y` with raw deltas (`counts_per_pixel_x` / `_y` required, `max_steps` default 12, `max_counts_per_step` default 200, `tolerance_px` default 3), then click once |
+| `click_to_move` | move to `x`,`y`, one bounded button hold (`hold_ms` default 5000, `button` left / right), then wait for `region` change and stability (`timeout_ms` default 10000); returns `displacement:"UNKNOWN"` |
+| `job_status` / `job_cancel` | follow / stop a background input job, including a `key_sequence`; `job_status` takes `id` or its alias `job_id` (neither: list all jobs) |
 | `list_keys` | all key names |
 | `wait` | nonblocking MCP host timer, integer `ms` 0..30000; no target, CLI, input, claim renewal or frame wait; returns requested and actual elapsed ms |
-| `run_script` | run a `.vin` macro file |
+| `run_script` | run a `.vin` macro file (`continue_on_error`, `timeout_s` 1..3600) |
 | `release` | release all held input |
 | `detach` | release input and drop this server's claim (vinput stays loaded, inert, until the game exits) |
 
@@ -140,7 +155,7 @@ For buttons, start with `pad {pid, buttons:"a", ms:150, capture_after:true, capt
 
 Pad-family observations (`pad`, `pad_move`, `pad_look`, `pad_rotate`, `pad_ramp`, `pad_timeline`) accept capture's max_width, scale, region, format and quality. Images default to a **960-pixel maximum width** when neither size option is explicit; smaller images are not enlarged. The same image options and 960px default also apply to `key`, `click`, `click_text`, `move`, `move_relative` and `key_sequence` when capture_after is enabled. Standalone capture and the legacy drag/pulse observation paths keep their defaults. Example: `pad_move {pid, direction:"up", ms:400, region:{x:200,y:100,w:800,h:600}, max_width:640}`. The region is in **pre-scale client pixels**, not a previous screenshot's pixels. `capture_after.image` describes the attached image's width/height, scale and offset; the outer capture_after w/h describe the saved native capture and can differ when MCP resized the image. Use coord_space:"capture" for the latest successful image's mapping, or convert client = offset + image / scale; capture again after a camera/window change.
 
-Size options are exclusive: choose max_width64..8192 or scale0.05..8. PNG enlargement uses the existing MCP path; JPEG action images allow scale0.05..1 and quality1..100 (JPEG only). Lossy JPEG is for observation, not exact colour comparisons. Explicit image options require enabled capture_after (0 is enabled); false disables the image and timer. Invalid combinations are refused **before input**. If a later backend, encoding or filesystem capture fails, capture_after_error is explicit while the action receipt remains intact: the action is never replayed. Async/held images remain observations, not completion proof; the existing observed-attachment epoch checks and broader overlapping-capture mapping limits are unchanged.
+Size options are exclusive: choose max_width 64..8192 or scale 0.05..64 (PNG output stays within 32768 per side and 64 million pixels). PNG enlargement uses the existing MCP path (`upscale:true` lets max_width enlarge a crop); JPEG action images allow scale 0.05..1 and quality1..100 (JPEG only). Lossy JPEG is for observation, not exact colour comparisons. Explicit image options require enabled capture_after (0 is enabled); false disables the image and timer. Invalid combinations are refused **before input**. If a later backend, encoding or filesystem capture fails, capture_after_error is explicit while the action receipt remains intact: the action is never replayed. Async/held images remain observations, not completion proof; the existing observed-attachment epoch checks and broader overlapping-capture mapping limits are unchanged.
 
 `smooth:true` on pad_move samples an ease-in/out curve as **one** bounded native timeline; other pad controls stay neutral and the end is neutral. Existing pad defaults remain rectangular. Smooth moves require at least 80 ms; use longer moves if you need intermediate samples, and inspect skipped-state/lateness receipts under load. The native timeline uses time pacing so it also works without an observed render stream; no presented-frame separation is promised. Small ramp values can be inside the game's deadzone, and smoothing does not measure or remove that deadzone. Calibrate a useful deflection before relying on short moves. `job_cancel` stops an async move; `release` is the emergency neutral path.
 
@@ -168,7 +183,9 @@ The delay guards observed MCP attach/detach/launch changes before requesting the
   if nothing happens. UWP games often ignore keyboard messages but read XInput: use `pad`.
 - **Big captures** cost tokens: capture a `region`, or `max_width` (for example 960), when you do not need the full frame.
 - **Do not guess pixels:** `capture grid:100` labels exact client coordinates on the image; `zoom` + `region` reads small things.
-- **Act and look in one call:** `capture_after:true` on `click`, `key`, `click_text`, `move`, `drag`, `pad` returns the next frame.
+- **Act and look in one call:** `capture_after:true` on `click`, `key`, `click_text`, `move`, `drag`, `scroll`, `pad` returns the next frame.
+  A number is a **frame count**, not milliseconds (`capture_after:0` = capture now); for a timer use `capture_settle_ms`.
+- **Short replies:** `compact:true` on any tool (or `VINPUT_MCP_COMPACT=1`) returns only the fields needed to continue.
 - **Every tool answers `target exited (pid N, exit code X)`** once the game has ended, not a pipe error.
 - More: [../docs/AGENT_TIPS.md](../docs/AGENT_TIPS.md) (setup, click timing, drag, per-game notes) and [../docs/MCP_TODO.md](../docs/MCP_TODO.md) (waits on core features).
 
@@ -215,7 +232,7 @@ Give either top-level controls plus `ms`, or1..16 phases. All phase durations pl
 
 ### Keyboard and mouse action observations
 
-`key`, `click`, `click_text`, `move`, `move_relative` and `key_sequence` accept `capture_after` plus `max_width`, `scale`, `region`, `format`, `quality` and `capture_settle_ms`. No image is taken unless capture_after is enabled (0 is enabled). Example: `move_relative {pid, dx:120, dy:0, capture_after:0, max_width:640, capture_settle_ms:100}`. Image sizing/validation and the saved-versus-returned coordinate mapping match pad observations above; width defaults to at most960 unless scale is explicit. `click_text.region` remains its OCR search region and also crops an enabled observation; a search-only region still works without capture_after.
+`key`, `click`, `click_text`, `move`, `move_relative`, `drag`, `scroll` and `key_sequence` (and the helper tools from `hold_until_change` on) accept `capture_after` plus `max_width`, `scale`, `upscale`, `region`, `format`, `quality`, `save_path` / `out_dir` and `capture_settle_ms`. No image is taken unless capture_after is enabled (0 is enabled). Example: `move_relative {pid, dx:120, dy:0, capture_after:0, max_width:640, capture_settle_ms:100}`. Image sizing/validation and the saved-versus-returned coordinate mapping match pad observations above; width defaults to at most960 unless scale is explicit. `click_text.region` remains its OCR search region and also crops an enabled observation; a search-only region still works without capture_after.
 
 `click_text` defaults to case-insensitive `whole_word:true` and `exact_line:true`: `PLAY` matches a standalone OCR line `Play`, while `Player` and a paragraph containing `Play` are ineligible. Whitespace remains ignored and `nth` counts eligible matches in reading order. Multiple matches still refuse and list candidates; successful/dry-run clicks also include eligible alternatives and actual OCR lines. Explicit `exact_line:false` permits matching within paragraphs. Existing `exact:true` or `whole_word:false` calls retain their prior mode unless `exact_line:true` is supplied. An explicit fuzzy budget compares complete labels when exact-line mode is active. These are OCR boundaries, not a guarantee about what the image actually says.
 
@@ -231,6 +248,10 @@ Options that are incompatible or out of bounds are rejected before input. A late
 
 A successful wait returns the native completed snapshot and `sequence_wait.outcome:"completed"`; `sequence_input` retains the original scheduling receipt. `sequence_wait.game_consumption_measured:false` is explicit: scheduler completion counts virtual transitions/release, not game consumption. When waiting, capture_after runs only after successful completion; without wait it remains an observation of a possibly ongoing job. Cancelled, explicitly replaced, failed, timeout, invalid/missing status, generation/owner mismatch or observed attachment change returns an error with the initial receipt retained. An unsuccessful scheduling response is retained too: `ack_unavailable` preserves delivery_unknown/may_have_started/reply_raw, while explicit input_injected:false is `scheduling_refused`. Confirmed target exit adds exit metadata without replacing these details. Timeouts and observation failures NEVER replay or automatically cancel the job. Use job_status/job_cancel with its ID. Unknown/pruned job records are observation failures, not completion. Native records are bounded (about60s/128 terminal records); rapid job churn can make a completed job unobservable.
 
+Steps can also `retap`: `{action:"retap", key:"w+shift", retap_key:"shift", ms:1500, every_ms:300, gap_ms:10}` keeps the whole chord held and releases / re-presses only `retap_key` every `every_ms` (`gap_ms` 1..1000, default 10, strictly below `every_ms`). `retap_key` must be one key of `key`. `schedule:{at_ms:[0,405,810], key:"space", hold_ms:20}` replaces `steps` with absolute offsets. Limits: 1024 steps, 118000 ms of declared timing.
+
+Only with `wait:true`: `abort_on {kind:"frame_change"|"region_change"|"text"|"image", region, text, template, grace_ms, poll_ms}` stops the exact job when the condition is seen; `progress_check {region, max_unchanged_ms}` stops it when the region stays unchanged; `capture_every_ms` (250..30000) keeps scoped PNGs during the job (`capture_max_frames` default 16, max 32; `capture_max_width` default 640, max 960; `capture_region`; `capture_out_dir`) and returns them with a review sheet in `sequence_captures`. `start_on` (same kinds) delays admission until a condition is seen; `max_lateness_ms` aborts the whole sequence before an overdue key edge exceeds it.
+
 The ID is native protocol identity, not a kernel process-creation witness. Polling is read-only and does not renew the native claim TTL; claim expiry/replacement can terminate the job and is reported. Existing observed attachment epochs and concurrent image-map limitations remain; no new global lifetime or input-consumption promise is made.
 
 ### Holding until a region changes
@@ -240,6 +261,37 @@ The ID is native protocol identity, not a kernel process-creation witness. Polli
 Choose a region without clocks, FPS overlays or unrelated animation. Changed pixels prove only the selected pixels changed; they do not establish a successful interaction or gameplay progress. The tool requires typed native scoped-capture and input-job support and refuses before input when those capabilities are absent. `capture_after` and image options use the same post-action image path as key/pad actions, preserving the original attachment epoch.
 
 The key job admission is tied to that exact captured window lifetime and geometry by native `expected_capture_scope`. A lost or malformed admission ACK reports `hold_may_still_be_active:true`; no retry or guessed cancellation occurs. A strict native `ok:false,input_injected:false` refusal proves no admission. The native timeout remains the release bound when an exact terminal receipt is unavailable.
+
+### Compact replies
+
+`compact:true` on any tool returns a short JSON reply: `ok`, pid, job state and IDs, observed reader channels (`input_read`), image path / mapping, matched text and boxes, warnings, notes and refusals, plus `compact:true`. Image content is unchanged. `VINPUT_MCP_COMPACT=1` (also `true` / `yes` / `on`) makes compact the default; `compact:false` on a call restores the full reply. Errors, `ok:false` replies and the query tools `list_targets`, `list_keys`, `config`, `doctor`, `log` and `trace` are never compacted. A compact reply does not say more about game response than the full one.
+
+### Navigation in 3D games
+
+- `move_until_stuck {pid, key:"w", region:<world area>, timeout_ms:2000, still_ms:500}` holds the key as one finite job and cancels exactly that job when the region has stayed within tolerance for `still_ms` (after `grace_ms`). `stopped:"no_motion"` means quiet pixels: a wall, a pause and ignored input look the same. Avoid regions with an animated HUD.
+- `look_calibrate {pid, mode:"counts", yaw_counts:300, observed_yaw_deg:45, game:"my-settings"}` stores a signed counts-per-degree gain from your own measurement (compass, known turn), or pass `counts_per_degree` (and optional `pitch_counts_per_degree`) directly. Counts mode sends no input. The profile is saved per process and window (and `game` label) under `VINPUT_CAMERA_PROFILE_DIR` and survives an MCP restart; it never applies to another process. Recalibrate after sensitivity, FOV or input changes.
+- `turn {pid, degrees:60}` and `look {pid, yaw:30, pitch:10}` use that saved gain. `look_turn {pid, yaw_deg:30, counts_per_degree:5.2}` takes the gain in the call instead. All three submit one scope-fenced relative move; the actual camera angle is not measured.
+- `unstick {pid, degrees:60, capture_after:0}` runs one recipe (S back, saved-gain turn, Space unless `jump:false`, W forward). It uses those default keys, so check the game's bindings first, and inspect the image before trying again.
+
+### Several clicks or hovers in one call
+
+`click_many {pid, points:[[100,200],{x:140,y:200}]}` and `click_grid {pid, x0, y0, dx, dy, cols, rows}` place each click through the normal native click admission, inside one bounded session (`timeout_ms` default 30000) with a shared deadline. They stop on an uncertain or failed receipt, user activity, a scope or attachment change, cancellation or the deadline, and never replay a point. `completed_points` counts injected clicks; placement in the game stays unknown. `verify_change:true` with a small `verify_region` measures a coarse RGB change per point (`verify_settle_ms`, `min_change_pct`, `pixel_tolerance`) and stops the rest on unchanged pixels. `capture_after` takes one image after the whole batch.
+
+`hover_many {pid, points:[...], probe_region:<tooltip area>, ocr:true}` hovers each point once (`hover_ms` default 500) and returns a scoped hash and optional tooltip OCR per point, without clicking.
+
+`click_delta_cursor` is for games that draw their own cursor and read only relative motion: it finds the cursor sprite from `cursor_template`, moves it toward `x`,`y` with bounded raw deltas (you supply signed `counts_per_pixel_x` / `counts_per_pixel_y`), checks the hotspot twice, then clicks once. A missing or ambiguous sprite, no progress, user activity or a scope change stops it without clicking.
+
+`click_to_move {pid, x, y, hold_ms:800, region:<world area>}` moves there, runs one bounded button hold and waits for the region to change and then settle. It returns `displacement:"UNKNOWN"`: a hash change does not measure movement.
+
+With `coord_space:"capture"`, these tools, `click`, `move` and `drag` report the transform they used in `mapping_used` (scale, offsets, source window scope and `capture_map_id`, a geometry token, not a frame ID). `capture_after` has its own `mapping`.
+
+### Chromium and Unity windows
+
+On a live `Chrome_WidgetWin_0` / `Chrome_WidgetWin_1` window, vinput uses legacy window-message input for UI clicks and, when the call omits them, a 350 ms hover and a 400 ms hold. On a `UnityWndClass` window an omitted click hover and hold become 250 ms each, and `drag` uses its Unity preset (above); input routing is unchanged. Explicit `hover_ms` / `hold_ms`, drag timings and explicit input modes override these presets. Relative raw mouse motion keeps its usual policy. The click presets need a vinput DLL built from the same release.
+
+### Waiting for pixels to settle before the image
+
+Completed actions that take `capture_after` also take `capture_stable`: `true` watches the whole client, `{region, timeout_ms (100..10000), poll_ms, stable_samples, max_change_pct, pixel_tolerance}` watches one area, until it is stable, then the image is taken. `scroll` has the same object as `settle`. The timeout is advisory: the image is still returned. It needs a completed action (not `async` or a held key); `key_sequence` needs `wait:true`. It never replays input. Exclude animated HUD and background pixels from the region.
 
 ### Observing and correcting a camera landmark
 

@@ -67,7 +67,9 @@ try{
  check(r.image&&r.json.sequence_guard.matched_frame_available&&r.json.sequence_guard.matched_observation.qpc==='1010'&&r.json.sequence_guard.matched_observation.frame_qpc_ticks==='1009','an aborted sequence carries its matched observation image even though the outcome is not completion');
  const absent=snap('a',{ok:false,match_count:0,matches:[],error:'template not found at the threshold',capture_space_preserved:true}),image=snap('b',{match_count:1,matches:[{score:.99,center:[10,10]}],capture_space_preserved:true,capture_qpc_ticks:'1010'});
  set(scene({retain_frames:true,observations:[absent,image]}));r=await t.call('key_sequence',{...base,wait:true,abort_on:{kind:'image',template:'fail.png',region:{x:0,y:0,w:40,h:40}}});
- check(r.isError&&r.json.sequence_guard.outcome==='aborted_image'&&r.image&&t.callsOf('ocr').length===0&&heartbeats().at(-1)?.abort===true,'PNG-template abort uses no OCR and retains the matched image with one exact abort');
+ const imageAbortGood=r.isError&&r.json.sequence_guard?.outcome==='aborted_image'&&r.image&&t.callsOf('ocr').length===0&&heartbeats().at(-1)?.abort===true;
+ if(!imageAbortGood)console.error('IMAGE_ABORT_DIAGNOSTIC '+JSON.stringify({reply:r,timed_cli_calls:t.timedCalls()}));
+ check(imageAbortGood,'PNG-template abort uses no OCR and retains the matched image with one exact abort');
  set(scene({retain_frames:true,observations:[snap(),snap('b',{capture_qpc_ticks:'1010'}),snap('b',{capture_qpc_ticks:'1020'}),snap('c',{capture_qpc_ticks:'1030'})]}));r=await t.call('key_sequence',{...base,wait:true,abort_on:{kind:'region_change',region:{x:0,y:0,w:20,h:20},grace_ms:50,poll_ms:20}});
  check(r.isError&&r.json.sequence_guard.outcome==='aborted_region_change'&&r.json.sequence_guard.grace_ms===50&&r.json.sequence_guard.matched_observation.hash==='c'.repeat(16),'observer grace rebaselines the begin-press change and stops only on the later scoped change');
  set(scene({guard_states:['queued','running']}));r=await t.call('key_sequence',{...base,wait:true,abort_on:{kind:'frame_change'}});

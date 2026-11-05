@@ -3,6 +3,7 @@
 //   ocr  click-text  wait-text  assert-text  find-image  click-image  wait-image  pixel  scroll  drag  script
 // Boxes in replies are [x,y,w,h] in CLIENT pixels (identical to capture pixels when the swapchain matches the window;
 // the capture's origin/scale is applied when --region or a differently-sized swapchain is in play).
+#include "vi_ocr_numbers.h"
 
 static double JsonNum(const std::string& json, const char* key, double def = 0) {
     std::string mark = "\"" + std::string(key) + "\":";
@@ -156,6 +157,20 @@ static std::string LineJson(const Frame& f, const vi_text::Line& l, bool words) 
     return j + "}";
 }
 static const char* kNoConfidence = "\"ocr_confidence\":null,\"ocr_confidence_note\":\"Windows.Media.Ocr reports no confidence; match_score is textual (1 = literal match, <1 = fuzzy)\"";
+static std::string NumberReadJson(const Frame& f,const vi_ocr_numbers::Result& result){
+    std::string j="{\"version\":1,\"status\":\""+JEsc(result.status)+"\",\"value\":"+(result.value.empty()?std::string("null"):"\""+JU(result.value)+"\"")+
+        ",\"box_client\":"+(result.value.empty()?std::string("null"):BoxJ(ToClient(f,result.box)))+",\"agreement_count\":"+std::to_string(result.agreement)+
+        ",\"analysis_complete\":"+(result.complete?"true":"false")+",\"reason\":\""+JEsc(result.reason)+"\",\"observations\":[";
+    for(size_t i=0;i<result.observations.size();++i){
+        const auto& observation=result.observations[i];
+        j+=(i?",":"")+std::string("{\"scale\":")+Num(observation.pass.scale)+",\"preprocess\":\""+JEsc(observation.pass.preprocessing)+"\",\"ok\":"+(observation.ok?"true":"false")+
+            ",\"text\":\""+JU(observation.text)+"\",\"eligible_value\":"+(observation.value.empty()?std::string("null"):"\""+JU(observation.value)+"\"")+
+            ",\"box_client\":"+(observation.value.empty()?std::string("null"):BoxJ(ToClient(f,observation.box)))+",\"reason\":\""+JEsc(observation.reason)+"\"";
+        if(!observation.error.empty())j+=",\"error\":\""+JEsc(observation.error)+"\"";
+        j+="}";
+    }
+    return j+"]}";
+}
 
 static Reply CmdOcr(DWORD pid, const Args& a) {
     bool autoScale; std::string err; auto scales = ParseScales(GetOpt(a, "scale", "1"), autoScale, err);
@@ -163,17 +178,33 @@ static Reply CmdOcr(DWORD pid, const Args& a) {
     const std::string retryOption=GetOpt(a,"retry-empty","true"),mode=GetOpt(a,"preprocess","none");
     if(retryOption!="true"&&retryOption!="false")return Fail("--retry-empty must be true or false");
     if(mode!="none"&&mode!="gray"&&mode!="contrast"&&mode!="threshold"&&mode!="invert"&&mode!="auto")return Fail("--preprocess must be none, gray, contrast, threshold, invert or auto");
+    const std::string digitsOption=GetOpt(a,"digits-only","false");
+    if(digitsOption!="true"&&digitsOption!="false")return Fail("--digits-only must be true or false");
+    const bool digits=digitsOption=="true";vi_vision::Region numberRegion;
+    if(digits){
+        if(!HasOpt(a,"region")||!ClientRegion(GetOpt(a,"region"),numberRegion))return Fail("--digits-only requires one explicit client --region x,y,w,h");
+        if(numberRegion.w>512||numberRegion.h>512)return Fail("--digits-only client region must be at most 512 by 512");
+        if(scales.size()!=1||autoScale||HasOpt(a,"tiles"))return Fail("--digits-only requires one scale and does not support tiles");
+    }
     const bool retry=retryOption=="true",compact=HasOpt(a,"text-only");
-    const auto plan=vi_ocr_read::Plan((std::max)(1.0,scales[0]),HasOpt(a,"scale")&&!autoScale,mode,HasOpt(a,"preprocess"),retry);
+    const auto plan=digits?vi_ocr_numbers::Plan((std::max)(1.0,scales[0]),HasOpt(a,"scale"),mode,retry):vi_ocr_read::Plan((std::max)(1.0,scales[0]),HasOpt(a,"scale")&&!autoScale,mode,HasOpt(a,"preprocess"),retry);
     Frame f; if (!Grab(pid, a, f, err, true)) return Fail(err);
+    if(digits&&(f.img.w>512||f.img.h>512||numberRegion.x+numberRegion.w>f.clientW||numberRegion.y+numberRegion.h>f.clientH))return Fail("--digits-only region raster exceeds 512 by 512 or lies outside the client");
     DWORD t0 = GetTickCount();
-    const auto result=vi_ocr_read::Read(plan,[&](const vi_ocr_read::Pass& pass,std::vector<vi_text::Line>& lines,std::string& lang,std::string& error){
+    const auto recognize=[&](const vi_ocr_read::Pass& pass,std::vector<vi_text::Line>& lines,std::string& lang,std::string& error){
         if(!OcrOnce(f,pass.scale,a,lines,lang,error,pass.preprocessing)){
             if(!HasOpt(a,"tiles")||error.find("exceeds OcrEngine.MaxImageDimension")==std::string::npos)return false;
             error.clear();
         }
         return !HasOpt(a,"tiles")||OcrTiles(f,pass.scale,a,lines,lang,error,pass.preprocessing);
-    });
+    };
+    vi_ocr_read::Result result;vi_ocr_numbers::Result numbers;
+    if(digits){
+        numbers=vi_ocr_numbers::Read(plan,f.img.w,f.img.h,recognize);
+        result.ok=numbers.ok;result.error=numbers.error;result.selected=numbers.selected;
+        for(const auto& observation:numbers.observations)result.attempts.push_back({observation.pass,observation.ok,observation.lines.size(),observation.error});
+        if(!numbers.observations.empty()){result.lines=numbers.observations[numbers.selected].lines;result.language=numbers.observations[numbers.selected].language;}
+    }else result=vi_ocr_read::Read(plan,recognize);
     if(!result.ok)return Fail(result.error);
     const auto& lines=result.lines;const auto& lang=result.language;const auto& selected=result.attempts[result.selected].pass;
     size_t retryErrors=0;for(const auto& attempt:result.attempts)if(!attempt.ok)++retryErrors;
@@ -192,6 +223,7 @@ static Reply CmdOcr(DWORD pid, const Args& a) {
     std::wstring text; for (auto& l : lines) { if (!text.empty()) text += L"\n"; text += l.text; }
     j += ",\"text\":\"" + JU(text) + "\"";
     j += ObservationImageFields(f,a);
+    if(digits)j+=",\"digits_only\":true,\"number_read\":"+NumberReadJson(f,numbers);
     if(!compact){j+=",\"lines\":[";for(size_t i=0;i<lines.size();++i)j+=(i?",":"")+LineJson(f,lines[i],words);j+="]";}
     j += "}";
     if (HasOpt(a, "out")) {

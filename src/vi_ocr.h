@@ -19,6 +19,20 @@ namespace vi_ocr {
 inline bool Preprocess(const vi_vision::Image& src, const std::string& mode, vi_vision::Image& dst, std::string& error) {
     if (!vi_vision::Validate(src, error)) return false;
     if (mode == "none") { dst = src; return true; }
+    // Internal digits-only pass. Preserve the source grid and never remove a
+    // region edge or assume a centered circle. Bright neutral glyph pixels
+    // become black on white; colored fills are discarded. No recognition or
+    // character substitutions happen here.
+    if(mode=="white_glyph"){
+        dst=src;
+        for(size_t p=0;p<dst.pixels.size();p+=4){
+            const int low=(std::min)({src.pixels[p],src.pixels[p+1],src.pixels[p+2]});
+            const int high=(std::max)({src.pixels[p],src.pixels[p+1],src.pixels[p+2]});
+            const uint8_t value=low>=170&&high-low<=40?0:255;
+            dst.pixels[p]=dst.pixels[p+1]=dst.pixels[p+2]=value;dst.pixels[p+3]=255;
+        }
+        return true;
+    }
     if (mode != "gray" && mode != "contrast" && mode != "threshold" && mode != "invert") {
         error = "--preprocess must be none, gray, contrast, threshold, invert or auto"; return false;
     }

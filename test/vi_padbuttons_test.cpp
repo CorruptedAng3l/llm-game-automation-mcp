@@ -15,6 +15,7 @@ int main() {
     Check(ApplyTriggerAliases(state.trigger_mask, mask, values, error) && mask == 7 && values[0] == 255 && values[1] == 255 && values[2] == 1234, "aliases set only trigger byte axes and preserve companion axis");
     State before = state;
     Check(!ParsePadButtonState("a+lt+bogus", state, error) && state.buttons == before.buttons && state.trigger_mask == before.trigger_mask, "invalid suffix cannot publish a partial combo");
+    Check(!ParsePadButtonState("lb+rx",state,error)&&error.find("rx")!=std::string::npos&&state.buttons==before.buttons&&state.trigger_mask==before.trigger_mask,"right-stick axis token cannot publish a partial LB press");
     for (int axis = 0; axis < 2; ++axis) {
         for (int explicitValue : {0, 128, 255}) {
             int explicitAxes[6] = {17, 23, 456, 0, 0, 0}; explicitAxes[axis] = explicitValue;

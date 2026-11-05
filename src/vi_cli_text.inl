@@ -159,12 +159,28 @@ static std::string ClickJson(const Args& a, int x, int y) {
     for (auto& p : pass) if (HasOpt(a, p[0])) Put(j, p[1], GetOpt(a, p[0]));
     return j + "}";
 }
+static bool StableTextAcknowledgement(bool received,std::string& response,const std::string& deadline,int x,int y,std::string& stats){
+    vi_ready_json::Reader ack{response,0,{}};bool accepted=false,scopeChecked=false,released=false;std::string observedDeadline;
+    const bool parsed=ack.Parse();auto number=[&](const char* field,const std::string& expected){const auto i=ack.fields.find(field);return i!=ack.fields.end()&&i->second.type=='n'&&i->second.raw==expected;};
+    auto exactDeadline=[&](){const auto i=ack.fields.find("admission_deadline_qpc_ticks");if(i==ack.fields.end()||i->second.type!='"')return false;vi_ready_json::Reader text{i->second.raw,0,{}};return text.String(observedDeadline)&&observedDeadline==deadline;};
+    const bool ok=received&&parsed&&ack.Bool("ok",accepted)&&accepted&&ack.Bool("capture_scope_checked",scopeChecked)&&scopeChecked&&ack.Bool("button_released",released)&&released&&number("pointer_scope_version","1")&&number("input_admission_version","1")&&number("button_down_count","1")&&number("last_press_x",std::to_string(x))&&number("last_press_y",std::to_string(y))&&exactDeadline();
+    stats+=",\"click_acknowledgement_confirmed\":"+std::string(ok?"true":"false")+",\"do_not_repeat\":true,\"admission_deadline_qpc_ticks\":\""+deadline+"\"";
+    if(!ok){bool injected=false;const bool refused=parsed&&ack.Bool("input_injected",injected)&&!injected;stats+=",\"input_may_have_been_applied\":"+std::string(refused?"false":"true")+",\"click_warning\":\"Click refused or acknowledgement unconfirmed; inspect the retained exact receipt. No click was retried\"";}
+    if(!parsed){
+        static const char digits[]="0123456789ABCDEF";const auto count=(std::min)(response.size(),size_t(65536));std::string hex;hex.reserve(count*2);
+        for(size_t i=0;i<count;++i){const auto c=(unsigned char)response[i];hex+=digits[c>>4];hex+=digits[c&15];}
+        stats+=",\"click_raw_hex\":\""+hex+"\",\"click_raw_bytes\":"+std::to_string(response.size())+",\"click_raw_truncated\":"+(response.size()>count?"true":"false");
+        response="{\"ok\":false,\"error\":\"click acknowledgement was not strict JSON\"}";
+    }
+    return ok;
+}
 static bool ParseNth(const Args& a, int& nth, std::string& err) {
     nth = 0; if (!HasOpt(a, "nth")) return true;
     nth = atoi(GetOpt(a, "nth").c_str()); if (nth < 1) { err = "--nth is 1-based (reading order: rows top to bottom, left to right)"; return false; }
     return true;
 }
 
+#include "vi_text_stability.h"
 // mode: 0 click-text, 1 wait-text, 2 assert-text
 static Reply CmdText(DWORD pid, const Args& a, int mode) {
     const char* name = mode == 0 ? "click-text" : mode == 1 ? "wait-text" : "assert-text";
@@ -177,6 +193,10 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
     if (mode == 0 && gone) return Fail("--gone only applies to wait-text / assert-text");
     double timeout = atof(GetOpt(a, "timeout", mode == 0 ? "5000" : mode == 1 ? "15000" : "0").c_str());
     if (!(timeout >= 0 && timeout <= 600000)) return Fail("--timeout is milliseconds, 0..600000");
+    const double stableValue=atof(GetOpt(a,"stable-ms","0").c_str());
+    if(HasOpt(a,"stable-ms")&&(mode!=0||!std::isfinite(stableValue)||stableValue<100||stableValue>3000||stableValue!=std::floor(stableValue)||stableValue>timeout))return Fail("--stable-ms is integer100..3000 within timeout for click-text only; no input was sent");
+    if(stableValue&&GetOpt(a,"count","1")!="1")return Fail("stable-ms accepts one click only; no input was sent");
+    vi_text_stability::Gate stable((unsigned)stableValue);
     const DWORD t0 = GetTickCount(); unsigned polls = 0;
     Frame f,fullFrame; std::vector<vi_text::Line> lines; std::vector<vi_text::Hit> hits; TextScan scan;
     for (;;) {
@@ -187,6 +207,7 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
             ",\"ocr_pass\":\"" + scan.preprocessing + "\",\"ocr_scale\":" + Num(scan.scale) + ",\"ocr_passes\":" + std::to_string(scan.passes) + ",\"capture_space_updated\":false,\"text_word_boundary_version\":1,\"whole_word\":" + (q.opt.whole_word || q.opt.exact ? "true" : "false") + ",\"case_sensitive\":" + (q.opt.exact ? "true" : "false")+",\"text_line_match_version\":1,\"exact_line\":"+(q.opt.exact_line?"true":"false")+",\"candidate_limit\":20,\"candidates_truncated\":"+(hits.size()>20?"true":"false");
         stats+=","+FrameTimingFields(f);
         if (mode == 0) {
+            if(hits.empty())stable.Reset();
             if (!hits.empty()) {
                 if (nth == 0 && hits.size() > 1)
                     return Fail("ambiguous: " + std::to_string(hits.size()) + " matches for the text; pass --nth N (1-based, reading order) or --exact; nothing was clicked",
@@ -195,12 +216,27 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
                     return Fail("--nth " + std::to_string(nth) + " but only " + std::to_string(hits.size()) + " matches; nothing was clicked", "\"match_count\":" + std::to_string(hits.size()) + ",\"candidates\":" + CandidatesJson(f, lines, hits) + "," + stats);
                 const int index = nth ? nth : 1; const vi_text::Hit& h = hits[(size_t)index - 1];
                 const vi_text::Box b = ToClient(f, h.box); const int cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+                if(stable.requested){
+                    if(!stable.Observe({b.x,b.y,b.w,b.h},f.captureScope,f.captureQpc,f.qpcFrequency,elapsed))return Fail("text box stability needs a valid scoped monotonic capture clock; no input was sent",stats);
+                    stats+=",\"box_stability_ms_requested\":"+std::to_string(stable.requested)+",\"box_stability_ms_observed\":"+std::to_string(stable.observed)+",\"box_stability_samples\":"+std::to_string(stable.samples)+",\"box_stability_ready\":"+(stable.ready?"true":"false");
+                }
+                if(!stable.requested||(stable.ready&&elapsed<=timeout)){
                 std::string match = HitJson(f, lines, h, index);
                 if (HasOpt(a, "dry-run")) return {true, "{\"ok\":true,\"clicked\":false,\"dry_run\":true,\"match\":" + match + ",\"match_count\":" + std::to_string(hits.size()) + ",\"candidates\":"+CandidatesJson(f,lines,hits)+"," + kNoConfidence + "," + stats + "}"};
-                std::string resp; bool ok = Request(pid, ClickJson(a, cx, cy), resp) && resp.find("\"ok\":true") != std::string::npos;
+                std::string request=ClickJson(a,cx,cy),deadline;
+                if(stable.requested){
+                    const auto budget=(std::uint64_t)(std::min)(5000.0,timeout-elapsed);const auto max=(std::numeric_limits<std::uint64_t>::max)();
+                    if(!budget||stable.frequency>max/budget||stable.lastQpc>max-stable.frequency*budget/1000)return Fail("stable text admission budget expired/overflowed; no click was sent",stats);
+                    deadline=std::to_string(stable.lastQpc+stable.frequency*budget/1000);
+                    request.pop_back();request+=",\"expected_capture_scope\":\""+JEsc(f.captureScope)+"\",\"admit_before_qpc_ticks\":\""+deadline+"\",\"admit_qpc_frequency\":\""+f.qpcFrequency+"\"}";
+                }
+                std::string resp;bool ok=Request(pid,request,resp)&&resp.find("\"ok\":true")!=std::string::npos;
+                if(stable.requested)ok=StableTextAcknowledgement(ok,resp,deadline,cx,cy,stats);
                 return {ok, std::string("{\"ok\":") + (ok ? "true" : "false") + ",\"clicked\":" + (ok ? "true" : "false") + ",\"match\":" + match + ",\"match_count\":" + std::to_string(hits.size()) + ",\"candidates\":"+CandidatesJson(f,lines,hits)+"," + kNoConfidence + "," + stats + ",\"click\":" + resp + "}"};
+                }
             }
         } else if (gone ? hits.empty() : !hits.empty()) {
+            stats+=ObservationImageFields(f,a);
             if(!contextRegion.empty()){
                 Frame context;std::string contextError,lang;std::vector<vi_text::Line> contextLines;
                 bool contextOk=CropClientFrame(fullFrame,contextRegion,context,contextError);
@@ -215,7 +251,7 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
                 ",\"candidate_score_note\":\"text edit similarity only; suggestions were not accepted or clicked\"";
             if (mode == 0 && HasOpt(a, "optional")) return {true, "{\"ok\":true,\"clicked\":false,\"skipped\":true,\"reason\":\"text not present (--optional)\"," + diagnostics + "," + stats + "}"};
             if (mode == 1 && !gone && HasOpt(a, "optional")) return {true, "{\"ok\":true,\"found\":false,\"skipped\":true,\"reason\":\"text not present (--optional)\"," + diagnostics + "," + stats + "}"};
-            const std::string what = mode == 0&&q.opt.exact_line?"text not found as a complete OCR line (inspect candidates or explicitly use --exact-line=false for text inside a paragraph)":mode == 0 ? "text not found" : gone ? "text still present" : "text not found";
+            const std::string what=mode==0&&stable.requested&&!hits.empty()?"matched OCR box did not remain position-stable before timeout; no click was sent":mode == 0&&q.opt.exact_line?"text not found as a complete OCR line (inspect candidates or explicitly use --exact-line=false for text inside a paragraph)":mode == 0 ? "text not found" : gone ? "text still present" : "text not found";
             return Fail(std::string(name) + ": " + what + (timeout > 0 ? " before timeout" : ""),
                         std::string("\"timed_out\":") + (timeout > 0 ? "true" : "false") + ",\"match_count\":" + std::to_string(hits.size()) + "," + diagnostics + "," + stats);
         }

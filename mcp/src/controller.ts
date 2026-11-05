@@ -1,5 +1,11 @@
 // Pure command construction. No game, clock, process or native input access.
 export const MOVE_DIRECTIONS = ["up", "up-right", "right", "down-right", "down", "down-left", "left", "up-left"] as const;
+export const PAD_BUTTON_NAMES=['a','b','x','y','up','down','left','right','start','back','ls','rs','lb','rb','guide','lt','rt','none'] as const;
+export function padButtonError(value:string,allowOff=false):string|undefined{
+  if(allowOff&&value.toLowerCase()==='off')return;
+  const bad=value.toLowerCase().split(/[+, ]/).find(token=>token&&!PAD_BUTTON_NAMES.some(name=>name===token));
+  if(bad)return `unknown pad button '${bad}'; supported: ${PAD_BUTTON_NAMES.join(' ')}${allowOff?' off':''}. rx/ry/lx/ly are separate axis fields; no input was sent`;
+}
 type Direction = typeof MOVE_DIRECTIONS[number];
 export function moveVector(direction: Direction, speed: "walk" | "run", rotationDeg = 0) {
   const signs: Record<Direction, readonly [number, number]> = {

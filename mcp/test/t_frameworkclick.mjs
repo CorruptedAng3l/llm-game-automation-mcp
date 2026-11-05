@@ -9,6 +9,7 @@ p=frameworkClickTiming(500,undefined,true);check(p.argv.join()==='--framework_de
 p=frameworkClickTiming(undefined,350,true);check(p.argv.join()==='--framework_default_hold=true','only omitted hold requests native default');
 p=frameworkClickTiming(undefined,undefined,false);check(p.argv.join()==='--framework_default_hold=true','unpositioned click never requests a hover delay');
 check(frameworkClickTiming(undefined,undefined,true).budgetHold+frameworkClickTiming(undefined,undefined,true).budgetHover===750,'omitted batch timing reserves full possible Chromium400/350 duration');
+check(frameworkClickTiming(undefined,undefined,true).budgetHold>=250&&frameworkClickTiming(undefined,undefined,true).budgetHover>=250,'existing per-point admission budget also covers Unity250/250 without a smaller timeout reserve');
 check(frameworkClickTiming(2000,0,true).budgetHold===2000&&frameworkClickTiming(2000,0,true).budgetHover===0,'explicit batch values keep their exact timing budget');
 const t=await startFake({}),pid=process.pid;
 try{
@@ -16,6 +17,12 @@ try{
  check(!r.isError&&t.callsOf('click').length===1&&c.includes('--framework_default_hold=true')&&c.includes('--framework_default_hover=true'),'actual MCP click delegates omitted timing to current native framework once');
  t.clearCalls();r=await t.call('click',{pid,x:100,y:120,hold_ms:2000,hover_ms:0,edge_margin:0});c=t.callsOf('click')[0];
  check(!r.isError&&t.callsOf('click').length===1&&!c.some(v=>v.includes('framework_default'))&&c[c.indexOf('--ms')+1]==='2000'&&c[c.indexOf('--settle-ms')+1]==='0','actual MCP preserves explicit caller timing and performs no verification retry');
+ const framework_input={version:1,profile:'unity_ui',recognized:true,class:'UnityWndClass',hwnd:'0x123',window_generation:'17',timing_only:true,default_click_hold_ms:250,default_click_hover_ms:250,auto_legacy_ui:false,auto_raw_ui_suppressed:false,relative_raw_policy_unchanged:true,scope:'fixture native timing receipt; application response unmeasured'};
+ t.setScenario({replies:{click:{ok:true,pid,ms:250,framework_input}}});t.clearCalls();r=await t.call('click',{pid,x:100,y:120,edge_margin:0,compact:true});c=t.callsOf('click')[0];
+ check(!r.isError&&t.callsOf('click').length===1&&!t.callsOf('status').length&&c.includes('--framework_default_hold=true')&&c.includes('--framework_default_hover=true')&&JSON.stringify(r.json.framework_input)===JSON.stringify(framework_input),'actual MCP delegates omitted values once and retains opaque Unity timing receipt without host engine inference or replay');
+ t.setScenario({replies:{click:{ok:false,input_injected:null,error:'Unity click ACK unavailable',uncertain_native:{token:'original'}}}});t.clearCalls();r=await t.call('click',{pid,x:100,y:120,edge_margin:0,compact:true});
+ check(r.isError&&r.json.uncertain_native.token==='original'&&t.callsOf('click').length===1,'uncertain Unity-shaped input failure remains original and never authorizes an automatic retry');
+ t.setScenario({});
  t.clearCalls();r=await t.call('click',{pid,hold_ms:400});c=t.callsOf('click')[0];check(!r.isError&&!c.some(v=>v.includes('framework_default'))&&!c.includes('--settle-ms'),'current-cursor click does not invent hover or override its explicit hold');
 }finally{await t.close();}
 const batch=await startFake({}, {VINPUT_EXE:fileURLToPath(new URL('./fake_agent_loops.mjs',import.meta.url))});

@@ -40,6 +40,7 @@ check(r.observation.queue_drain_measured===false&&r.observation.raw_queue_remain
 check(r.observation.sample.timing_clock==='QueryPerformanceCounter'&&r.observation.sample.capture_qpc_ticks,'native observation clock evidence is retained');
 f=fixture({animate:true});r=read(await observeSettle(f.ctx,{...args,timeout_ms:15}));
 check(!r.ok&&!r.settled&&!f.moves,'continuously changing region expires without invented settle evidence');
+check(r.timed_out===true&&r.stop_reason==='region_stability_timeout'&&/exact_region_hash/.test(r.error)&&/animated/.test(r.error),'settle timeout names the measured metric and region/tolerance remedy');
 f=fixture();r=read(await lookCalibrate(f.ctx,args));
 check(r.ok&&f.moves===2&&JSON.stringify(r.calibration.matrix)===JSON.stringify(matrix),'calibration measures signed two-axis landmark displacement from two probes');
 check(r.degrees_per_count===null&&r.queue_drain_measured===false&&r.observations.length===3,'calibration keeps unknown camera angles and raw consumption explicit');

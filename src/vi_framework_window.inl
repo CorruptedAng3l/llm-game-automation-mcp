@@ -9,5 +9,5 @@ FrameworkWindow FrameworkProfileForCurrent() {
     DWORD afterOwner=0;
     if(g_hwnd!=window||g_inputReadyGeneration!=generation||WndBindingFind(window)!=binding||!WndBindingLive(binding)||
        GetWindowThreadProcessId(window,&afterOwner)!=thread||afterOwner!=g_pid)return {};
-    out.window=window;out.generation=generation;out.chromium=vi_framework_input::Chromium(out.className);return out;
+    out.window=window;out.generation=generation;out.chromium=vi_framework_input::Chromium(out.className);out.unity=vi_framework_input::Unity(out.className);return out;
 }

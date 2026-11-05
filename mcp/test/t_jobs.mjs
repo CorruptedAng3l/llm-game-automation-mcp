@@ -39,6 +39,14 @@ try {
   // ---- job_status / job_cancel
   r = await t.call("job_status", { pid, id: "j1" });
   check(!r.isError && last("job-status").join(" ") === "job-status j1", "job_status id -> job-status ID");
+  r = await t.call("job_status", { pid, job_id: "j2" });
+  check(!r.isError && last("job-status").join(" ") === "job-status j2", "job_status accepts the job_id named in async receipts");
+  r = await t.call("job_status", { pid, id: "j2", job_id: "j2" });
+  check(!r.isError && last("job-status").join(" ") === "job-status j2", "identical job status aliases select one exact job");
+  for (const args of [{id:"j1",job_id:"j2"},{job_id:""},{id:""}]) {
+    t.clearCalls(); r = await t.call("job_status", {pid,...args});
+    check(r.isError && t.calls().length === 0, "conflicting or empty job status identifiers fail before native I/O");
+  }
   r = await t.call("job_status", { pid });
   check(!r.isError && last("jobs").join(" ") === "jobs", "job_status without id -> jobs");
   r = await t.call("job_cancel", { pid, id: "j1" });

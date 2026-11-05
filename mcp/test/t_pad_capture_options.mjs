@@ -37,6 +37,11 @@ try {
       `${name} returns actual reduced PNG dimensions plus its client mapping`, r.text);
   }
 
+  for(const [name,args] of families.filter(([name])=>['pad','pad_move','pad_timeline'].includes(name))){
+    t.clearCalls();const r=await t.call(name,{pid,...args,capture_after:3,capture_settle_ms:0});
+    check(!r.isError&&r.image?.mimeType==='image/png'&&r.json.capture_after?.path&&flag(t.callsOf('capture')[0],'--after-frames')==='3',`${name} numeric capture_after returns both image content and its saved path`);
+  }
+
   t.clearCalls();
   let r = await t.call("pad_move", { pid, direction: "right", ms: 200, capture_settle_ms: 0, region: rect, max_width: 160 });
   let im = decode(r), cap = t.callsOf("capture").at(-1);

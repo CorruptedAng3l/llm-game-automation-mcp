@@ -32,9 +32,11 @@ static Reply CmdScroll(DWORD pid, const Args& a) {
 }
 static Reply CmdPlacement(DWORD pid,const Args& a){
     if(a.pos.size()!=4)return Fail("placement-drag needs x1 y1 x2 y2 (client pixels)");
-    std::string status;if(!Request(pid,"{\"cmd\":\"status\"}",status)||status.find("\"placement_drag\":true")==std::string::npos)return Fail("target lacks owned polled placement support; restart the owned target with the matching updated DLL; no input was sent");
+    std::string status;if(!Request(pid,"{\"cmd\":\"status\"}",status)||status.find("\"placement_drag\":true")==std::string::npos)return Fail("target lacks owned polled placement support; restart the owned target with the matching updated DLL; no input was sent","\"input_injected\":false,\"placement_preflight_refused\":true");
+    if(HasOpt(a,"scope-json")){std::string capability;const bool received=Request(pid,"{\"cmd\":\"ping\",\"pointer_scope_support\":true}",capability);vi_ready_json::Reader capabilities{capability,0,{}};bool accepted=false;
+        if(!received||!capabilities.Parse()||!capabilities.Bool("ok",accepted)||!accepted||!capabilities.fields.count("placement_scope_version")||capabilities.fields.at("placement_scope_version").type!='n'||capabilities.fields.at("placement_scope_version").raw!="1"||!capabilities.fields.count("pid")||capabilities.fields.at("pid").raw!=std::to_string(pid))return Fail("target lacks scoped placement admission; no input was sent","\"input_injected\":false,\"placement_preflight_refused\":true");}
     std::string command="{";PutS(command,"cmd","placement-drag");Put(command,"x",a.pos[0]);Put(command,"y",a.pos[1]);Put(command,"x2",a.pos[2]);Put(command,"y2",a.pos[3]);
-    for(auto& option:a.opt){std::string key=option.first;if(key=="placement")continue;if(key=="capture-space"){PutS(command,"space","capture");continue;}if(key=="dwell-ms")key="dwell_ms";if(key=="poll-timeout-ms")key="poll_timeout_ms";if(key=="hold-ms")key="hold_ms";
+    for(auto& option:a.opt){std::string key=option.first;if(key=="placement")continue;if(key=="capture-space"){PutS(command,"space","capture");continue;}if(key=="scope-json"){PutS(command,"expected_capture_scope",option.second);continue;}if(key=="dwell-ms")key="dwell_ms";if(key=="poll-timeout-ms")key="poll_timeout_ms";if(key=="hold-ms")key="hold_ms";
         if(key!="steps"&&key!="ms"&&key!="dwell_ms"&&key!="poll_timeout_ms"&&key!="hold_ms"&&key!="button"&&key!="norm"&&key!="async"&&key!="replace")return Fail("unsupported placement option: --"+option.first+"; no input was sent");Put(command,key,option.second);}
     command+="}";std::string response;bool received=Request(pid,command,response);return {received&&response.find("\"ok\":true")!=std::string::npos,response};
 }

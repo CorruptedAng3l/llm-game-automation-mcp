@@ -10,8 +10,9 @@ JSON). Refusals by the anti-cheat check exit with code 4 and carry `"anticheat_r
 ```
 vinput inject --pid N [--dll PATH] [--hooks-only[=true|false]]
 vinput launch (--exe PATH | --steam APPID --wait-exe NAME.exe | --aumid PFN!AppId) [--args "..."] [--wait-exe NAME.exe]
-              [--lock FILE] [--lock-retry 60] [--lock-max-wait S] [--timeout 240] [--settle 5] [--fg-guard 5] [--early] [--cwd DIR]
-              [--dll PATH] [--no-inject] [--owner NAME] [--claim-ttl 300]
+              [--lock FILE] [--lock-retry 60] [--lock-timeout S] [--timeout 240] [--settle 5] [--fg-guard 5] [--early] [--cwd DIR]
+              [--client-size WxH] [--cpu-affinity 0xMASK] [--show-hidden] [--dll PATH] [--no-inject] [--owner NAME] [--claim-ttl 300]
+vinput launch --follow-pid N [--follow-created T]     continue an earlier launch from its launcher receipt; starts nothing
 vinput list                                     pids with a live vinput pipe: exe, owner, uptime, really_foreground
 vinput keys                                     every accepted key name and its VK code
 vinput [--owner NAME] [--force-claim] --pid N <command>     (owner also from env VINPUT_OWNER)
@@ -22,6 +23,7 @@ vinput --pid N waitexit [--timeout MS]          block until the process exits; r
 vinput --pid N readiness [--wait-ms 1000] [--hooks-only[=true|false]]    read-only: hook_ready / window_ready / queue_ready
 vinput --pid N key <combo> [ms] [--count N] [--gap ms]     combo: a, enter, esc, space, up, f1, ctrl+s, 0x2D, vk45 ...
 vinput --pid N down <combo> | up <combo> | hold <combo> <ms>
+              key / hold: [--expect-text TEXT [--expect-timeout-ms 3000] [--expect-region x,y,w,h]]
               timed key / hold / pad / pulse / pad-ramp / pad-timeline accept [--async] [--replace]
 vinput --pid N jobs | job-status ID | job-cancel ID
 vinput --pid N seq <file> [--replace=true|false]          keyboard sequence (alias: sequence) as one background job
@@ -39,8 +41,9 @@ vinput --pid N wheel <delta>
 vinput --pid N pad <a+b+x+y+lb+rb+lt+rt+start+back+up+down+left+right+ls+rs+guide|none> [ms] [--lx N --ly N --rx N --ry N --lt N --rt N] [--hold]
 vinput --pid N pad off                          stop overriding pad 0
 vinput --pid N capture <out.png> [--method auto|native|swapchain|printwindow] [--after-frames N] [--region x,y,w,h]
-              [--scale 0.05..1 | --max-width N] [--format png|jpeg] [--quality 1..100]
+              [--scale 0.05..4 | --max-width N] [--format png|jpeg] [--quality 1..100]
 vinput --pid N capture-burst <sheet.png> [--frames 8] [--interval-ms 250] [--columns 4] [--max-width 320] [--format png|jpeg]
+              [--quiet[=true|false]]
 vinput --pid N wait-change [--region x,y,w,h] [--timeout S]
 vinput --pid N trace key <key>
 vinput --pid N config isolate=false --for 1000                  physical input passes for 1..120000 ms, then isolation is restored
@@ -48,16 +51,21 @@ vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=t
                       cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off hwnd=0x...
                       edge_margin=8 fullscreen=borderless|refuse
 vinput --pid N json '{"cmd":"key","key":"enter","ms":80}'
-vinput --pid N ocr [--region x,y,w,h] [--lang L] [--scale S] [--tiles] [--lines-only] [--out f.json]
-vinput --pid N click-text "text" [--nth N] [--exact] [--fuzzy N] [--timeout ms] [--button B] [--region R] [--dry-run] [--optional]
+vinput --pid N ocr [--region x,y,w,h] [--lang L] [--scale S] [--preprocess MODE] [--retry-empty=true|false] [--tiles]
+              [--text-only] [--lines-only] [--out f.json]
+vinput --pid N click-text "text" [--nth N] [--exact] [--whole-word=true|false] [--exact-line=true|false] [--fuzzy N]
+              [--timeout ms] [--button B] [--region R] [--dry-run] [--optional]
 vinput --pid N wait-text "text" [--timeout ms] [--gone] [--region R] [--optional]
+vinput --pid N wait-text --any "a|b" [--timeout ms] [--gone]
 vinput --pid N assert-text "text" [--absent]
 vinput --pid N find-image|click-image|wait-image T.png [--threshold 0.8] [--scales a,b,c|--no-scale] [--region R] [--nth N] [--timeout ms] [--gone] [--dry-run] [--optional]
+              find-image [--preserve-map]   keep the saved single-image cursor map and report the source capture scope
 vinput --pid N pixel X Y
 vinput --pid N scroll N [X Y] [--horizontal]
 vinput --pid N drag x1 y1 x2 y2 [--ms 300] [--button B]
 vinput --pid N placement-drag x1 y1 x2 y2 [--steps 15] [--ms 300] [--hold-ms 60] [--dwell-ms 200] [--poll-timeout-ms 1000] [--button B] [--async]
 vinput --pid N script <file> [--continue]
+vinput --pid N escape-host [--timeout-ms N]     opt-in Ctrl+Alt+Shift+End hotkey host; streams receipts; never starts by itself
 vinput --pid N foreground [--lease-ms 30000]    hand-off only: really bring the game to the front and grant a foreground lease (1..300000 ms)
 vinput sysinput <vk>                            test only: one OS-level SendInput key (the shared keyboard)
 ```
@@ -111,9 +119,11 @@ virtual cursor even then. Otherwise the call is virtualised (the game sees its o
 A newer accepted cursor command from the agent (`mouse`, `move`, `click`, `mousedown`, `placement-drag`) re-arms the virtual
 position after a human takeover; read-only and rejected commands do not.
 
-`ClipCursor` is **always virtual**, also when you are playing the game in front: your real cursor is not confined to its
-window, and `GetClipCursor` reports the game's virtual clip. A clip left on the desktop before vinput was injected is never
-cleared. `status.cursor_guard` reports hook readiness and the live entry coverage, the foreground witnesses, why the last write
+`ClipCursor` is forwarded to Windows only while the game's adopted window owns the verified real foreground and the
+rectangle lies inside its client area and the desktop; in the background it stays virtual. vinput releases a clip it
+forwarded when the game loses the foreground or its window or size changes (best-effort: up to 3 attempts, and only if the
+clip is still the one it set); `status.cursor_guard.native_clip` shows what was forwarded and released. `GetClipCursor`
+reports the game's requested clip. A clip left on the desktop before vinput was injected is never cleared. `status.cursor_guard` reports hook readiness and the live entry coverage, the foreground witnesses, why the last write
 was allowed or not, and per-API blocked / virtualised / forwarded counters; `real_cursor_writes_leaked` is `null`
 (desktop attribution is not measured) and zero counters do not cover a pre-hook call, a direct syscall or a PID that was not
 injected. `keybd_event` is not hooked. Input commands refuse a DLL without the cursor guard or with unarmed hooks.
@@ -162,7 +172,14 @@ first, starts the game with a non-activating hint, and hands the foreground back
   the window, plus the settle and guard time), released on success and on failure. Use the same file for every tool
   on the machine that may take the real foreground, so they do not fight over it. Locks are atomic JSON leases with
   owner / token / file-identity checks on release; an existing lock owned by someone else is never reclaimed, even a
-  stale one (`--lock-retry` seconds between attempts, `--lock-max-wait` to give up).
+  stale one (`--lock-retry` seconds between attempts, `--lock-timeout` total seconds to wait, default 0 = unlimited;
+  `--lock-max-wait` is an alias).
+- **`--client-size WxH`** (1..8192 each, direct injected `--exe` only): one size request after settle, without activating
+  or moving the window; read `client_size.applied` / `warning`. A running game stays `ok:true` if the size is refused.
+- **`--cpu-affinity 0xMASK`** (direct `--exe` only): nonzero hexadecimal processor mask applied before the game's first
+  instruction, for example `0xF` for four cores.
+- **`--show-hidden`**: hidden presenting windows are adopted without being shown by default; this queues one
+  `SW_SHOWNA`. Read the ticket / visibility receipt, not just `ok`.
 - **`--fg-guard S`** (default 5): some games take the real foreground back after the first restore (for example when a
   launcher dialog closes). `launch` keeps watching for S seconds and hands it back each time, reporting every hand-back
   in `foreground_regrabs[]`. If the game is running and injected but the hand-back failed, the reply is
@@ -271,7 +288,8 @@ blocks other commands: another client can capture or press an unrelated key duri
   `at_ms` from 0, strictly increasing). Overdue states are coalesced and reported (`skipped_states`,
   `max_lateness_ms`); `--strict-frames` fails instead. `--ms N` runs past the last state.
 - `seq flight.vin` (alias `sequence`) validates the whole file, then returns a background job ID at once. Lines are `hold CHORD MS`,
-  `key CHORD MS`, `wait MS` or `sleep MS`; `#` starts a comment, and a file with `hold w+space 1500`, `wait 100`, `key d 300` holds
+  `key CHORD MS`, `wait MS`, `sleep MS` or `retap CHORD KEY MS EVERY_MS GAP_MS` (CHORD stays held for MS while only KEY,
+  one member of CHORD, is released and pressed again every EVERY_MS; GAP_MS 1..1000 and below EVERY_MS); `#` starts a comment, and a file with `hold w+space 1500`, `wait 100`, `key d 300` holds
   W and Space together, releases them, waits and presses D. `job-status` reports the current zero-based step and its source line;
   `job-cancel` releases the active chord in reverse press order. The keys of all later steps are reserved too, so pressing one by
   hand cancels the rest. A conflict with other work fails before any input; `--replace=true` replaces it, `--replace=false`
@@ -299,7 +317,7 @@ blocks other commands: another client can capture or press an unrelated key duri
 `note`. `wait-change --region ... --timeout 5` polls fresh frame hashes and returns on a visual change; a change proves
 pixels changed, not that a particular action succeeded.
 
-`--scale 0.05..1` or `--max-width N` shrink the saved image inside the game, and `--format jpeg` (`--quality`, default 85)
+`--scale 0.05..4` (above 1 enlarges, coordinates stay mapped) or `--max-width N` resize the saved image inside the game, and `--format jpeg` (`--quality`, default 85)
 writes a JPEG; the format flag decides the container, not the file extension. Replies add `source_w` / `source_h`,
 `origin_x` / `origin_y` and `region_client_w` / `region_client_h` (the client rectangle the image covers), and later
 `--capture-space` coordinates use that saved image's mapping. `hash` stays the hash of the unscaled source pixels. A game
@@ -325,6 +343,7 @@ tile's actual time, lateness and rectangle. A sheet is not a single game image a
 
 | path | how the frame is found |
 |---|---|
+| d3d9 | `Present` hook, readback on the presenting thread (synthetic targets only so far) |
 | d3d11 | `Present` hook, staging copy |
 | d3d12 | `Present` / `Present1`; the game's DIRECT queue from the `ExecuteCommandLists` hook; own allocator / list / fence copy the back buffer to a readback buffer; the game never waits |
 | gl | `wglSwapBuffers` / `SwapBuffers`, `glReadPixels` of the back buffer on the game's GL thread, touched GL state restored |
@@ -364,7 +383,9 @@ are applied for you, so a box can be fed straight to `click`).
 **Matching rules.** Default: case-insensitive, all whitespace ignored on both sides (`LoadGame` finds `Load   Game`),
 substring of a line (`PLAY` also hits `PLAYERS`). `--exact`: case-sensitive and the match must start and end on OCR word
 boundaries. `--fuzzy N` (0..3) also accepts whole-word runs within N edits (OCR slips); those hits have
-`match_score` < 1. `--nth N` is 1-based in reading order. `ocr_confidence` is always `null`: the Windows engine reports
+`match_score` < 1. `--whole-word=true` requires complete OCR words (case is still ignored); `--exact-line=true` requires the query
+to cover a whole OCR line (tiled passes are then skipped; use `--region` on big frames). Both default to `false` in the CLI;
+the MCP `click_text` tool turns both on by default. `--nth N` is 1-based in reading order. `ocr_confidence` is always `null`: the Windows engine reports
 none, and none is invented.
 
 **OCR is not stable, so the search is layered.** Windows OCR's layout analysis can drop words from a full frame that it

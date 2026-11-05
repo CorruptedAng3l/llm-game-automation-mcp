@@ -3,7 +3,7 @@
 // through vinput. Vinput-backed tools return CLI JSON with "ok" surfaced as isError; wait uses only a host timer.
 // Offline games only: vinput injects a DLL and refuses targets with a known anti-cheat (see DISCLAIMER.md).
 import { sizeMismatchWarning } from "./launchsize.js";
-import { MOVE_DIRECTIONS, moveVector, smoothMoveStates, calibratedLook, rotateStick, driveStates } from "./controller.js";
+import { MOVE_DIRECTIONS, moveVector, smoothMoveStates, calibratedLook, rotateStick, driveStates,padButtonError } from "./controller.js";
 import { closeSync, fstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -26,8 +26,9 @@ import { presentInputReads } from "./inputreads.js";
 import { presentMouseDiagnostics } from "./actiondiagnostics.js";
 import {verifiedClick,clickScopeCapability} from './clickverify.js';
 import { CaptureMappings, nativeMapping } from "./capturemapping.js";
-import { registerCameraHelpers } from "./camerahelpers.js";
+import { registerCameraHelpers,observeSettle,type CameraContext } from "./camerahelpers.js";
 import { registerNavigationMotion } from "./navigationmotion.js";
+import { registerPadNavigation } from "./padnavigation.js";
 import { frameworkClickTiming } from "./frameworkclick.js";
 import { waitTextQuery, presentWaitTextAny } from "./waittextany.js";
 import { registerAgentLoops, noteOtherInput } from "./agentloops.js";
@@ -36,11 +37,12 @@ import { launcherFollowAction } from "./launcherfollow.js";
 import {captureDestination,destinationError,type CaptureDestination} from './capturedestination.js';
 import {compactRenderBackends} from './backendview.js';
 import {measureTimedInput} from './holdmotion.js';
-import { prepareSequenceConditions, guardSequence, type PreparedConditions } from "./sequenceconditions.js";
+import {dragTiming} from './dragtiming.js';
+import { prepareSequenceConditions, guardSequence,canonicalSequenceScope, type PreparedConditions } from "./sequenceconditions.js";
 import { compactEnabled, compactReply } from "./compactreply.js";
 import {prepareCapturePlan,sequenceFollowAction} from './sequencecaptures.js';
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -92,10 +94,9 @@ function fail(message: string): ToolReply {
 }
 /** The CLI refused an option because the injected DLL is older than the CLI (it says so before sending any input). */
 const lacksSupport = (r: CliResult) => !r.ok && /\blacks\b/i.test(String((r.json as { error?: unknown })?.error ?? ""));
-/** A placement drag that failed BEFORE the pointer moved because the game never READ the button (Unity and other games that read
- *  buttons through window messages, not DirectInput). Nothing was dragged, so the plain drag is the safe retry. */
-const placementPressNotSeen = (r: CliResult): string | undefined =>
-  r.ok ? undefined : /button_down_not_observed|press_position_not_observed|start_position_not_observed/.exec(JSON.stringify(r.json ?? {}))?.[0];
+/** Only a typed CLI preflight that sent no placement input permits the plain path. */
+const placementPreflightRefused=(r:CliResult)=>!r.ok&&!r.timedOut&&r.json!==null&&typeof r.json==='object'&&!Array.isArray(r.json)&&
+  (r.json as Record<string,unknown>).ok===false&&(r.json as Record<string,unknown>).input_injected===false&&(r.json as Record<string,unknown>).placement_preflight_refused===true;
 /** Polled-click / release / edge evidence from one vinput reply, as a small summary (undefined when the build reports none). */
 function inputEvidence(j: unknown): Record<string, unknown> | undefined {
   if (!j || typeof j !== "object") return undefined;
@@ -204,7 +205,8 @@ tool("launch", "Launch a game",
   "early:true for Vulkan / OpenGL games so capture hooks are in before the device is created (exe only). Refused with " +
   "anticheat_refused:true if the game or the machine has a known anti-cheat. Interactive Steam launchers return launch_state:'launcher_ready' and waiting_for; click Play, then call launch with follow_pid, follow_created and wait_exe from that receipt to adopt the game without starting another copy. For Steam load error 5:0000065434 use steam_appid + wait_exe.",
   {
-    exe: z.string().optional().describe("Full path of the game executable."),
+    exe: z.string().optional().describe("Full path of the game executable. Direct launches refuse an existing exact canonical image and return existing_instances without attaching."),
+    new_instance: z.boolean().optional().describe("Direct exe launches only: explicitly permit another instance of this executable. Default false; existing processes are never automatically attached, claimed or injected."),
     verbose:z.boolean().optional().describe('Return inactive backend diagnostic blocks too. Default omits inactive ddraw/d3d9 blocks only when another frame backend is known and the block has no activity or failure evidence.'),
     follow_pid: z.number().int().positive().optional().describe("Continue an existing launch after clicking Play; use instead of exe/aumid/steam_appid. Does not start another process."),
     follow_created: z.string().regex(/^\d+$/).optional().describe("process_created from the launcher receipt; decimal string retains its identity after the launcher exits."),
@@ -230,6 +232,7 @@ tool("launch", "Launch a game",
     const n = [a.exe, a.aumid, a.steam_appid, a.follow_pid].filter((v) => v).length;
     if (n !== 1) return fail("give exactly one of exe, aumid, steam_appid or follow_pid");
     if (a.follow_created !== undefined && !a.follow_pid) return fail("follow_created requires follow_pid");
+    if (a.new_instance !== undefined && !a.exe) return fail("new_instance requires a direct exe launch");
     if (a.cpu_affinity !== undefined && !a.exe) return fail("cpu_affinity requires a direct exe launch");
     if (a.cpu_affinity !== undefined && /^0x0+$/i.test(a.cpu_affinity)) return fail("cpu_affinity must be nonzero");
     let cwd: string | undefined;
@@ -242,7 +245,7 @@ tool("launch", "Launch a game",
     const argv = ["--owner", OWNER, "launch",
       ...opt("--exe", a.exe), ...opt("--aumid", a.aumid), ...opt("--steam", a.steam_appid), ...opt("--wait-exe", a.wait_exe),
       ...opt("--follow-pid", a.follow_pid), ...opt("--follow-created", a.follow_created),
-      ...opt("--cpu-affinity", a.cpu_affinity),
+      ...opt("--cpu-affinity", a.cpu_affinity), ...(a.new_instance === undefined ? [] : ["--new-instance", String(a.new_instance)]),
       ...(a.args === undefined ? [] : [`--args=${a.args}`]), ...opt("--cwd", cwd), ...opt("--early", a.early),...opt('--show-hidden',a.show_hidden), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
       ...opt("--lock", a.lock), ...opt("--claim-ttl", a.claim ? a.claim_ttl_s ?? 3600 : undefined)];
     const r = await runVinput(argv, ((a.timeout_s ?? 240) + (a.settle_s ?? 5) + 120) * 1000);
@@ -436,7 +439,8 @@ const captureImageArgs = {
   format: z.enum(["png", "jpeg"]).optional().describe("png (default, exact pixels) or jpeg (much smaller, lossy: do not use it to compare colours). jpeg needs a vinput build with capture output support and cannot be combined with grid or zoom (both are drawn on the decoded PNG; for a small labelled image use format png with max_width or scale instead)."),
   quality: z.number().int().min(1).max(100).optional().describe("JPEG quality 1..100 (default 85)."),
 };
-type CaptureImageOptions = CaptureDestination & { region?: z.infer<typeof regionSchema>; max_width?: number; scale?: number; upscale?:boolean;format?: "png" | "jpeg"; quality?: number };
+type CaptureStability={region?:z.infer<typeof regionSchema>;timeout_ms?:number;poll_ms?:number;stable_samples?:number;max_change_pct?:number;pixel_tolerance?:number};
+type CaptureImageOptions = CaptureDestination & { region?: z.infer<typeof regionSchema>; max_width?: number; scale?: number; upscale?:boolean;format?: "png" | "jpeg"; quality?: number;capture_stable?:boolean|CaptureStability };
 tool("capture", "Capture a frame",
   "Screenshot of the game's own frame (D3D11/D3D12/OpenGL/Vulkan swapchain, PrintWindow fallback) taken in the background. " +
   "Returns the PNG (or JPEG) as an image plus JSON {path, w, h, method, capture_path, frame}. Unscaled image pixels = client " +
@@ -466,6 +470,7 @@ tool("capture", "Capture a frame",
   });
 
 function validateFormat(a: { format?: "png" | "jpeg"; quality?: number; grid?: number; zoom?: number; scale?: number;upscale?:boolean;max_width?:number;include_image?:boolean }): string | undefined {
+  if(a.include_image===false&&((a.scale??1)>1||(a.zoom??1)>1||a.grid!==undefined))return 'scale > 1, zoom and grid modify the returned PNG preview only; include_image:false would leave the saved native capture unchanged. Enable include_image for an enlarged preview';
   if(a.upscale&&(a.format==='jpeg'||a.max_width===undefined||a.scale!==undefined||a.zoom!==undefined||a.include_image===false))return 'upscale:true requires max_width and an included PNG preview, without scale/zoom; JPEG supports shrinking only';
   if (a.quality !== undefined && a.format !== "jpeg") return "quality applies only to format jpeg";
   if (a.format === "jpeg" && a.grid !== undefined) return "grid needs format png: the grid is drawn on the decoded image and only PNG can be decoded here. Drop format (png) and shrink with max_width or scale instead, or keep jpeg and drop grid (read coordinates from a png capture first)";
@@ -571,6 +576,7 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
           if (scaledBy === "mcp") { Object.assign(mapping,baseMapping); scaledBy = undefined; }
         }
       }
+      if((o.scale??o.zoom??1)>1||o.upscale)extra.preview_note='Enlargement changes the returned preview and its mapping; path names the clean native capture. Save the attached preview if an enlarged file is needed';
       imageInfo = { w, h, ...mapping, ...(scaledBy ? { scaled_by: scaledBy } : {}), ...(jpeg ? { format: "jpeg" } : {}),
         ...(o.grid && !imgErr ? { grid: o.grid } : {}), ...(imgErr ? { image_note: imgErr } : {}) };
       finalW=w;finalH=h;
@@ -604,7 +610,7 @@ const captureAfterSchema = z.union([z.boolean(), z.number().int().min(0).max(360
   "first (0 = capture immediately). Use observe_settle for bounded scoped stable-frame observation after the action; capture_after itself is one image. The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
   "saving a capture round trip. Skipped when the action itself failed.");
 const DEFAULT_LOOK_FRAMES = 3;
-type PostActionObservation = { settle_ms_requested: number; attachment_epoch: number; action_state: string; image_options?: CaptureImageOptions };
+type PostActionObservation = { settle_ms_requested: number; attachment_epoch: number; action_state: string; image_options?: CaptureImageOptions;stable_options?:boolean|CaptureStability };
 /** Act-then-look: append the post-action frame to an action's reply. */
 async function look(pid: number, out: ToolReply, ca: boolean | number | undefined, observe?: PostActionObservation): Promise<ToolReply> {
   if (ca === undefined || ca === false || out.isError) return out;
@@ -626,8 +632,18 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
     observation.settle_ms_elapsed = Math.round(performance.now() - start);
     if (changed()) return attachmentChanged();
   }
+  if(observe?.stable_options){
+    let original:Record<string,unknown>={};try{original=JSON.parse((out.content[0] as {text:string}).text);}catch{/* Native receipt stays otherwise unchanged. */}
+    const active=original.job_state==='queued'||original.job_state==='running'||original.accepted===true;
+    let stability:Record<string,unknown>;
+    try{stability=active?{ok:false,error:'native input job is still active; stability after completion was not observed'}:
+      JSON.parse(((await observeSettle(cameraContext,{pid,...(typeof observe.stable_options==='object'?observe.stable_options:{}),capture_after:false})).content[0] as {text:string}).text) as Record<string,unknown>;}catch(e){stability={ok:false,error:String(e)};}
+    out.content[0]={type:'text',text:JSON.stringify({...original,capture_stability:stability,...(stability.ok!==true?{capture_stability_warning:'Action receipt retained; following pixel stability was not confirmed. Do not replay the action because of this observation'}:{})})};
+    if(changed())return attachmentChanged();
+  }
   try {
   let g = await grabFrame(pid, { ...observe?.image_options, after_frames: ca === true ? DEFAULT_LOOK_FRAMES : ca });
+  if(changed())return attachmentChanged();
   let fallback: Record<string, unknown> | undefined;
   // A number remains a strict Present request. Only the convenience boolean may
   // recover from this exact timeout when fresh status proves no observed stream.
@@ -651,10 +667,17 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
       fallback = { reason: "no_target_present_stream_observed", requested_present_frames: DEFAULT_LOOK_FRAMES,
         present_wait_satisfied: false, method: "printwindow", scope: "fresh PrintWindow request; no render-frame or application-acceptance guarantee" };
       g = await grabFrame(pid, { ...observe?.image_options, after_frames: 0, method: "printwindow" });
+      if(changed())return attachmentChanged();
     }
   }
   let j: Record<string, unknown> = {};
   try { j = JSON.parse((out.content[0] as { text: string }).text); } catch { /* keep empty */ }
+  if(j.capture_stability&&typeof j.capture_stability==='object'){
+    const stability=j.capture_stability as Record<string,unknown>,observed=stability.observation as {sample?:{capture_scope?:unknown}}|undefined;
+    const before=canonicalSequenceScope(observed?.sample?.capture_scope),after=canonicalSequenceScope((g.r.json as {capture_scope?:unknown}|null)?.capture_scope),same=before&&after?before===after:null;
+    j.capture_stability={...stability,observation_ok:stability.ok===true,ok:stability.ok===true&&same===true,final_capture_same_scope:same};
+    if(stability.ok===true&&same!==true)j.capture_stability_warning='Pixel observation retained; final image scope changed or was unconfirmed. No input or capture was repeated';
+  }
   if (g.summary && !g.out.isError) {
     out.content[0] = { type: "text", text: JSON.stringify({ ...j, capture_after: { ...g.summary, ...(fallback ? { fallback } : {}), ...(observation ? { observation } : {}) } }) };
     for (const c of g.out.content) if (c.type === "image") out.content.push(c);
@@ -682,12 +705,15 @@ const actionCaptureArgs = {
   format: captureImageArgs.format.describe("png (default, exact pixels) or jpeg (lossy observation, requires native capture output support). quality applies only to jpeg."),
   region: captureImageArgs.region.describe("Pre-scale client-pixel rectangle for the action observation, not coordinates in a previous image."),
   capture_after: captureAfterSchema,
+  capture_stable:z.union([z.boolean(),z.object({region:regionSchema.optional(),timeout_ms:z.number().int().min(100).max(10000).optional(),poll_ms:z.number().int().min(50).max(1000).optional(),stable_samples:z.number().int().min(2).max(10).optional(),max_change_pct:z.number().min(0).max(100).optional(),pixel_tolerance:z.number().int().min(0).max(255).optional()})]).optional().describe('With capture_after, observe pixel stability after a completed action and before its final image. true watches the full client; {region,...} excludes animations and supports RGB tolerance. Timeout is advisory. Requires a completed action, not async/hold; never replays input.'),
   capture_settle_ms: z.number().int().min(0).max(5000).optional().describe(
     "Extra timer delay after a successful CLI reply, before capture_after (default 0). Requires capture_after. Async jobs may still run and hold:true remains held; this does not wait for their completion."),
 };
-function actionCaptureError(a: CaptureImageOptions & { capture_after?: boolean | number; capture_settle_ms?: number }): string | undefined {
+function actionCaptureError(a: CaptureImageOptions & { capture_after?: boolean | number; capture_settle_ms?: number;async?:boolean;hold?:boolean }): string | undefined {
   const destination=destinationError(a);if(destination)return destination;
   const disabled = a.capture_after === undefined || a.capture_after === false;
+  if(a.capture_stable&&disabled)return 'capture_stable requires enabled capture_after; use capture_after:0 for the final image after observation';
+  if(a.capture_stable&&(a.async||a.hold))return 'capture_stable requires a completed action; omit async/hold or observe its exact job separately';
   if (a.capture_settle_ms !== undefined && disabled) return "capture_settle_ms requires capture_after";
   if (disabled && [a.region, a.max_width, a.scale, a.format, a.quality,a.upscale,a.save_path,a.out_dir].some((v) => v !== undefined))
     return "action image options require enabled capture_after; pass capture_after:0 for an immediate image or capture_after:true to request three presented frames";
@@ -698,6 +724,7 @@ function actionCaptureError(a: CaptureImageOptions & { capture_after?: boolean |
 const actionObservation = (a: CaptureImageOptions & { pid: number; capture_settle_ms?: number; async?: boolean; hold?: boolean }): PostActionObservation => ({
   settle_ms_requested: a.capture_settle_ms ?? 0, attachment_epoch: captureSessionEpoch.get(a.pid) ?? 0,
   action_state: a.async ? "async_job_may_be_running" : a.hold ? "held_until_changed" : "action_reply",
+  stable_options:a.capture_stable,
   image_options: { region: a.region, max_width: a.max_width ?? (a.scale === undefined ? 960 : undefined),
     scale: a.scale, format: a.format, quality: a.quality,upscale:a.upscale,save_path:a.save_path,out_dir:a.out_dir },
 });
@@ -706,7 +733,7 @@ const actionObservation = (a: CaptureImageOptions & { pid: number; capture_settl
 tool("ocr", "Read text on screen",
   "OCR the current frame with the built-in Windows OCR engine. Returns text and lines[] with boxes [x,y,w,h] in client " +
   "pixels (words[] too when words:true). Empty results automatically try bounded upscale/contrast passes on the SAME captured image. " +
-  "Nonempty OCR is not retried and may still be wrong. text_only omits geometry and verbose metadata while preserving capture/timing provenance.",
+  "Nonempty OCR is not retried and may still be wrong. digits_only:true analyzes one explicit region with bounded same-image passes; number_read.value stays null for insufficient agreement, conflict, clipping or incomplete analysis. Pass agreement is not confidence. text_only preserves number evidence and capture/timing provenance.",
   {
     pid, region: regionSchema.optional(),
     scale: z.number().min(1).max(4).optional().describe("Upscale before OCR (2 helps small text)."),
@@ -716,9 +743,18 @@ tool("ocr", "Read text on screen",
     preprocess: z.enum(['none','gray','contrast','threshold','invert','auto']).optional().describe('Initial preprocessing. An explicit mode is retained during retries; auto starts with contrast.'),
     retry_empty: z.boolean().optional().describe('Retry successful empty OCR with bounded upscale/contrast passes on the same capture (default true). Explicit scale is respected; false keeps one requested-scale pass.'),
     text_only: z.boolean().optional().describe('Compact text/count plus selected pass and capture/timing provenance; omit line/word boxes and confidence prose.'),
+    digits_only: z.boolean().optional().describe('Read one whole ASCII digit token (max six digits) in an explicit region up to512x512. No letter substitutions. Requires two agreeing passes; retry_empty:false keeps one pass and yields unknown. No automatic circle detection.'),
   },
-  async (a) => reply(presentOcr(await runVinput([...at(a.pid), "ocr", ...region(a.region), ...opt("--scale", a.scale), ...opt("--lang", a.lang),...opt('--preprocess',a.preprocess),
-    ...(a.words ? [] : ["--lines-only"]), ...(a.tiles === false ? [] : ["--tiles"]),`--retry-empty=${a.retry_empty!==false}`,...(a.text_only?['--text-only']:[])], 60000),!!a.text_only,a.retry_empty!==false)), true);
+  async (a) => {
+    if(a.digits_only&&(!a.region||a.region.w>512||a.region.h>512))return fail('digits_only requires one explicit region up to512x512 client pixels');
+    if(a.digits_only&&a.tiles===true)return fail('digits_only does not support tiles');
+    const result=await runVinput([...at(a.pid), "ocr", ...region(a.region), ...opt("--scale", a.scale), ...opt("--lang", a.lang),...opt('--preprocess',a.preprocess),
+      ...(a.words ? [] : ["--lines-only"]), ...((a.digits_only||a.tiles===false)?[]:["--tiles"]),`--retry-empty=${a.retry_empty!==false}`,...(a.text_only?['--text-only']:[]),
+      ...(a.digits_only===undefined?[]:[`--digits-only=${a.digits_only}`])],60000);
+    const native=result.json as {digits_only?:boolean;number_read?:{version?:number}}|undefined;
+    if(a.digits_only&&result.ok&&(native?.digits_only!==true||native.number_read?.version!==1))return fail('Native CLI did not confirm digits-only OCR; update VINPUT_EXE. No numeric reading is available.');
+    return reply(presentOcr(result,!!a.text_only,a.retry_empty!==false));
+  }, true);
 
 const textMatch = {
   text: z.string().min(1).describe("Text to find. Default matching: case-insensitive, whitespace ignored, substring of a line."),
@@ -744,6 +780,7 @@ tool("click_text", "Click text on screen",
   { pid, ...textMatch, text: textMatch.text.describe("Text to click; defaults to a complete case-insensitive OCR line, whitespace ignored. exact_line:false permits a word within longer text. exact:true also requires case; fuzzy applies to the complete eligible label."),
     whole_word: z.boolean().default(true).describe("Require complete OCR-word boundaries independently of case (default true). false explicitly restores legacy substring matching. exact:true always requires word boundaries. Default mode preflights the CLI capability before input."),
     timeout_ms: timeoutMs(5000), button: button.optional(),
+    stable_ms:z.number().int().min(100).max(3000).optional().describe('Observe the same exact client OCR box across at least two distinct scoped captures for this many milliseconds before one scope-fenced click. Sliding/missing boxes reset the window; never retries a click. This observes box position, not rendered freshness or UI acceptance.'),
     optional: z.boolean().optional().describe("Succeed with skipped:true if the text never appears (for dialogs that may not show)."),
     ...actionCaptureArgs, region: captureImageArgs.region.describe("Client-pixel OCR search region; also bounds an enabled post-action image.") },
   async (a) => {
@@ -751,12 +788,13 @@ tool("click_text", "Click text on screen",
     if (captureError) return fail(captureError);
     const observation = actionObservation(a);
     const exactLine=a.exact_line??(!a.exact&&a.whole_word!==false);
-    const unsupported = await requireTextBoundary(a.whole_word, a.exact,exactLine);
+    if(a.stable_ms!==undefined&&a.stable_ms>(a.timeout_ms??5000))return fail('stable_ms must fit within timeout_ms; no click was sent');
+    const unsupported = await requireTextBoundary(a.whole_word, a.exact,exactLine,a.stable_ms!==undefined);
     if (unsupported) return reply(unsupported);
     if ((captureSessionEpoch.get(a.pid) ?? 0) !== observation.attachment_epoch)
       return fail("attachment changed during text capability preflight; no click was sent");
     const r = await runVinput([...at(a.pid), "click-text", ...textArgs({...a,exact_line:exactLine}), ...opt("--timeout", a.timeout_ms), ...opt("--button", a.button),
-      ...opt("--optional", a.optional)], (a.timeout_ms ?? 5000) + 60000);
+      ...opt("--optional", a.optional),...opt('--stable-ms',a.stable_ms)], (a.timeout_ms ?? 5000) + 60000);
     return look(a.pid, reply(r), a.capture_after, observation);
   });
 
@@ -764,10 +802,11 @@ tool("wait_text", "Wait for text",
   "Wait until visible OCR text matches one string or ANY of a list, e.g. text:['VICTORY','DEFEAT'], in an optional region. All alternatives share each native capture/OCR poll; matched_text identifies the matching query. gone:true waits until ALL listed alternatives are absent. Times out with timed_out:true and ocr_saw. Use observe_settle separately to wait for selected pixels to become stable.",
   { pid, text: z.union([textMatch.text,z.array(z.string().min(1).max(256)).min(1).max(16)]).describe('One text string or any-of alternatives (1..16); list entries cannot contain |.'), region: regionSchema.optional(),context_region:regionSchema.optional().describe('Also OCR this client-pixel rectangle (e.g. level title) from the SAME full captured frame that matched. Native receipt includes capture/frame QPC and Present index; old clients or OCR failure produce an explicit context warning.'),gone: z.boolean().optional().describe("Wait until every requested text is NOT on screen."),
     exact_line:textMatch.exact_line,
+    save_match:z.boolean().optional().describe('Save the exact immutable OCR frame that matched (or proved absence for gone:true); this is not a later capture. Failure to save remains advisory after the wait result.'),save_match_path:z.string().min(1).optional().describe('Exact PNG proof path, only with save_match:true.'),out_dir:z.string().min(1).optional().describe('Proof directory instead of save_match_path, only with save_match:true.'),
     timeout_ms: timeoutMs(15000), optional: z.boolean().optional().describe("Succeed with skipped:true on timeout.") },
-  async (a) => {const query=waitTextQuery(a.text);if(query.error)return fail(query.error);const unsupported=await requireTextBoundary(false,false,a.exact_line);if(unsupported)return reply(unsupported);const r=presentWaitTextAny(await runVinput([...at(a.pid), "wait-text", ...query.argv, ...region(a.region),...(a.context_region?['--context-region',`${a.context_region.x},${a.context_region.y},${a.context_region.w},${a.context_region.h}`]:[]), ...opt("--gone", a.gone),...(a.exact_line===undefined?[]:[`--exact-line=${a.exact_line}`]),
+  async (a) => {if(!a.save_match&&(a.save_match_path!==undefined||a.out_dir!==undefined))return fail('save_match_path/out_dir require save_match:true');const proofError=destinationError({save_path:a.save_match_path,out_dir:a.out_dir});if(proofError)return fail(proofError);const proofPath=a.save_match?captureDestination({save_path:a.save_match_path,out_dir:a.out_dir},a.pid,'png',()=>defaultCapturePath(a.pid,'png')):undefined;const query=waitTextQuery(a.text);if(query.error)return fail(query.error);const unsupported=await requireTextBoundary(false,false,a.exact_line);if(unsupported)return reply(unsupported);const r=presentWaitTextAny(await runVinput([...at(a.pid), "wait-text", ...query.argv, ...region(a.region),...(a.context_region?['--context-region',`${a.context_region.x},${a.context_region.y},${a.context_region.w},${a.context_region.h}`]:[]),...opt('--observation-capture',proofPath), ...opt("--gone", a.gone),...(a.exact_line===undefined?[]:[`--exact-line=${a.exact_line}`]),
     ...opt("--timeout", a.timeout_ms), ...opt("--optional", a.optional)], (a.timeout_ms ?? 15000) + 60000),query.queries);const j=r.json as Record<string,unknown>,context=j?.context as Record<string,unknown>|undefined;
-    return reply(r,a.context_region?{wait_text_context_available:context?.ok===true&&context.same_capture===true&&typeof j.capture_qpc_ticks==='string'&&context.capture_qpc_ticks===j.capture_qpc_ticks,...(context?.ok===true&&context.same_capture===true&&typeof j.capture_qpc_ticks==='string'&&context.capture_qpc_ticks===j.capture_qpc_ticks?{}:{context_warning:'Outcome observation retained; same-frame context OCR is unavailable or unconfirmed. Do not infer a level/title from a later capture.'})}:undefined);}, true);
+    return reply(r,{...(a.context_region?{wait_text_context_available:context?.ok===true&&context.same_capture===true&&typeof j.capture_qpc_ticks==='string'&&context.capture_qpc_ticks===j.capture_qpc_ticks,...(context?.ok===true&&context.same_capture===true&&typeof j.capture_qpc_ticks==='string'&&context.capture_qpc_ticks===j.capture_qpc_ticks?{}:{context_warning:'Outcome observation retained; same-frame context OCR is unavailable or unconfirmed. Do not infer a level/title from a later capture.'})}:{}),...(proofPath?{match_frame_requested_path:proofPath,match_frame_saved:typeof j.observation_frame_path==='string',...(typeof j.observation_frame_path==='string'?{}:{match_frame_warning:'Wait result retained; same-frame proof was not saved/confirmed. No later capture or retry was made'})}:{})});}, true);
 
 const imageArgs = {
   template: z.string().min(1).describe("Path of a PNG template (e.g. an icon cut from an earlier capture with region)."),
@@ -1004,7 +1043,9 @@ tool("move_relative", "Relative mouse motion",
     if (captureError) return fail(captureError);
     const observation = actionObservation(a);
     const r = await runVinput([...at(a.pid), "move", String(a.dx), String(a.dy), ...opt("--steps", a.steps), ...opt("--raw", a.raw)], 60000);
-    return look(a.pid, reply(r), a.capture_after, observation);
+    const j=r.json as Record<string,unknown>|null;
+    const channels=j?.relative_accounting_version===1?{relative_motion_note:'applied_dx/dy describe virtual-cursor coordinate change; raw_dx/dy are legacy requested deltas. device_dx/dy and relative_delivery describe per-channel submissions/queues, not game consumption',...(!a.raw&&(j.cursor_clamped===true||j.edge_guard_applied===true)?{relative_motion_warning:'Relative cursor motion was bounded. For FPS mouse-look, deliberately request raw:true to bypass cursor/edge clamping; this does not replay the previous movement'}:{})}:{};
+    return look(a.pid,reply(r,channels),a.capture_after,observation);
   });
 
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -1018,69 +1059,79 @@ tool("drag", "Drag",
     steps: z.number().int().min(1).max(200).optional().describe("Number of intermediate mouse moves (default: one per 20 ms of ms, 3 to 60)."),
     hold_start_ms: z.number().int().min(0).max(10000).optional().describe(`Hold the button at the start point before moving (default ${DEFAULT_DRAG_HOLD_START_MS} ms).`),
     hold_end_ms: z.number().int().min(0).max(10000).optional().describe(`Dwell at the destination, button still down, before releasing (default ${DEFAULT_DRAG_HOLD_END_MS} ms).`),
+    timing_profile:z.enum(['auto','default','unity']).optional().describe('Default auto uses800ms move/400ms pickup/500ms drop for a fresh owned UnityWndClass; other/unknown windows retain300/150/250. Explicit timing fields override the preset. default disables class selection; unity explicitly requests the slower preset.'),
+    measure_region:regionSchema.optional().describe('For plain drag, compare scoped region RGB pixels before and after its single press/move/release. No change is not unread input or rejected placement; no drag is repeated.'),
     placement: z.boolean().optional().describe(
       "Use vinput's owned placement drag (one job inside the game): it waits until the game has READ the press, each step's cursor " +
       "position, the final position and the release, so a slow game cannot miss the pickup or the drop. Needs a game that reads " +
       "the cursor (GetCursorPos) and the mouse buttons through DirectInput, and a vinput build that supports it; otherwise the " +
-      "normal press / move / release sequence is used and the reply says why (placement_fallback). The same fallback happens " +
-      "automatically when the game never reads the press (button_down_not_observed: Unity-style games that read buttons through window " +
-      "messages); plain drag works there. The reply's evidence shows "+
+      "normal press / move / release sequence is used only after a typed preflight proves no placement input was sent (placement_fallback). A failed or unobserved press retains its receipt without a second drag. The reply's evidence shows "+
       "what was observed; it is still not proof the game placed the item."),
     poll_timeout_ms: z.number().int().min(1).max(5000).optional().describe("placement: how long to wait for each read (default 1000)."),
     ...coordArgs, ...edgeArgs, ...parkArg, ...actionCaptureArgs, ...mouseModifiers },
   async (a) => {
     const captureError=actionCaptureError(a);if(captureError)return fail(captureError);const observation=actionObservation(a);
+    if(a.measure_region&&a.placement)return fail('measure_region currently applies to plain drag; omit placement for pixel observation');
     if(a.modifier_hold_ms!==undefined&&!a.modifiers?.length)return fail('modifier_hold_ms requires nonempty modifiers; no input was sent');
     const m = await mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
     if ("error" in m) return fail(m.error);
     const [[x1, y1], [x2, y2]] = m.pts;
     const warnings = await edgeWarnings(a.pid, [{ label: "drag start", x: x1, y: y1 }, { label: "drag destination", x: x2, y: y2 }], a.edge_margin);
-    const btn = a.button ?? "left", ms = a.ms ?? 300;
+    const timingStatus=(a.timing_profile??'auto')==='auto'&&[a.ms,a.hold_start_ms,a.hold_end_ms].some(v=>v===undefined)?await runVinput([...at(a.pid),'status'],15000):undefined;
+    const timing=dragTiming(a,a.pid,timingStatus?.ok?timingStatus.json:undefined),btn=a.button??'left',ms=timing.ms;
     const steps = a.steps ?? Math.min(60, Math.max(3, Math.round(ms / 20)));
-    const holdStart = a.hold_start_ms ?? DEFAULT_DRAG_HOLD_START_MS, holdEnd = a.hold_end_ms ?? DEFAULT_DRAG_HOLD_END_MS;
-    const where = { ...(m.mapped ? { mapped: { x1, y1, x2, y2 },mapping_used:m.mapping_used } : {}), ...(warnings.length ? { warnings } : {}) };
+    const holdStart=timing.holdStart,holdEnd=timing.holdEnd;
+    const where={timing_profile_used:timing.timing_profile_used,...(m.mapped?{mapped:{x1,y1,x2,y2},mapping_used:m.mapping_used}:{}),...(warnings.length?{warnings}:{})};
     return withMouseModifiers(a.pid,a.modifiers,async()=>{
     let placementFallback: string | undefined;
     if (a.placement) {
       const pr = await runVinput([...at(a.pid), "placement-drag", String(x1), String(y1), String(x2), String(y2), "--steps", String(Math.min(128, steps)),
-        "--ms", String(ms), "--hold-ms", String(holdStart), "--dwell-ms", String(holdEnd), "--button", btn, ...opt("--poll-timeout-ms", a.poll_timeout_ms)],
+        "--ms", String(ms), "--hold-ms", String(holdStart), "--dwell-ms", String(holdEnd), "--button", btn, ...opt("--poll-timeout-ms", a.poll_timeout_ms),...opt('--scope-json',m.scope)],
         ms + holdStart + holdEnd + (Math.min(128, steps) + 4) * (a.poll_timeout_ms ?? 1000) + 60000);
-      const notSeen = placementPressNotSeen(pr);
-      if (!lacksSupport(pr) && !notSeen) {
+      if(!placementPreflightRefused(pr)){
         const ok = pr.ok;
         const parked = a.park_cursor && ok ? await parkCursor(a.pid) : undefined;
         const evidence = inputEvidence(pr.json);
         return look(a.pid, reply(pr, { placement: true, steps: Math.min(128, steps), ms, hold_start_ms: holdStart, hold_end_ms: holdEnd,
-          ...(evidence ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after,observation);
+          ...(evidence ? { evidence } : {}), ...where,...(!pr.ok?{do_not_repeat_delivered_points:true,placement_warning:'Placement input may already have been delivered; inspect the exact receipt. No automatic plain drag or retry was sent'}:{}), ...(parked ? { parked } : {}) }), a.capture_after,observation);
       }
-      placementFallback = notSeen
-        ? `${notSeen}: this game does not read mouse buttons through DirectInput (Unity-style window messages), so the placement drag could not confirm the press; used the plain press / move / release drag instead`
-        : `${(pr.json as { error?: string }).error ?? "placement drag unsupported"}: used press / move / release instead`;
+      placementFallback='Owned placement preflight refused before sending input; used one plain press/move/release drag';
     }
-    const down = await runVinput([...at(a.pid), "mousedown", btn, String(x1), String(y1)], 60000);
-    if (!down.ok) return reply({ ...down, ok: false, json: { ok: false, error: "drag: mouse down failed", down: down.json } },where);
+    const perform=async(scope?:string):Promise<CliResult>=>{
+    if(scope&&m.scope&&scope!==m.scope)return {ok:false,exitCode:1,stderr:'',timedOut:false,argv:[],json:{ok:false,input_injected:false,error:'capture geometry changed between mapped coordinates and drag measurement; capture again before input'}};
+    const down = await runVinput([...at(a.pid), "mousedown", btn, String(x1), String(y1),...opt('--scope-json',scope??m.scope)], 60000);
+    if(!down.ok){
+      const refused=(down.json as {input_injected?:unknown}|null)?.input_injected===false;
+      const cleanup=refused?undefined:await runVinput([...at(a.pid),'mouseup',btn],60000);
+      return {...down,ok:false,json:{ok:false,error:'drag: mouse down refused or acknowledgement unconfirmed; no move or repeated press was sent',down:down.json,...(cleanup?{cleanup:cleanup.json,input_may_have_been_applied:true,cleanup_scope:'one selected-button release without coordinates; down generation unavailable'}:{input_injected:false})}};
+    }
     let mv: CliResult | undefined, up: CliResult | undefined;
     try {
       await sleepMs(holdStart);
-      mv = await runVinput([...at(a.pid), "mouse", String(x2), String(y2), "--steps", String(steps), "--step-ms", String(Math.max(1, Math.round(ms / steps)))], ms + 60000);
+      mv = await runVinput([...at(a.pid), "mouse", String(x2), String(y2), "--steps", String(steps), "--step-ms", String(Math.max(1, Math.round(ms / steps))),...opt('--scope-json',scope??m.scope)], ms + 60000);
       await sleepMs(holdEnd);
     } finally {
-      up = await runVinput([...at(a.pid), "mouseup", btn, String(x2), String(y2)], 60000);   // always release
+      up = await runVinput([...at(a.pid),"mouseup",btn],60000); // selected-button cleanup never repositions or depends on a pointer-capability probe
     }
     const ok = mv.ok && up.ok;
-    const parked = a.park_cursor && ok ? await parkCursor(a.pid) : undefined;
     const evidence = { ...(inputEvidence(mv.json) ?? {}), ...(inputEvidence(up.json) ?? {}) };
-    return look(a.pid, reply({ ok, exitCode: ok ? 0 : 1, stderr: [mv.stderr, up.stderr].filter(Boolean).join("\n"), timedOut: false, argv: [],
+    return { ok, exitCode: ok ? 0 : 1, stderr: [mv.stderr, up.stderr].filter(Boolean).join("\n"), timedOut: false, argv: [],
       json: { ok, steps, ms, hold_start_ms: holdStart, hold_end_ms: holdEnd, down: down.json, move: mv.json, up: up.json,
-        ...(ok ? {} : { error: !mv.ok ? `drag: move failed (the button was released): ${JSON.stringify((mv.json as { error?: string }).error ?? mv.json)}` : "drag: mouse up failed" }) } },
-      { ...(placementFallback ? { placement_fallback: placementFallback } : {}), ...(Object.keys(evidence).length ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after,observation);
+        ...(Object.keys(evidence).length?{evidence}:{}),
+        ...(!ok?{error:!mv.ok?`drag: move failed; selected-button release ${up.ok&&(up.json as {button_released?:unknown}|null)?.button_released===true?'confirmed':'unconfirmed'}: ${JSON.stringify((mv.json as {error?:string}).error??mv.json)}`:'drag: selected-button release failed or was unconfirmed',do_not_repeat_delivered_points:true}:{}) } };
+    };
+    const r=a.measure_region?await measureTimedInput(at(a.pid),a.measure_region,()=>captureSessionEpoch.get(a.pid)??0,perform):await perform();
+    const parked=a.park_cursor&&r.ok?await parkCursor(a.pid):undefined;
+    return look(a.pid,reply(r,{...(placementFallback?{placement_fallback:placementFallback}:{}),...where,...(parked?{parked}:{})}),a.capture_after,observation);
     },runVinput,at,a.modifier_hold_ms);
   });
 
 tool("scroll", "Scroll the mouse wheel",
   "Scroll N wheel notches (positive = up / away, negative = down) at the virtual cursor, after moving it to x,y if given.",
   { pid, notches: z.number().int().min(-100).max(100).optional().describe('Wheel notches: positive up, negative down. Give exactly one of notches/delta/amount/clicks.'),delta:z.number().int().min(-100).max(100).optional(),amount:z.number().int().min(-100).max(100).optional(),clicks:z.number().int().min(-100).max(100).optional(),x: z.number().optional(), y: z.number().optional(),
-    horizontal: z.boolean().optional(), ...edgeArgs, ...actionCaptureArgs, ...mouseModifiers },
+    horizontal: z.boolean().optional(),
+    settle:z.union([z.boolean(),z.object({region:regionSchema.optional(),timeout_ms:z.number().int().min(100).max(10000).optional(),poll_ms:z.number().int().min(50).max(1000).optional(),stable_samples:z.number().int().min(2).max(10).optional(),max_change_pct:z.number().min(0).max(100).optional(),pixel_tolerance:z.number().int().min(0).max(255).optional()})]).optional().describe('After one successful wheel action, observe selected pixels until stable (default budget5000ms) before capture_after. Use {region,...} to exclude animated HUD/background; true uses the full client. Timeout is advisory and never repeats the wheel.'),
+    ...edgeArgs, ...actionCaptureArgs, ...mouseModifiers },
   async (a) => {
     const wheel=[a.notches,a.delta,a.amount,a.clicks].filter((v):v is number=>v!==undefined);if(wheel.length!==1)return fail('scroll expects {pid, notches: N} (positive up, negative down), or exactly one alias delta/amount/clicks; no input was sent');
     const captureError=actionCaptureError(a);if(captureError)return fail(captureError);const observation=actionObservation(a);
@@ -1088,7 +1139,18 @@ tool("scroll", "Scroll the mouse wheel",
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     const pos = a.x === undefined ? [] : [String(a.x), String(a.y)];
     const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "scroll position", x: a.x, y: a.y as number }], a.edge_margin);
-    return withMouseModifiers(a.pid,a.modifiers,async()=>look(a.pid,reply(await runVinput([...at(a.pid), "scroll", String(wheel[0]), ...pos, ...opt("--horizontal", a.horizontal)], 60000), warnings.length ? { warnings } : undefined),a.capture_after,observation),runVinput,at,a.modifier_hold_ms);
+    return withMouseModifiers(a.pid,a.modifiers,async()=>{
+      const r=await runVinput([...at(a.pid),"scroll",String(wheel[0]),...pos,...opt('--horizontal',a.horizontal)],60000);
+      const extra:Record<string,unknown>={...(warnings.length?{warnings}:{})};
+      if(r.ok&&a.settle){
+        let seen:Record<string,unknown>;
+        if((captureSessionEpoch.get(a.pid)??0)!==observation.attachment_epoch)seen={ok:false,error:'attachment changed after the wheel receipt; settling was not observed'};
+        else {const out=await observeSettle(cameraContext,{pid:a.pid,...(typeof a.settle==='object'?a.settle:{}),capture_after:false});seen=JSON.parse((out.content[0] as {text:string}).text);}
+        extra.settle_ok=seen.ok===true;extra.settle_observation=seen;
+        if(seen.ok!==true)extra.settle_warning='Wheel receipt retained; the following pixel stability observation failed/timed out. Do not repeat the wheel because of this observation';
+      }
+      return look(a.pid,reply(r,extra),a.capture_after,observation);
+    },runVinput,at,a.modifier_hold_ms);
   });
 
 // ---------------------------------------------------------------- keyboard / pad
@@ -1152,12 +1214,13 @@ tool("type_text", "Type text",
 const padCaptureArgs = actionCaptureArgs;
 const padCaptureError = actionCaptureError;
 const padObservation = actionObservation;
+const padButtons=(allowOff=false)=>z.string().max(256).superRefine((value,ctx)=>{const error=padButtonError(value,allowOff);if(error)ctx.addIssue({code:z.ZodIssueCode.custom,message:error});});
 
 tool("pad", "Gamepad (XInput)",
   "Drive virtual XInput pad 0. buttons: '+'-joined names from a b x y lb rb start back up down left right ls rs guide, " +
   "or 'none'. Sticks -32768..32767, triggers 0..255. Held for ms (default 100), or until changed with hold:true. off:true " +
   "stops overriding the pad.",
-  { pid, buttons: z.string().optional().describe("e.g. 'a', 'a+b', 'down', 'none'."),
+  { pid, buttons: padButtons(true).optional().describe("e.g. 'a', 'a+b', 'down', 'none'. Sticks rx/ry/lx/ly are separate fields, never button tokens."),
     ms: z.number().int().min(1).max(60000).optional(),
     lx: z.number().int().min(-32768).max(32767).optional().describe("Left stick X: signed integer -32768..32767; 0 is neutral."), ly: z.number().int().min(-32768).max(32767).optional().describe("Left stick Y: signed integer -32768..32767; 0 is neutral."),
     rx: z.number().int().min(-32768).max(32767).optional().describe("Right stick X: signed integer -32768..32767; 0 is neutral."), ry: z.number().int().min(-32768).max(32767).optional().describe("Right stick Y: signed integer -32768..32767; 0 is neutral."),
@@ -1191,7 +1254,7 @@ tool("pad_ramp", "Ramp a pad axis",
   "frames and lateness; it proves what the game was handed, not what it did.",
   { pid, axis, from: z.number().int().min(-32768).max(32767).describe("Starting value: lt/rt triggers use 0..255; lx/ly/rx/ry sticks use -32768..32767."), to: z.number().int().min(-32768).max(32767).describe("Ending value: lt/rt triggers use 0..255; lx/ly/rx/ry sticks use -32768..32767."),
     ms: z.number().int().min(1).max(118000).describe("Ramp duration."),
-    ...padConst, buttons: z.string().optional().describe("Buttons held during the ramp, e.g. 'a' or 'a+rb'."),
+    ...padConst, buttons: padButtons().optional().describe("Buttons held during the ramp, e.g. 'a' or 'a+rb'."),
     end_hold_ms: z.number().int().min(0).max(10000).optional().describe("Hold the final value this long before releasing (default 0)."),
     pacing: pacingArg, async: asyncArg, replace: replaceArg, ...padCaptureArgs },
   async (a) => {
@@ -1213,7 +1276,7 @@ tool("pad_ramp", "Ramp a pad axis",
 
 const timelineState = z.object({
   at_ms: z.number().int().min(0).max(120000).describe("When this state starts, ms from the start (first state 0, strictly increasing)."),
-  buttons: z.string().optional().describe("Digital buttons held in this state, e.g. 'a', 'a+lt' or 'none'. Omitted = none; every state is a complete snapshot."),
+  buttons: padButtons().optional().describe("Digital buttons held in this state, e.g. 'a', 'a+lt' or 'none'. Omitted = none; every state is a complete snapshot."),
   phase: z.string().regex(/^[A-Za-z0-9_.-]{1,32}$/).optional().describe("Optional label (1..32 letters, digits, _ . -) echoed in the job receipt."),
   ...padConst,
 }).strict();
@@ -1407,6 +1470,7 @@ tool("key_sequence", "Run a keyboard sequence",
   async (a,runtime) => {
     const captureError = actionCaptureError(a);
     if (captureError) return fail(captureError);
+    if(a.capture_stable&&!a.wait)return fail('capture_stable on key_sequence requires wait:true; no sequence was sent');
     let capturePlan;try{capturePlan=prepareCapturePlan(a);}catch(e){return fail(String(e));}
     if(capturePlan&&!a.wait)return fail('capture_every_ms requires wait:true; no sequence was sent');
     if (a.wait_timeout_ms !== undefined && !a.wait) return fail("wait_timeout_ms requires wait:true");
@@ -1484,7 +1548,7 @@ tool("hold_while", "Hold until text appears",
   "One call, no polling: e.g. hold 'w' until 'Village' shows. The hold always ends when the call returns (success, miss or " +
   "error). The text appearing is what was observed, not proof the hold caused it.",
   { pid, key: keyCombo.optional().describe("Key or chord to hold (give key, or pad buttons / sticks)."),
-    pad_buttons: z.string().optional().describe("Pad buttons to hold instead of a key, e.g. 'a' or 'none' with sticks."),
+    pad_buttons: padButtons().optional().describe("Pad buttons to hold instead of a key, e.g. 'a' or 'none' with sticks."),
     ...padConst, until_text: z.string().min(1).max(512),
     timeout_ms: z.number().int().min(100).max(118000).optional().describe("Give up after this long (default 5000)."),
     region: regionSchema.optional(), exact: z.boolean().optional(), fuzzy: z.number().int().min(0).max(3).optional() },
@@ -1500,10 +1564,14 @@ tool("hold_while", "Hold until text appears",
 
 tool("job_status", "Input job status",
   "State of a background input job (from async key / pad / pulse / pad_ramp / pad_timeline / key_sequence / drag placement): job_state, " +
-  "job_reason, job_complete, hold_ready, counts and timing. Without id: every job vinput still remembers for this game " +
+  "job_reason, job_complete, hold_ready, counts and timing. Pass id or job_id from the async reply. Without either: every job vinput still remembers for this game " +
   "(finished jobs are kept for about 60 s).",
-  { pid, id: z.string().min(1).optional().describe("job_id from the async reply.") },
-  async (a) => reply(await runVinput([...at(a.pid), ...(a.id ? ["job-status", a.id] : ["jobs"])], 15000)), true);
+  { pid, id: z.string().min(1).optional().describe("job_id from the async reply."), job_id: z.string().min(1).optional().describe("Alias for id; both must agree when provided.") },
+  async (a) => {
+    if(a.id!==undefined&&a.job_id!==undefined&&a.id!==a.job_id)return fail("id and job_id must identify the same job");
+    const id=a.id??a.job_id;
+    return reply(await runVinput([...at(a.pid), ...(id ? ["job-status", id] : ["jobs"])], 15000));
+  }, true);
 
 tool("job_cancel", "Cancel an input job",
   "Stop one background input job now and release exactly what it was holding (other held input is untouched). Use release to " +
@@ -1550,9 +1618,11 @@ tool("detach", "Stop controlling a game",
     return reply(rel, { unclaim: un.json, note: "vinput stays loaded until the game exits; no further input is sent" });
   });
 
-registerCameraHelpers(tool, { owner: OWNER, at, run: runVinput, epoch: p => captureSessionEpoch.get(p) ?? 0,
-  captureError: actionCaptureError, finish: (p, out, options, epoch) => look(p, out, options.capture_after, { ...actionObservation(options), attachment_epoch: epoch }) },
+const cameraContext:CameraContext={owner:OWNER,at,run:runVinput,epoch:p=>captureSessionEpoch.get(p)??0,
+  captureError:actionCaptureError,finish:(p,out,options,epoch)=>look(p,out,options.capture_after,{...actionObservation(options),attachment_epoch:epoch})};
+registerCameraHelpers(tool,cameraContext,
   actionCaptureArgs, regionSchema, keyCombo);
+registerPadNavigation(tool,cameraContext,actionCaptureArgs,regionSchema);
 
 registerNavigationMotion(tool, { owner: OWNER, at, run: runVinput, epoch: p => captureSessionEpoch.get(p) ?? 0,
   captureError: actionCaptureError, finish: (p, out, options, epoch) => look(p, out, options.capture_after, { ...actionObservation(options), attachment_epoch: epoch }) },

@@ -502,7 +502,7 @@ WPARAM MouseKeyFlags() {
 }
 LPARAM ClientLParam() { return MAKELPARAM((SHORT)g_vcurX.load(), (SHORT)g_vcurY.load()); }
 
-struct FrameworkWindow {HWND window=nullptr;unsigned long long generation=0;bool chromium=false;wchar_t className[128]{};};
+struct FrameworkWindow {HWND window=nullptr;unsigned long long generation=0;bool chromium=false,unity=false;wchar_t className[128]{};};
 FrameworkWindow FrameworkProfileForCurrent();
 bool MsgsWanted(bool kbd, const RawReg& rr,bool ui=true) {
     return vi_framework_input::Legacy(g_cfg.msgmode,kbd?rr.kbd:rr.mouse,kbd?rr.kbdNoLegacy:rr.mouseNoLegacy,ui&&FrameworkProfileForCurrent().chromium,ui);
@@ -1863,6 +1863,11 @@ struct JOut {
 #include "vi_capture_diagnostics_json.inl"
 
 void EdgeFields(JOut& o,const PointerPath* path=nullptr){std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);PointerPath live;const PointerPath* p=path;if(!p&&live.Init(g_vcurX,g_vcurY))p=&live;
+    CaptureScope current;const auto& saved=g_savedCaptureMap.scope;
+    if(g_savedCaptureMap.valid&&CaptureScopeTake(current)&&saved.window==current.window&&saved.thread==current.thread&&saved.adoption==current.adoption&&saved.lifetime==current.lifetime&&
+       (saved.width!=current.width||saved.height!=current.height||saved.geometry!=current.geometry)){
+        o.str("geometry_warning","client size or observed geometry changed since the last capture: "+std::to_string(saved.width)+"x"+std::to_string(saved.height)+" -> "+std::to_string(current.width)+"x"+std::to_string(current.height)+", geometry epoch "+std::to_string(saved.geometry)+" -> "+std::to_string(current.geometry)+"; capture again before choosing coordinates");
+    }
     o.num("edge_margin",g_cfg.edgeMargin);o.bol("edge_contact",p&&p->Contact(g_vcurX,g_vcurY)!=0);o.num("edge_sides",p?p->Contact(g_vcurX,g_vcurY):0);
     o.bol("edge_guard_applied",p&&p->changed);o.bol("edge_guard_bypassed",p&&p->bypassed);if(p){o.num("edge_margin_x",p->mx);o.num("edge_margin_y",p->my);}}
 void AccountingFields(JOut& out,const MotionAccounting& a,long long requestedX,long long requestedY,unsigned steps){
@@ -2074,8 +2079,8 @@ bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_raw_buffer_json.inl"
 std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
-    o.num("key_sequence_version",1);o.num("sequence_retap_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("sequence_abort_image_version",1);o.num("sequence_frame_anchor_version",1);o.num("input_scope_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
-    o.num("relative_scope_version",1);o.num("pointer_scope_version",1);o.num("input_admission_version",1);o.num("relative_scope_refused",(double)g_relativeScopeRefused.load());
+    o.num("key_sequence_version",1);o.num("sequence_retap_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("sequence_abort_image_version",1);o.num("sequence_frame_anchor_version",1);o.num("input_scope_version",1);o.num("pad_motion_job_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
+    o.num("relative_scope_version",1);o.num("pointer_scope_version",1);o.num("placement_scope_version",1);o.num("input_admission_version",1);o.num("relative_scope_refused",(double)g_relativeScopeRefused.load());
     o.num("pad_api_census_version",1);o.raw("pad_api_census",PadApiCensusJson());o.raw("directinput_readers",DiReaderStatusJson());
     o.num("claimed_di_guard_version",1);o.raw("claimed_di_guard",ClaimedDiStatusJson());
     o.num("cursor_guard_version",1);o.num("keybd_event_guard_version",1);o.bol("keybd_event_hooks_ready",CursorApiReady(vi_cursor_guard::KeybdEvent));o.raw("cursor_guard",CursorGuardStatus());
@@ -2092,7 +2097,7 @@ std::string StatusJson() {
     PresentWindowFields(o,reportedWindow);HiddenShowFields(o);
     o.raw("retarget_quiescence",RetargetQuiescenceStatusJson());
     o.raw("wndproc_binding",WndBindingStatusJson(g_hwnd));o.bol("wndproc_binding_ready",WndBindingReady(g_hwnd));o.num("wndproc_adoption_refused",(double)g_wndBindingRefused.load());o.num("wndproc_unbound_callbacks",(double)g_wndBindingMissing.load());
-    {const auto profile=FrameworkProfileForCurrent();JOut f;f.num("version",1);f.str("profile",profile.chromium?"chromium_ui":"none");f.bol("recognized",profile.chromium);char window[32];sprintf_s(window,"0x%llX",(unsigned long long)(ULONG_PTR)profile.window);f.str("hwnd",window);f.str("window_generation",std::to_string(profile.generation));f.str("class",W2U(profile.className));f.bol("auto_legacy_ui",profile.chromium&&g_cfg.msgmode==0);f.bol("auto_raw_ui_suppressed",profile.chromium&&g_cfg.msgmode==0&&g_cfg.rawmode==0);f.bol("relative_raw_policy_unchanged",true);if(profile.chromium){f.num("default_click_hold_ms",400);f.num("default_click_hover_ms",350);}f.str("scope","fresh current owned live-bound exact Chrome_WidgetWin_0/1; keyboard/absolute pointer/button/wheel UI route only, not universal CEF detection; explicit modes and relative mouse-look retain their policy");o.raw("framework_input",f.done());}
+    {const auto profile=FrameworkProfileForCurrent();JOut f;f.num("version",1);f.str("profile",profile.chromium?"chromium_ui":profile.unity?"unity_ui":"none");f.bol("recognized",profile.chromium||profile.unity);char window[32];sprintf_s(window,"0x%llX",(unsigned long long)(ULONG_PTR)profile.window);f.str("hwnd",window);f.str("window_generation",std::to_string(profile.generation));f.str("class",W2U(profile.className));f.bol("auto_legacy_ui",profile.chromium&&g_cfg.msgmode==0);f.bol("auto_raw_ui_suppressed",profile.chromium&&g_cfg.msgmode==0&&g_cfg.rawmode==0);f.bol("relative_raw_policy_unchanged",true);f.bol("timing_only",profile.unity);if(profile.chromium||profile.unity){f.num("default_click_hold_ms",vi_framework_input::Hold(60,true,profile.chromium,profile.unity));f.num("default_click_hover_ms",vi_framework_input::Hover(-1,true,profile.chromium,profile.unity));}f.str("scope","fresh current owned live-bound exact Chrome_WidgetWin_0/1 UI routing/timing or UnityWndClass click timing only; no universal engine detection, input replay or game-acceptance proof; explicit modes/timings and relative mouse-look retain their policy");o.raw("framework_input",f.done());}
     if (g_hwnd) {
         wchar_t cls[128] = {0}, title[256] = {0}; GetClassNameW(g_hwnd, cls, 127); GetWindowTextW(g_hwnd, title, 255);
         RECT rc; GetClientRect(g_hwnd, &rc);
@@ -2127,7 +2132,9 @@ std::string StatusJson() {
     mouse.num("poll_hook_failures",(double)g_diPollHookFailures.load());mouse.num("moves_since_poll",(double)g_diMouseMovesSincePoll.load());
     mouse.num("virtual_acquire_version",1);mouse.num("virtual_acquires",(double)g_diVirtualAcquires.load());
     mouse.bol("mouse_poll_unobserved",g_diMouseMovesSincePoll>=3);
-    if(g_diMouseMovesSincePoll>=3)mouse.str("warning","mouse has not polled DirectInput since at least three moves; queued input does not establish game consumption");
+    mouse.bol("consumer_observed",state||buffer);
+    if(g_diMouseMovesSincePoll>=3&&(state||buffer))mouse.str("warning","a previously observed DirectInput mouse consumer has not polled since at least three moves; other input channels may still work and game response is unknown");
+    else if(g_diMouseMovesSincePoll>=3)mouse.str("note","no DirectInput mouse consumer was observed; this game may use cursor APIs, window messages or raw input. These counters do not diagnose a failed mouse reader");
     o.raw("directinput_mouse",mouse.done());}
     RawReg rr = QueryRawReg();
     o.raw("raw_buffer_routing",RawBufferRoutingJson(rr));
@@ -2396,7 +2403,7 @@ std::string Exec(const std::string& line) {
     const bool coordinateMotion=(cmd=="mouse"||cmd=="move")&&!JHas(j,"dx")&&!JHas(j,"dy");
     const bool positionedPress=(cmd=="click"||cmd=="mousedown")&&(JHas(j,"x")||JHas(j,"y"));
     if((coordinateMotion||positionedPress)&&JStr(j,"space")=="capture"&&!JBool(j,"norm",false)&&!CaptureMapCurrent())return CaptureMapRefusal();
-    if(cmd=="ping"&&JBool(j,"pointer_scope_support",false)){JOut out;out.bol("ok",true);out.num("pid",g_pid);out.num("pointer_scope_version",1);return out.done();}
+    if(cmd=="ping"&&JBool(j,"pointer_scope_support",false)){JOut out;out.bol("ok",true);out.num("pid",g_pid);out.num("pointer_scope_version",1);out.num("placement_scope_version",1);out.num("input_admission_version",1);return out.done();}
     if (cmd == "claim" || cmd == "unclaim") { JOut o; o.bol("ok", true); ClaimFields(o); return o.done(); }
     if (cmd == "ping"){if(JBool(j,"capture_scope_support",false)){JOut out;out.bol("ok",true);out.num("capture_scope_version",1);return out.done();}if(JBool(j,"isolation_deadline_support",false)){JOut out;out.bol("ok",true);out.num("isolation_deadline_version",1);return out.done();}if(JBool(j,"pad_timeline_support",false)){JOut out;out.bol("ok",true);out.num("pad_timeline_version",2);return out.done();}return OkJ();}
     if (cmd == "status") return StatusJson();
@@ -2626,7 +2633,7 @@ std::string Exec(const std::string& line) {
         };
         // Validate every static press/release option before any positioned hover is published.
         const auto clickFramework=FrameworkProfileForCurrent();
-        const double countValue=JNum(j,"count",1),ms=cmd=="click"?vi_framework_input::Hold(JNum(j,"ms",60),!JHas(j,"ms")||JBool(j,"framework_default_hold",false),clickFramework.chromium):0,gap=JNum(j,"gap",80),pollCapValue=JNum(j,"di_poll_timeout_ms",1000);
+        const double countValue=JNum(j,"count",1),ms=cmd=="click"?vi_framework_input::Hold(JNum(j,"ms",60),!JHas(j,"ms")||JBool(j,"framework_default_hold",false),clickFramework.chromium,clickFramework.unity):0,gap=JNum(j,"gap",80),pollCapValue=JNum(j,"di_poll_timeout_ms",1000);
         if(cmd=="click" && (!(ms>=0&&ms<=120000)||!(gap>=0&&gap<=60000)||!(countValue>=1&&countValue<=1000&&countValue==std::floor(countValue))))return hoverError("click duration/count/gap out of range; no button was pressed","invalid_click_timing");
         if(JHas(j,"di_poll_timeout_ms") && (cmd!="click" || j.find("di_poll_timeout_ms")->second.t!=2 || !(pollCapValue>=0&&pollCapValue<=5000&&pollCapValue==std::floor(pollCapValue)))) {
             if(cmd=="mouseup"){if(captureScopeChecked)upCleanup.Run();else MouseButton(vk,false);JOut o;o.bol("ok",false);o.str("error","mouse-up cleanup attempted; di_poll_timeout_ms applies only to timed click");o.bol("button_released",!g_vk[vk]);o.num("button_down_count",0);return o.done();}
@@ -2641,7 +2648,7 @@ std::string Exec(const std::string& line) {
         POINT resolved{g_vcurX,g_vcurY},expected=resolved,applied=resolved,lastPress=resolved;
         int presses=0;
         if (positioned) {
-            double timeoutValue = JNum(j, "hover_timeout_ms", 1500), framesValue = JNum(j, "hover_frames", 3), settleValue = vi_framework_input::Hover(JNum(j, "settle_ms", -1),!JHas(j,"settle_ms")||JBool(j,"framework_default_hover",false),clickFramework.chromium);
+            double timeoutValue = JNum(j, "hover_timeout_ms", 1500), framesValue = JNum(j, "hover_frames", 3), settleValue = vi_framework_input::Hover(JNum(j, "settle_ms", -1),!JHas(j,"settle_ms")||JBool(j,"framework_default_hover",false),clickFramework.chromium,clickFramework.unity);
             if (!(timeoutValue >= 1 && timeoutValue <= 120000 && timeoutValue == std::floor(timeoutValue)) ||
                 !(framesValue >= 0 && framesValue <= 3600 && framesValue == std::floor(framesValue)) ||
                 !((!JHas(j, "settle_ms") && settleValue == -1) || (settleValue >= 0 && settleValue <= 60000))) return hoverError("hover timeout/frames/settle timing out of range","invalid_hover_timing");
@@ -2714,7 +2721,7 @@ std::string Exec(const std::string& line) {
             if(pollTimedOut)o.str("di_poll_warning","the requested press was injected and released but its DirectInput mouse down read was not confirmed; application acceptance remains unknown; no input was retried");};
         auto coordinates=[&](JOut& o) {
             EdgeFields(o);
-            if(positioned) { o.num("requested_x",requestedX);o.num("requested_y",requestedY);o.num("resolved_x",resolved.x);o.num("resolved_y",resolved.y);o.num("clamped_x",expected.x);o.num("clamped_y",expected.y); }
+            if(positioned) { o.num("requested_x",requestedX);o.num("requested_y",requestedY);o.num("resolved_x",resolved.x);o.num("resolved_y",resolved.y);o.num("clamped_x",expected.x);o.num("clamped_y",expected.y);if(resolved.x!=expected.x||resolved.y!=expected.y)o.str("coordinate_warning","requested position lies outside the current client; clamped to the reported client pixel. Edge scrolling may occur; choose an interior point"); }
             o.num("applied_x",applied.x);o.num("applied_y",applied.y);o.num("button_down_count",presses);
             if(presses){o.num("last_press_x",lastPress.x);o.num("last_press_y",lastPress.y);}
             o.num("current_x",g_vcurX);o.num("current_y",g_vcurY);
@@ -2789,7 +2796,7 @@ std::string Exec(const std::string& line) {
     if (cmd == "pad") {
         for (const auto& field : j) {
             const std::string& name = field.first;
-            if (name != "cmd" && name != "buttons" && name != "ms" && name != "hold" && name != "async" && name != "replace" && name != "lt" && name != "rt" && name != "lx" && name != "ly" && name != "rx" && name != "ry" && name != "owner" && name != "force_claim") return ErrJ("unknown pad field '" + name + "'; no input was injected");
+            if (name != "cmd" && name != "buttons" && name != "ms" && name != "hold" && name != "async" && name != "replace" && name != "lt" && name != "rt" && name != "lx" && name != "ly" && name != "rx" && name != "ry" && name != "owner" && name != "force_claim" && name != "expected_capture_scope") return ErrJ("unknown pad field '" + name + "'; no input was injected");
         }
         if (JHas(j, "hold") && j.find("hold")->second.t != 3) return ErrJ("pad hold must be a JSON boolean true or false; numeric durations belong in ms");
         double ms = 0;
@@ -2800,6 +2807,7 @@ std::string Exec(const std::string& line) {
         if (!(ms >= 0 && ms <= 120000)) return ErrJ("pad duration must be 0..120000 ms");
         if (JHas(j, "buttons") && j.find("buttons")->second.t != 1) return ErrJ("pad buttons must be a string; no input was injected");
         std::string names = JStr(j, "buttons");
+        if(JHas(j,"expected_capture_scope")&&(hold||PadIsOff(names)))return ErrJ("scope-fenced pad requires a finite timed state; off/indefinite hold was refused without changing input");
         if (PadIsOff(names)) {   // stop overriding: pad 0 is the real pad again (or "not connected" when there is none)
             std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);JobsOverridePad();std::lock_guard<std::mutex> stateLock(g_padStateMx);g_padActive = false; g_padButtons = 0; g_padSetMask = 0; g_padPacket++;PadPublicationChangedLocked();
             JOut o; o.bol("ok", true); o.bol("pad_active", false); return o.done();

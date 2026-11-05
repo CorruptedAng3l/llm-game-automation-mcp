@@ -39,7 +39,7 @@ int main(int argc,char** argv){
     Check(!DiPollInstall((*(void***)a)[9],true),"state entry cannot be reinterpreted as buffered ABI");
     Check(!ClaimDiInstallEntry((*(void***)a)[9],false),"poll entry cannot be reinterpreted as Acquire ABI");
     g_diMouseMovesSincePoll=3;
-    Check(StatusJson().find("mouse has not polled DirectInput")!=std::string::npos,"three unpolled moves produce actionable status warning");
+    {const auto status=StatusJson();Check(status.find("\"mouse_poll_unobserved\":true")!=std::string::npos&&(status.find("has not polled")!=std::string::npos||status.find("no DirectInput mouse consumer was observed")!=std::string::npos),"three unpolled moves produce actionable status warning");}
 #else
     Check(false,"all keyboard/mouse A/W implementation roles hooked");Check(false,"state entry cannot be reinterpreted as buffered ABI");Check(false,"poll entry cannot be reinterpreted as Acquire ABI");Check(false,"three unpolled moves produce actionable status warning");
 #endif

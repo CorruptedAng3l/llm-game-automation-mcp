@@ -15,7 +15,7 @@ try {
   check(!r.isError && words.join() === "mousedown,mouse,mouseup", "sequence: mousedown, stepped mouse move, mouseup (no single-shot drag)", words.join());
   check(cmdOf(s[0].argv).slice(0, 4).join(" ") === "mousedown left 10 20", "press happens at the start point", JSON.stringify(cmdOf(s[0].argv)));
   check(val(s[1].argv, "--steps") === "12" && val(s[1].argv, "--step-ms") === "20" && cmdOf(s[1].argv).slice(0, 3).join(" ") === "mouse 300 200", "the move is stepped: --steps 12, 20 ms apart (240 ms)", JSON.stringify(s[1].argv));
-  check(cmdOf(s[2].argv).slice(0, 4).join(" ") === "mouseup left 300 200", "release happens at the destination", JSON.stringify(cmdOf(s[2].argv)));
+  check(cmdOf(s[2].argv).join(' ')==='mouseup left','release follows the destination dwell without another coordinate move',JSON.stringify(cmdOf(s[2].argv)));
   check(s[1].t - s[0].t >= 400, `the press is held before moving (>= 400 ms; saw ${s[1].t - s[0].t})`);
   check(s[2].t - s[1].t >= 600, `the cursor dwells at the destination before release (>= 600 ms; saw ${s[2].t - s[1].t})`);
   check(r.json?.hold_start_ms === 400 && r.json?.hold_end_ms === 600 && r.json?.steps === 12, "reply reports the timings used", r.text.slice(0, 300));
@@ -38,11 +38,13 @@ try {
   r = await t.call("drag", { pid, x1: 1, y1: 2, x2: 3, y2: 4, hold_start_ms: 0, hold_end_ms: 0 });
   s = seq();
   check(r.isError && s.map((c) => cmdOf(c.argv)[0]).join() === "mousedown,mouse,mouseup" && /hover/.test(r.text), "a failed move still releases the button and reports the failure", r.text.slice(0, 250));
-  // the press fails: nothing else is sent
+  // An untyped failed press may have been delivered before its ACK was lost.
   t.setScenario({ replies: { mousedown: { ok: false, error: "no window" } } });
   t.clearCalls();
   r = await t.call("drag", { pid, x1: 1, y1: 2, x2: 3, y2: 4 });
-  check(r.isError && seq().length === 1 && /no window/.test(r.text), "a failed press stops there (no move, no release needed)", r.text.slice(0, 250));
+  check(r.isError&&seq().map(c=>cmdOf(c.argv)[0]).join()==='mousedown,mouseup'&&r.json.input_may_have_been_applied&&/no window/.test(r.text),'unknown press outcome gets one selected-button cleanup and no movement/repeated press',r.text.slice(0,300));
+  t.setScenario({replies:{mousedown:{ok:false,input_injected:false,error:'explicit pre-input refusal'}}});t.clearCalls();r=await t.call('drag',{pid,x1:1,y1:2,x2:3,y2:4});
+  check(r.isError&&seq().length===1&&r.json.input_injected===false,'typed pre-input refusal stops without releasing unrelated button state');
 } finally { await t.close(); }
 console.log(state.failures ? `drag: FAIL (${state.failures})` : `drag: PASS (${state.passes})`);
 process.exit(state.failures ? 1 : 0);

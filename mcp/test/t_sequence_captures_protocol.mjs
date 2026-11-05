@@ -11,6 +11,7 @@ const t=await startFake(scene(),{VINPUT_EXE:fileURLToPath(new URL('./fake_sequen
 const base={pid,steps:[{action:'hold',key:'w+shift',ms:1000}],wait:true,capture_every_ms:250,capture_max_frames:4};
 const set=s=>{t.setScenario(s);t.clearCalls();};
 const requests=()=>t.callsOf('json').map(a=>JSON.parse(cmdOf(a)[1])),beats=()=>requests().filter(x=>x.cmd==='sequence-observe'),captures=()=>requests().filter(x=>x.cmd==='capture');
+const witness=(good,label,receipt)=>{if(!good)console.error('RECORDING_DIAGNOSTIC '+JSON.stringify({reply:receipt,timed_cli_calls:t.timedCalls()}));check(good,label);};
 try{
  const properties=(await t.client.listTools()).tools.find(x=>x.name==='key_sequence').inputSchema.properties;
  check(properties.capture_every_ms.minimum===250&&properties.capture_max_frames.maximum===32&&properties.capture_max_width.maximum===960,'periodic recording schema exposes finite interval/image bounds');
@@ -31,13 +32,13 @@ try{
  for(const field of ['capture_output_version','capture_scope_version']){const s=scene();delete s.replies.status[field];set(s);r=await t.call('key_sequence',base);check(r.isError&&r.json.input_injected===false&&!t.callsOf('seq').length,`missing ${field} refuses recording before sequence admission`);}
  for(const args of [{...base,wait:false},{pid,steps:base.steps,capture_max_frames:2},{...base,capture_every_ms:249}]){set(scene());r=await t.call('key_sequence',args);check(r.isError&&!t.callsOf('seq').length,'invalid/detached recording options refuse before input');}
  set(scene({retain_frames:true,observations:[snap(),snap(),snap(),snap('MISSION FAILED','1030')],guard_states:['running']}));r=await t.call('key_sequence',{...base,abort_on:{kind:'text',text:'MISSION FAILED',poll_ms:20}});
- check(r.isError&&r.json.sequence_guard.outcome==='aborted_text'&&r.json.sequence_guard.abort_confirmed&&r.json.sequence_captures.recorded_frames===1&&r.image&&beats().at(-1).abort===true&&t.callsOf('seq').length===1,'periodic capture shares the SAME guarded text-abort observer and retains review frames on exact abort');
+ witness(r.isError&&r.json.sequence_guard.outcome==='aborted_text'&&r.json.sequence_guard.abort_confirmed&&r.json.sequence_captures.recorded_frames===1&&r.image&&beats().at(-1).abort===true&&t.callsOf('seq').length===1,'periodic capture shares the SAME guarded text-abort observer and retains review frames on exact abort',r);
  set(scene());r=await t.call('key_sequence',{pid,steps:base.steps,compact:true});
  check(!r.isError&&r.json.next_action.tool==='job_status'&&r.json.next_action.arguments.id===initial.job_id&&r.json.next_action.note.includes('future new sequence')&&!beats().length,'default async reply names exact continuation plus future wait:true without replaying admitted input');
  set(scene({guard_states:['running'],recordings:[{_delay_ms:300}]}));const controller=new AbortController();
  const cancelled=t.client.callTool({name:'key_sequence',arguments:{...base,wait_timeout_ms:10000}},undefined,{signal:controller.signal,timeout:20000}).catch(e=>e);
- const until=Date.now()+3000;while(!captures().length&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,10));controller.abort();await cancelled;
+ const until=Date.now()+3000;while(!captures().length&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,10));controller.abort();const cancellationReceipt=await cancelled;
  await new Promise(resolve=>setTimeout(resolve,400));const count=beats().length;await new Promise(resolve=>setTimeout(resolve,300));
- check(captures().length===1&&beats().length===count&&!t.callsOf('job-cancel').length&&t.callsOf('seq').length===1,'MCP cancellation stops observer renewals and leaves exact native expiry without replay or ambiguous cancellation');
+ witness(captures().length===1&&beats().length===count&&!t.callsOf('job-cancel').length&&t.callsOf('seq').length===1,'MCP cancellation stops observer renewals and leaves exact native expiry without replay or ambiguous cancellation',cancellationReceipt);
 }finally{await t.close();}
 console.log(`sequence captures protocol: ${state.passes} PASS / ${state.failures} FAIL`);if(state.failures)process.exitCode=1;

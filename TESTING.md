@@ -194,6 +194,14 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   run shared the box, `owner_input` failed with the desk in use, and 25 cases queued behind them did not run); on
   reruns alone `launch_follow` and every queued case passed, so 139 passed, 3 not_measured (capture_diagnostics,
   cursor_guard, legacy_focus) and `owner_input` still fails while the real mouse is in use (logged as VB6).
+- Batch 0.3.0..0.3.1 (2026-11-05, vinput through c824232): exact-image launch duplicate guard (`--new-instance` to
+  bypass), finite scoped pad navigation, Unity timing profiles, batch policy and tooltip checks, strict OCR number
+  observations, capture-clock text stability, drag safeguards; 62 MCP tools. Public fixes on top: the duplicate guard
+  admits a missing exe (CreateProcess reports it) and waits up to 1.5 s for a process that is still terminating, the
+  early-injection test waits for exit before relaunching, and the DI8 test checks the `mouse_poll_unobserved` flag
+  instead of old warning text. Gate: `build.bat` x64 + x86, `npm test`, full background plan (170 cases) in five
+  runs; every case passed except 2 not_measured (cursor_guard, legacy_focus: passive desktop changed) and
+  capture_diagnostics not_measured.
 - Batch 0.2.9..0.3.0 (2026-11-05, vinput through c2a3ec9): navigation (`move_until_stuck` with image-motion stop,
   `look_calibrate`/`turn`/`look` with a persisted angular reference, bounded `unstick`), opt-in `compact` replies on
   every tool (`VINPUT_MCP_COMPACT=1`), key `retap` to refresh a modifier while a move stays held, `key_sequence`

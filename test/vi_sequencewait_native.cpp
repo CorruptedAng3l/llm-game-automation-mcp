@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <shellapi.h>
+#include <xinput.h>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
@@ -26,11 +27,15 @@ struct State {
  U64 epoch=1,lastTick=0,sampleSerial=0,polls=0,firstChordTick=0,completedTick=0,lastToken=0,captures=0,edgeRecords=0,wmRecords=0,recordsDropped=0;
  DWORD sampleThread=0;unsigned mask=0,keyStateMask=0,keyboardMask=0,eventCaptures=0,failCaptureCountdown=0;bool keyboardOk=false,chordSeen=false,completed=false,eventVisible=false;
  std::array<U64,5> reads{},high{},down{},up{},wmDown{},wmUp{};
+ U64 padReads=0,padDown=0,padUp=0;DWORD padResult=ERROR_DEVICE_NOT_CONNECTED;XINPUT_GAMEPAD pad{},firstPad{};bool padActive=false,padSeen=false,padCompleted=false;
 };
 State state;std::atomic<U64> nextSample{0};
+using PadGetFn=DWORD(WINAPI*)(DWORD,XINPUT_STATE*);PadGetFn padGet=nullptr;
 const char* Bool(bool value){return value?"true":"false";}
 void Log(const char* format,...){std::lock_guard<std::mutex> lock(logMutex);if(!output)return;va_list args;va_start(args,format);vfprintf(output,format,args);va_end(args);fputc('\n',output);fflush(output);}
 bool Writable(void* p,SIZE_T bytes){if(!p)return false;auto at=reinterpret_cast<std::uintptr_t>(p);if(bytes>UINTPTR_MAX-at)return false;const auto end=at+bytes;while(at<end){MEMORY_BASIC_INFORMATION region{};if(!VirtualQuery(reinterpret_cast<void*>(at),&region,sizeof(region))||region.State!=MEM_COMMIT||(region.Protect&(PAGE_GUARD|PAGE_NOACCESS)))return false;const DWORD protect=region.Protect&0xff;const bool writable=protect==PAGE_READWRITE||protect==PAGE_WRITECOPY||protect==PAGE_EXECUTE_READWRITE||protect==PAGE_EXECUTE_WRITECOPY;if(!writable)return false;const auto begin=reinterpret_cast<std::uintptr_t>(region.BaseAddress);if(region.RegionSize>UINTPTR_MAX-begin)return false;const auto next=begin+region.RegionSize;if(next<=at)return false;at=next<end?next:end;}return true;}
+DWORD WINAPI NoPad(DWORD,XINPUT_STATE* value){if(!Writable(value,sizeof(*value)))return ERROR_BAD_ARGUMENTS;__try{*value={};return ERROR_DEVICE_NOT_CONNECTED;}__except(EXCEPTION_EXECUTE_HANDLER){return ERROR_BAD_ARGUMENTS;}}
+bool InstallPadReader(){const auto module=LoadLibraryExW(L"xinput1_4.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);if(!module)return false;void* const entry=reinterpret_cast<void*>(GetProcAddress(module,"XInputGetState"));if(!entry)return false;void* original=nullptr;const auto detour=reinterpret_cast<void*>(&NoPad);if(MH_CreateHook(entry,detour,&original)!=MH_OK||!original||MH_EnableHook(entry)!=MH_OK||!capture_spy::Reaches(entry,detour))return false;capture_spy::hooks.push_back({entry,detour,original});padGet=reinterpret_cast<PadGetFn>(entry);return true;}
 SHORT WINAPI NoKey(int){return 0;}
 BOOL WINAPI NoKeyboard(PBYTE data){if(!Writable(data,256)){SetLastError(ERROR_NOACCESS);return FALSE;}__try{memset(data,0,256);return TRUE;}__except(EXCEPTION_EXECUTE_HANDLER){SetLastError(ERROR_NOACCESS);return FALSE;}}
 HWND WINAPI Outside(){return GetDesktopWindow();}
@@ -45,10 +50,12 @@ bool Poll(){
  unsigned mask=0,gks=0,gkbs=0;BYTE keyboard[256]{};
  for(unsigned i=0;i<5;i++){if(GetAsyncKeyState(Keys[i])&0x8000)mask|=1u<<i;if(GetKeyState(Keys[i])&0x8000)gks|=1u<<i;}
  const bool keyboardOk=GetKeyboardState(keyboard)!=FALSE;if(keyboardOk)for(unsigned i=0;i<5;i++)if(keyboard[Keys[i]]&0x80)gkbs|=1u<<i;
+ XINPUT_STATE pad{};const DWORD padResult=padGet?padGet(0,&pad):ERROR_DEVICE_NOT_CONNECTED;const auto& p=pad.Gamepad;const bool padActive=padResult==ERROR_SUCCESS&&(p.wButtons||p.bLeftTrigger||p.bRightTrigger||p.sThumbLX||p.sThumbLY||p.sThumbRX||p.sThumbRY);
  const U64 now=GetTickCount64();const DWORD readerThread=GetCurrentThreadId();unsigned edges=0;State observed;bool emit=false;
  {std::lock_guard<std::mutex> lock(stateMutex);if(state.epoch!=epoch)return false;if(serial<=state.sampleSerial)return true;
   edges=state.mask^mask;state.mask=mask;state.keyStateMask=gks;state.keyboardMask=gkbs;state.keyboardOk=keyboardOk;state.lastTick=now;state.sampleSerial=serial;state.sampleThread=readerThread;++state.polls;
   for(unsigned i=0;i<5;i++){++state.reads[i];if(mask&(1u<<i))++state.high[i];if(edges&(1u<<i)){if(mask&(1u<<i))++state.down[i];else ++state.up[i];}}
+  ++state.padReads;if(padActive!=state.padActive){if(padActive)++state.padDown;else ++state.padUp;}state.padActive=padActive;state.padResult=padResult;state.pad=pad.Gamepad;if(padActive&&!state.padSeen)state.firstPad=pad.Gamepad;if(padActive)state.padSeen=true;if(state.padSeen&&!padActive)state.padCompleted=true;
   if(((mask&3u)==3u||(mask&8u)||(mask&20u)==20u)&&!state.chordSeen){state.chordSeen=true;state.firstChordTick=now;}
   if(state.chordSeen&&!mask&&!state.completed){state.completed=true;state.completedTick=now;}
   if(edges){if(state.edgeRecords<256){++state.edgeRecords;emit=true;}else ++state.recordsDropped;}observed=state;
@@ -60,6 +67,8 @@ void Snapshot(U64 token,const char* event="snapshot"){
  const State value=CopyState();
  Log("{\"event\":\"%s\",\"token\":%llu,\"epoch\":%llu,\"sample_tick\":%llu,\"sample_serial\":%llu,\"sample_thread\":%lu,\"ui_thread\":%lu,\"mask\":%u,\"gaks_mask\":%u,\"gks_mask\":%u,\"gkbs_mask\":%u,\"gkbs_ok\":%s,\"final_all_up\":%s,\"chord_seen\":%s,\"completed_latch\":%s,\"first_chord_tick\":%llu,\"completed_tick\":%llu,\"polls\":%llu,\"captures\":%llu,\"records_dropped\":%llu,\"terminal_calls\":%llu,\"native_writer_called\":false}",event,token,value.epoch,value.lastTick,value.sampleSerial,value.sampleThread,uiThread,value.mask,value.mask,value.keyStateMask,value.keyboardMask,Bool(value.keyboardOk),Bool(value.mask==0),Bool(value.chordSeen),Bool(value.completed),value.firstChordTick,value.completedTick,value.polls,value.captures,value.recordsDropped,capture_spy::writes.load());
  for(unsigned i=0;i<5;i++)Log("{\"event\":\"key_snapshot\",\"token\":%llu,\"epoch\":%llu,\"name\":\"%s\",\"vk\":%d,\"reads\":%llu,\"high_samples\":%llu,\"down_count\":%llu,\"up_count\":%llu,\"wm_down\":%llu,\"wm_up\":%llu}",token,value.epoch,Names[i],Keys[i],value.reads[i],value.high[i],value.down[i],value.up[i],value.wmDown[i],value.wmUp[i]);
+ Log("{\"event\":\"pad_snapshot\",\"token\":%llu,\"epoch\":%llu,\"reads\":%llu,\"result\":%lu,\"active\":%s,\"seen\":%s,\"completed\":%s,\"down_count\":%llu,\"up_count\":%llu,\"buttons\":%u,\"lt\":%u,\"rt\":%u,\"lx\":%d,\"ly\":%d,\"rx\":%d,\"ry\":%d,\"lower_native_xinput_called\":false}",token,value.epoch,value.padReads,value.padResult,Bool(value.padActive),Bool(value.padSeen),Bool(value.padCompleted),value.padDown,value.padUp,value.pad.wButtons,value.pad.bLeftTrigger,value.pad.bRightTrigger,value.pad.sThumbLX,value.pad.sThumbLY,value.pad.sThumbRX,value.pad.sThumbRY);
+ Log("{\"event\":\"pad_first_active\",\"token\":%llu,\"epoch\":%llu,\"seen\":%s,\"buttons\":%u,\"lt\":%u,\"rt\":%u,\"lx\":%d,\"ly\":%d,\"rx\":%d,\"ry\":%d}",token,value.epoch,Bool(value.padSeen),value.firstPad.wButtons,value.firstPad.bLeftTrigger,value.firstPad.bRightTrigger,value.firstPad.sThumbLX,value.firstPad.sThumbLY,value.firstPad.sThumbRX,value.firstPad.sThumbRY);
 }
 // Writes only a caller-owned memory DC. Original PrintWindow is never called.
 BOOL WINAPI SurrogatePrint(HWND h,HDC dc,UINT){
@@ -92,7 +101,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);int count=0;auto args=CommandLineToArgvW(GetCommandLineW(),&count);if(!args||count!=2){if(args)LocalFree(args);return 2;}output=_wfsopen(args[1],L"w",_SH_DENYNO);LocalFree(args);if(!output)return 3;
  const bool writers=capture_spy::Install()&&capture_spy::Add("keybd_event",reinterpret_cast<void*>(&KeyWriter));const auto uniqueWriterEntries=capture_spy::hooks.size();const unsigned writerCount=writers?19u:0u;
  const bool readers=writers&&capture_spy::Add("GetAsyncKeyState",reinterpret_cast<void*>(&NoKey))&&capture_spy::Add("GetKeyState",reinterpret_cast<void*>(&NoKey))&&capture_spy::Add("GetKeyboardState",reinterpret_cast<void*>(&NoKeyboard))&&capture_spy::Add("GetForegroundWindow",reinterpret_cast<void*>(&Outside))&&capture_spy::Add("GetGUIThreadInfo",reinterpret_cast<void*>(&OutsideGui))&&capture_spy::Add("GetActiveWindow",reinterpret_cast<void*>(&NullFocus))&&capture_spy::Add("GetFocus",reinterpret_cast<void*>(&NullFocus))&&capture_spy::Add("GetCursorPos",reinterpret_cast<void*>(&FakeCursor))&&capture_spy::Add("GetPhysicalCursorPos",reinterpret_cast<void*>(&FakeCursor))&&capture_spy::Add("PrintWindow",reinterpret_cast<void*>(&SurrogatePrint));
- const bool safe=readers&&Verify();Log("{\"event\":\"guards\",\"safe\":%s,\"phase\":\"before window and DLL\",\"terminal_desktop_writers\":%llu,\"unique_writer_entries\":%llu,\"native_writer_called\":false,\"native_printwindow_called\":false,\"lower_keys\":\"fabricated all up\",\"lower_focus\":\"fabricated outside/null\"}",Bool(safe),static_cast<U64>(writerCount),static_cast<U64>(uniqueWriterEntries));if(!safe)return 4;
+ const bool safe=readers&&InstallPadReader()&&Verify();Log("{\"event\":\"guards\",\"safe\":%s,\"phase\":\"before window and DLL\",\"terminal_desktop_writers\":%llu,\"unique_writer_entries\":%llu,\"native_writer_called\":false,\"native_printwindow_called\":false,\"lower_keys\":\"fabricated all up\",\"lower_focus\":\"fabricated outside/null\",\"lower_xinput\":\"terminal fabricated disconnected; native export never called\"}",Bool(safe),static_cast<U64>(writerCount),static_cast<U64>(uniqueWriterEntries));if(!safe)return 4;
  WNDCLASSW cls{};cls.lpfnWndProc=Window;cls.hInstance=instance;cls.lpszClassName=ClassName;if(!RegisterClassW(&cls))return 5;uiThread=GetCurrentThreadId();
  const LONGLONG sx=GetSystemMetrics(SM_XVIRTUALSCREEN),sy=GetSystemMetrics(SM_YVIRTUALSCREEN),sw=GetSystemMetrics(SM_CXVIRTUALSCREEN),sh=GetSystemMetrics(SM_CYVIRTUALSCREEN);if(sw<=0||sh<=0||!(-26000LL+640<=sx||-26000LL>=sx+sw||600LL+480<=sy||600LL>=sy+sh))return 5;
  target=CreateWindowExW(WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,ClassName,L"owned sequence wait consumer",WS_POPUP|WS_VISIBLE,-26000,600,640,480,nullptr,nullptr,instance,nullptr);if(!target||!SetPropW(target,Property,reinterpret_cast<HANDLE>(&lifetimeToken))||!Own(target))return 6;

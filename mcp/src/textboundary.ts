@@ -1,13 +1,14 @@
 import { type CliResult, runVinput } from "./vinput.js";
 
 /** A CLI feature: no target query, capture, claim or input. No stale capability cache. */
-export async function requireTextBoundary(wholeWord: boolean, exact?: boolean, exactLine=false): Promise<CliResult | undefined> {
-  if ((!wholeWord || exact)&&!exactLine) return; // Existing --exact already enforces word boundaries.
+export async function requireTextBoundary(wholeWord: boolean, exact?: boolean, exactLine=false,stableBox=false): Promise<CliResult | undefined> {
+  if ((!wholeWord || exact)&&!exactLine&&!stableBox) return; // Existing --exact already enforces word boundaries.
   const result = await runVinput(["help"], 2000);
   const value = result.json;
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
   const version = record?.text_word_boundary_version;
   const lineVersion=record?.text_line_match_version;
+  if(stableBox&&(!result.ok||record?.text_box_stability_version!==1))return {...result,ok:false,json:{ok:false,input_injected:false,error:'stable_ms requires an updated vinput CLI with text_box_stability_version1; no click was sent',text_box_stability_version:record?.text_box_stability_version??null}};
   if (result.ok && (!wholeWord||exact||version===1)&&(!exactLine||lineVersion===1)) return;
   if(result.ok&&(!wholeWord||exact||version===1)&&exactLine)return {...result,ok:false,json:{ok:false,input_injected:false,error:'exact_line:true requires an updated vinput CLI with text_line_match_version 1; no click was sent. Update VINPUT_EXE or explicitly use exact_line:false to select text within a longer OCR line.',text_line_capability:{reported_version:typeof lineVersion==='string'?lineVersion.slice(0,64):typeof lineVersion==='number'&&Number.isFinite(lineVersion)?lineVersion:null,cli_ok:result.ok}}};
   return { ...result, ok: false, json: { ok: false, input_injected: false,

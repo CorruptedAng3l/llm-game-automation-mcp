@@ -5,7 +5,7 @@ export function presentOcr(result:CliResult,textOnly:boolean,retryEmpty:boolean)
   const native=result.json as Record<string,unknown>;
   const json:Record<string,unknown>=textOnly?Object.fromEntries([
     'ok','text','line_count','lang','ocr_empty_retry_version','ocr_compact_version','retry_empty',
-    'ocr_scale','ocr_pass','ocr_passes','ocr_retry_errors','capture_scope','timing_clock','qpc_frequency','capture_qpc_ticks','frame_qpc_ticks',
+    'ocr_scale','ocr_pass','ocr_passes','ocr_retry_errors','capture_scope','timing_clock','qpc_frequency','capture_qpc_ticks','frame_qpc_ticks','digits_only','number_read',
   ].filter(k=>k in native).map(k=>[k,native[k]])):{...native};
   if(textOnly){json.text_only=true;json.ocr_confidence=null;}
   if(retryEmpty&&native.ocr_empty_retry_version!==1)

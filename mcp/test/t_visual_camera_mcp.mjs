@@ -19,6 +19,8 @@ try {
  if(registered){
   let {r,j}=await call('observe_settle',{region:[10,20,100,80]});
   check(!r.isError&&j.settled&&j.observation.queue_drain_measured===false&&!moves().length,'read-only observation keeps raw drain unknown and injects no motion');
+  reset();({r,j}=await call('observe_settle',{region:[10,20,100,80],max_width:160,capture_after:false}));
+  check(!r.isError&&j.settled&&/ignored/.test(j.preview_note??'')&&!r.content.some(c=>c.type==='image')&&!moves().length,'observation-only max_width is explicitly ignored without an image or input');
   ({r,j}=await call('look_calibrate',{template:'landmark.png',region:[10,20,700,500],counts:80}));
   const calibration=j.calibration;
   check(!r.isError&&j.calibration.matrix.xx===-.5&&j.calibration.matrix.yy===-.5&&moves().length===2,'actual MCP calibration submits exactly two probes and computes signed local response');

@@ -3,7 +3,7 @@
 #undef wmain
 #include "vi_launch_terminal.h"
 #include "vi_launch_ack.h"
-#include "../src/vi_launch_affinity.h"
+#include <vi_launch_affinity.h>
 static unsigned passed=0,failed=0;
 static void Check(bool good,const char* text){printf("%s %s\n",good?"PASS":"FAIL",text);good?++passed:++failed;}
 static LRESULT CALLBACK Proc(HWND h,UINT m,WPARAM w,LPARAM l){return m==WM_MOUSEACTIVATE?MA_NOACTIVATE:DefWindowProcW(h,m,w,l);}
@@ -26,7 +26,7 @@ int wmain(int argc,wchar_t** argv){
     Check(wanted&&wanted!=current,"host permits a discriminating narrower affinity control");if(!wanted||wanted==current)return 2;
     wchar_t own[32768]{};GetModuleFileNameW(nullptr,own,32768);const auto receipt=ExeDir()+L"\\startup_affinity.txt";
     char hex[32];sprintf_s(hex,"0x%llX",(unsigned long long)wanted);
-    Args options;options.opt={{"exe",W2U(own)},{"args",W2U(L"--actor \""+receipt+L"\"")},{"cpu-affinity",hex},{"no-inject","true"},{"timeout","8"},{"settle","0"},{"fg-guard","0"}};
+    Args options;options.opt={{"exe",W2U(own)},{"new-instance","true"},{"args",W2U(L"--actor \""+receipt+L"\"")},{"cpu-affinity",hex},{"no-inject","true"},{"timeout","8"},{"settle","0"},{"fg-guard","0"}};
     const auto rc=Launch(options);FILE* input=nullptr;_wfopen_s(&input,receipt.c_str(),L"r");unsigned long long observed=0;if(input){fscanf_s(input,"%llu",&observed);fclose(input);}
     Check(rc==0&&observed==wanted,"actual child observes requested affinity at startup");
     DWORD_PTR after=0;GetProcessAffinityMask(GetCurrentProcess(),&after,&system);Check(after==current,"parent affinity is unchanged");

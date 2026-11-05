@@ -844,11 +844,13 @@ static Reply WaitChange(DWORD pid, const Args& a) {
 #include "vi_cli_launch_selection.inl"
 #include "vi_launch_injection_failure.h"
 #include "vi_cli_launch_follow.inl"
+#include "vi_cli_launch_instances.inl"
 #include "vi_cli_launch_retry.inl"
 #include "vi_cli_hidden_window.inl"
 
 static int Launch(const Args& a) {
     std::string injectReply,earlyInjectReply,dialogInjectReply,launchReadiness,preFollowInject,injectionFollowReason;bool injectionFollowAttempted=false;
+    std::string launchInstanceFields;
     std::string finalCommandLine,appliedAffinity,hiddenProbeInject,hiddenReason,showHiddenReply,showHiddenStatus;DWORD spawnedPid=0;bool affinityApplied=false,showHidden=false;
     bool windowHiddenKnown=false,windowHidden=false,windowAdopted=false,showHiddenConfirmed=false,startupSplashSeen=false;
     DWORD guardAppliedMs=0,settleAppliedMs=0,guardRequestedMs=0,settleRequestedMs=0;const DWORD finalReserveMs=1500;
@@ -871,7 +873,7 @@ static int Launch(const Args& a) {
         result+=",\"followed_from\":"+(followedFrom?std::to_string(followedFrom):"null");
         result+=",\"launcher_pid\":"+(launcherPid?std::to_string(launcherPid):"null");
         result+=",\"process_created\":\""+std::to_string(selectedCreated)+"\"";
-        result+=",\"launch_state\":\""+std::string(launcherPid?"launcher_ready":"game")+"\"";
+        result+=",\"launch_state\":\""+std::string(!pid?"not_started":launcherPid?"launcher_ready":"game")+"\"";
         result+=",\"waiting_for\":"+(waitingFor.empty()?std::string("null"):"\""+JEsc(waitingFor)+"\"")+"}";
         result.pop_back();result+=vi_launch_exposure::Fields(pid,preResumeGuardPid,budgetStarted!=0,g_launchSawTargetForeground)+"}";
         result.pop_back();result+=",\"final_command_line\":"+(finalCommandLine.empty()?std::string("null"):"\""+JEsc(finalCommandLine)+"\"");
@@ -880,6 +882,7 @@ static int Launch(const Args& a) {
         result.pop_back();result+=",\"window_hidden\":"+(windowHiddenKnown?std::string(windowHidden?"true":"false"):"null")+",\"window_adopted\":"+(windowAdopted?"true":"false")+",\"hidden_discovery_inject\":"+(hiddenProbeInject.empty()?std::string("null"):hiddenProbeInject)+",\"hidden_window_reason\":"+(hiddenReason.empty()?std::string("null"):"\""+JEsc(hiddenReason)+"\"")+"}";
         result.pop_back();result+=",\"show_hidden_requested\":"+std::string(showHidden?"true":"false")+",\"show_hidden_reply\":"+(showHiddenReply.empty()?std::string("null"):showHiddenReply)+",\"show_hidden_status\":"+(showHiddenStatus.empty()?std::string("null"):showHiddenStatus)+"}";
         if(showHidden){result.pop_back();result+=",\"show_hidden_visibility_confirmed\":"+std::string(showHiddenConfirmed?"true":"false")+(showHiddenConfirmed?"":",\"show_hidden_warning\":\"visibility was not confirmed within the bounded observation; inspect the native pending/expiry receipt; no show request was replayed\"")+"}";}
+        if(!launchInstanceFields.empty()){result.pop_back();result+=launchInstanceFields+"}";}
         if(budgetStarted){result.pop_back();result+=",\"launch_budget_ms\":"+std::to_string(budgetRequested)+",\"launch_elapsed_ms\":"+std::to_string(GetTickCount64()-budgetStarted)+",\"launch_deadline_exceeded\":"+(CliBudget(1)?"false":"true")+",\"fg_guard_requested_ms\":"+std::to_string(guardRequestedMs)+",\"fg_guard_applied_ms\":"+std::to_string(guardAppliedMs)+",\"settle_requested_ms\":"+std::to_string(settleRequestedMs)+",\"settle_applied_ms\":"+std::to_string(settleAppliedMs)+",\"finalization_reserve_ms\":"+std::to_string(finalReserveMs)+",\"launch_observation_truncated\":"+((guardAppliedMs<guardRequestedMs||settleAppliedMs<settleRequestedMs)?"true":"false")+"}";}
         printf("%s\n",result.c_str());
     };
@@ -893,6 +896,15 @@ static int Launch(const Args& a) {
     if(HasOpt(a,"follow-created")&&!followPid){launchResult("{\"ok\":false,\"error\":\"--follow-created requires --follow-pid\"}");return 2;}
     LaunchOptions launchOptions; std::string launchOptionError;
     if (!PrepareLaunchOptions(a, exe, launchOptions, launchOptionError)) { launchResult("{\"ok\":false,\"error\":\"%s\"}\n", JEsc(launchOptionError).c_str()); return 2; }
+    bool newInstance=false;unsigned newInstanceCount=0;
+    for(const auto& option:a.opt)if(option.first=="new-instance"){
+        if(++newInstanceCount>1||(option.second!="true"&&option.second!="false")){
+            launchResult("{\"ok\":false,\"launched\":false,\"error\":\"--new-instance must appear once with true or false; no target was started\"}");return 2;
+        }newInstance=option.second=="true";
+    }
+    if(newInstanceCount&&(exe.empty()||!steam.empty()||!aumid.empty()||followPid)){
+        launchResult("{\"ok\":false,\"launched\":false,\"error\":\"--new-instance applies only to direct --exe launch\"}");return 2;
+    }
     bool allowDialog=false;unsigned allowCount=0;
     for(const auto& option:a.opt)if(option.first=="allow-dialog"){if(++allowCount>1||(option.second!="true"&&option.second!="false")){launchResult("{\"ok\":false,\"error\":\"--allow-dialog must appear once with true or false\"}\n");return 2;}allowDialog=option.second=="true";}
     unsigned showCount=0;for(const auto& option:a.opt)if(option.first=="show-hidden"){if(++showCount>1||(option.second!="true"&&option.second!="false")){launchResult("{\"ok\":false,\"error\":\"--show-hidden must appear once with true or false; no target was started\"}");return 2;}showHidden=option.second=="true";}
@@ -928,6 +940,15 @@ static int Launch(const Args& a) {
     budgetStarted=GetTickCount64();budgetRequested=(DWORD)timeout*1000;CliDeadlineScope launchDeadline(budgetRequested);
     auto optionalBudget=[&](DWORD requested){return vi_cli_deadline::Optional(g_cliDeadline,GetTickCount64(),requested,finalReserveMs);};
     struct ReadyWaitScope{DWORD old;ReadyWaitScope():old(g_cliReadinessWaitMs){g_cliReadinessWaitMs=1000;}~ReadyWaitScope(){g_cliReadinessWaitMs=old;}} readyWaitScope;
+    LaunchInstanceGuard instanceGuard;
+    if(!exe.empty()){
+        const bool admitted=instanceGuard.Prepare(exe,newInstance);launchInstanceFields=instanceGuard.Fields();
+        if(!admitted){
+            const bool knownExisting=!instanceGuard.existing.empty();
+            launchResult("{\"ok\":false,\"launched\":false,\"injected\":false,\"already_running\":%s,\"automatic_attach_attempted\":false,\"error\":\"%s\"}",knownExisting?"true":instanceGuard.complete?"false":"null",instanceGuard.complete?"the exact executable is already running; inspect existing_instances or explicitly request --new-instance true; no existing process was adopted":"exact-image process inventory was incomplete; no target was started; inspect duplicate_check");
+            ReleaseLock();return 2;
+        }
+    }
     g_previousForeground = GetForegroundWindow(); NoteForeground(g_previousForeground);
     g_launchT0 = GetTickCount();g_launchSawTargetForeground=false;
     // Start before CreateProcess, not after injection. This remains live while the main thread
@@ -962,6 +983,7 @@ static int Launch(const Args& a) {
             if (!CreateProcessW(exe.c_str(), &cl[0], nullptr, nullptr, FALSE, suspended ? CREATE_SUSPENDED : 0, nullptr, dir.c_str(), &si, &pi)) {const auto error=GetLastError();launchResult("{\"ok\":false,\"win32_error\":%lu,\"error\":\"CreateProcess failed %lu%s\"}\n",error,error,error==ERROR_ELEVATION_REQUIRED?": executable requires elevation; no game was started; use an elevated vinput session":""); break; }
             pid = pi.dwProcessId;spawnedPid=pid; g_initialLaunchPid = pid; g_launchPid = pid;
             rootProcess=LaunchProcess(pid,GetCurrentProcessId(),ProcName(pid),pi.hProcess);processHandles.Retain(rootProcess,pi.hProcess);
+            instanceGuard.Release(); // Original process handle/birth retained; later readiness never holds the inventory mutex.
             if (!cwdFields.empty()) cwdFields += ",\"cwd_applies_to_spawned_pid\":" + std::to_string(pid);
             if(launchOptions.affinitySpecified){
                 if(!SetProcessAffinityMask(pi.hProcess,(DWORD_PTR)launchOptions.affinityMask)){
@@ -1306,6 +1328,7 @@ static void Usage() {
         "      Existing --lock-max-wait is an alias for --lock-timeout. Sleeps are capped by its remaining budget; native calls/scheduling may overrun.\n"
         "      Direct --exe: --cwd DIRECTORY (existing child working directory; relative exe still resolves from caller).\n"
         "      Direct injected --exe: --client-size WIDTHxHEIGHT (1..8192 each); verified one-shot after settle, no activation/movement.\n"
+        "      Direct --exe refuses an existing exact canonical image; --new-instance true explicitly permits another instance. No automatic attach.\n"
         "      Inspect client_size.applied/warning; a running game remains ok:true on size refusal. Hosted/CoreWindow sizing is unsupported.\n"
         "                --early: create suspended, inject, resume (needs --exe; covers Vulkan/GL device creation)\n"
         "                Hidden presenting windows are adopted without showing. --show-hidden explicitly queues one SW_SHOWNA; inspect the ticket/visibility receipt, not just ok. Default false.\n"
@@ -1356,7 +1379,7 @@ static void Usage() {
         "  vinput --pid N escape-host [--timeout-ms N]  opt-in Ctrl+Alt+Shift+End host; streams receipts; no automatic start\n"
         "  vinput --pid N foreground          VERIFY/HANDOFF ONLY: really bring the game to the front\n"
         "  vinput sysinput <vk>               VERIFY ONLY: OS-level SendInput key (= the shared physical keyboard)\n";
-    if (g_jsonOutput) printf("{\"ok\":true,\"text_word_boundary_version\":1,\"text_line_match_version\":1,\"ocr_empty_retry_version\":1,\"ocr_compact_version\":1,\"image_scope_version\":1,\"help\":\"%s\"}\n", JEsc(usage).c_str()); else printf("%s", usage);
+    if (g_jsonOutput) printf("{\"ok\":true,\"text_word_boundary_version\":1,\"text_line_match_version\":1,\"text_box_stability_version\":1,\"matched_frame_save_version\":1,\"ocr_empty_retry_version\":1,\"ocr_compact_version\":1,\"image_scope_version\":1,\"help\":\"%s\"}\n", JEsc(usage).c_str()); else printf("%s", usage);
 }
 
 int wmain(int argc, wchar_t** wargv) {

@@ -40,7 +40,7 @@ try {
     $results += [pscustomobject]@{case=$case.n; pass=[bool]$pass; launch_ok=$l.ok; early_injected=$l.early_injected; pid=$l.pid
       capture_ok=$cap.ok; capture_path=$cap.capture_path; capture_error=$cap.error; vk_devices=$st.vk.devices; vk_swapchains=$st.vk.swapchains; frames_vk=$st.frames_by_api.vk
       pattern=$(if ($pat) { "ok=$($pat.ok) frame=$($pat.frame) bars=$($pat.bars_ok)" }); target_log_tail=(Get-Content -LiteralPath $log -Tail 3 -ErrorAction SilentlyContinue) -join ' | '}
-    foreach ($p in $owned) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -Confirm:$false } }; $owned = @()
+    foreach ($p in $owned) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -Confirm:$false; [void]$p.WaitForExit(5000) } }; $owned = @()
   }
   # D3D11 input target with --early: the ordinary input/capture paths still work when vinput is in before main()
   foreach ($exe in @('vi_testinput.exe', 'vi_testinput32.exe')) {
@@ -54,7 +54,7 @@ try {
     $t = Get-Content -Raw -LiteralPath $log -ErrorAction SilentlyContinue
     $pass = $l.ok -and $l.early_injected -and $k.ok -and $t -match 'WM_KEYDOWN vk=0x51' -and $t -match 'GAKS vk=0x51 down' -and $cap.ok -and $cap.capture_path -eq 'd3d11'
     $results += [pscustomobject]@{case="d3d11_input_early_$exe"; pass=[bool]$pass; launch_ok=$l.ok; early_injected=$l.early_injected; pid=$l.pid; capture_ok=$cap.ok; capture_path=$cap.capture_path; capture_error=$cap.error}
-    foreach ($p in $owned) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -Confirm:$false } }; $owned = @()
+    foreach ($p in $owned) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -Confirm:$false; [void]$p.WaitForExit(5000) } }; $owned = @()
   }
 } finally { foreach ($p in $owned) { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -Confirm:$false } } }
 $results | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$Out\result.json"

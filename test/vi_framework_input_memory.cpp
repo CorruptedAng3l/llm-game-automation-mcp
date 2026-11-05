@@ -31,6 +31,25 @@ static bool JHas(const JObj& j,const char* k){return j.count(k)!=0;}
 static double JNum(const JObj& j,const char* k,double value){auto found=j.find(k);return found==j.end()?value:found->second;}
 static bool JBool(const JObj& j,const char* k,bool value){auto found=j.find(k);return found==j.end()?value:found->second!=0;}
 #include "actual_framework_timing.inl"
+// The real status profile block is extracted too; this finite output sink never
+// inspects a process or performs GUI/input calls.
+struct JOut {std::string value="{";
+ void Field(const char* key,const std::string& text){if(value.size()>1)value+=',';value+='"';value+=key;value+="\":";value+=text;}
+ void num(const char* key,double n){Field(key,std::to_string(n));}
+ void bol(const char* key,bool v){Field(key,v?"true":"false");}
+ void str(const char* key,const std::string& text){Field(key,'"'+text+'"');}
+ void raw(const char* key,const std::string& text){Field(key,text);}
+ std::string done()const{return value+'}';}
+};
+static std::string W2U(const wchar_t* text){std::string out;while(*text)out+=(char)*text++;return out;}
+#include "actual_framework_status.inl"
+static bool UnityProfile(){
+#ifdef VI_FRAMEWORK_UNITY_TIMING
+ return FrameworkProfileForCurrent().unity;
+#else
+ return false;
+#endif
+}
 static unsigned passed=0,failed=0;
 static void Check(bool good,const char* text){printf("%s %s\n",good?"PASS":"FAIL",text);good?++passed:++failed;}
 static void Reset(){fixtureOwner=g_pid;threadId=10;g_hwnd=fixtureWindow;g_inputReadyGeneration=1;className=L"Chrome_WidgetWin_1";mutation=0;classFail=false;fixtureBinding=std::make_shared<WndProcBinding>();otherBinding=std::make_shared<WndProcBinding>();g_cfg={};}
@@ -72,5 +91,18 @@ int main(){
  Reset();const JObj explicitTiming{{"ms",2000},{"settle_ms",0}};Check(ActualHold("click",explicitTiming)==2000&&ActualHover(explicitTiming)==0,"explicit long hold and zero hover remain exact");
  Reset();className=L"OtherGame";Check(ActualHold("click",fallback)==140&&ActualHover(fallback)==80,"unknown framework retains MCP timing without automatic changes");
  Reset();fixtureBinding->live=false;Check(ActualHold("click",fallback)==140&&ActualHover(fallback)==80,"quarantined profile cannot change click timing");
+ Reset();className=L"UnityWndClass";Check(UnityProfile()&&!FrameworkProfileForCurrent().chromium,"exact fresh owned UnityWndClass selects a separate timing-only profile");
+ Check(ActualHold("click",omitted)==250&&ActualHover(omitted)==250,"native omitted Unity click timing is250ms hover and250ms hold");
+ Check(ActualHold("click",fallback)==250&&ActualHover(fallback)==250,"MCP omitted-value flags select Unity250/250 over backward-compatible fallback");
+ Check(ActualHold("click",explicitTiming)==2000&&ActualHover(explicitTiming)==0,"Unity explicit2000ms hold and zero hover remain exact");
+ const JObj holdOnly{{"ms",75}},hoverOnly{{"settle_ms",10}};
+ Check(ActualHold("click",holdOnly)==75&&ActualHover(holdOnly)==250&&ActualHold("click",hoverOnly)==250&&ActualHover(hoverOnly)==10,"Unity overrides only each independently omitted value");
+ Check(ActualHold("mousedown",omitted)==0&&ActualHold("mouseup",omitted)==0,"Unity timing does not add a timed hold to explicit down/up commands");
+ for(bool keyboard:{false,true}){Check(!Legacy(keyboard,registered)&&Raw(keyboard,registered),"Unity retains original registered NOLEGACY/raw route under auto");Check(!Legacy(keyboard,registered,false)&&Raw(keyboard,registered,false),"Unity relative raw/mouse-look route remains unchanged");g_cfg.msgmode=1;Check(Legacy(keyboard,registered)&&Raw(keyboard,registered),"Unity explicit legacy on retains its existing route");g_cfg.msgmode=2;Check(!Legacy(keyboard,registered)&&Raw(keyboard,registered),"Unity explicit legacy off retains its existing route");g_cfg={};}
+ const auto unityStatus=ActualFrameworkStatus();Check(unityStatus.find("\"profile\":\"unity_ui\"")!=std::string::npos&&unityStatus.find("\"timing_only\":true")!=std::string::npos&&unityStatus.find("\"default_click_hold_ms\":250")!=std::string::npos&&unityStatus.find("\"default_click_hover_ms\":250")!=std::string::npos&&unityStatus.find("\"auto_legacy_ui\":false")!=std::string::npos&&unityStatus.find("\"auto_raw_ui_suppressed\":false")!=std::string::npos,"actual Unity status block reports timing250/250 without claiming automatic routing");
+ for(const auto name:{L"unitywndclass",L"UnityWndClass2",L"Unity",L"OtherGame"}){Reset();className=name;Check(!UnityProfile()&&ActualHold("click",fallback)==140&&ActualHover(fallback)==80,"unknown/lookalike class retains original click timing");}
+ for(int change=0;change<8;++change){Reset();className=L"UnityWndClass";if(change==0)g_hwnd=nullptr;else if(change==1)fixtureOwner=99;else if(change==2)fixtureBinding->live=false;else mutation=change-2;Check(!UnityProfile(),"missing/foreign/quarantined/changed Unity window-thread-generation-binding cannot select timing");}
+ Reset();className=L"UnityWndClass";classFail=true;Check(!UnityProfile()&&ActualHold("click",fallback)==140,"failed Unity class query cannot change timing");
+ Reset();const auto chromiumStatus=ActualFrameworkStatus();Check(chromiumStatus.find("\"profile\":\"chromium_ui\"")!=std::string::npos&&chromiumStatus.find("\"default_click_hold_ms\":400")!=std::string::npos&&chromiumStatus.find("\"default_click_hover_ms\":350")!=std::string::npos&&chromiumStatus.find("\"auto_legacy_ui\":true")!=std::string::npos,"actual Chromium status and routing remain400/350 and legacy UI");
  printf("framework input: %u PASS / %u FAIL\n",passed,failed);return failed?1:0;
 }
