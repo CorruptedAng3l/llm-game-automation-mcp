@@ -1,0 +1,6 @@
+from pathlib import Path
+import argparse,hashlib,json
+p=argparse.ArgumentParser();p.add_argument('--source-dir',type=Path,required=True);p.add_argument('--root',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args();assert not a.out.exists()
+paths={'actual_exports.inl':a.source_dir/'vi_pad_api_census_exports.inl','actual_json_tail.inl':a.source_dir/'vi_pad_api_census_json.inl','actual_state.h':a.root/'src/vi_pad_api_census.h'};core=a.root/'src/vinput_core.cpp';text=core.read_text(encoding='utf-8-sig');start=text.index('std::string JEsc(');esc=text[start:text.index('\n}\n',start)+3];start=text.index('struct JOut {');jout=text[start:text.index('\n};',start)+4];pieces={name:path.read_text(encoding='utf-8-sig') for name,path in paths.items()};pieces['actual_json.inl']=esc+jout+'\n'+pieces.pop('actual_json_tail.inl');a.out.mkdir(parents=True)
+for name,value in pieces.items():(a.out/name).write_text(value,encoding='utf-8',newline='\n')
+sha=lambda b:hashlib.sha256(b).hexdigest().upper();(a.out/'sourcepins.json').write_text(json.dumps({'inputs':{str(f.resolve()):sha(f.read_bytes()) for f in [*paths.values(),core]},'pieces':{name:sha(value.encode()) for name,value in pieces.items()},'scope':'exact actual optional installer/callback/status and counter/JOut bodies; native API symbols replaced with finite callbacks'},indent=2)+'\n')

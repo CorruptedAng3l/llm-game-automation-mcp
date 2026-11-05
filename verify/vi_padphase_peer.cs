@@ -23,7 +23,7 @@ public static class ViPadPhasePeer {
      last=await read;
      string expected=phase==0?"\"cmd\":\"readiness\"":"\"cmd\":\"ping\"";
      if(last==null||last.IndexOf(expected,StringComparison.Ordinal)<0)throw new InvalidDataException("Owned peer received an unexpected capability phase; original input is never implemented");
-     await writer.WriteLineAsync(phase==0?"{\"ok\":true,\"hook_ready\":true,\"cursor_hooks_ready\":true,\"cursor_guard_version\":1}":response);
+     await writer.WriteLineAsync(phase==0?"{\"ok\":true,\"hook_ready\":true,\"cursor_hooks_ready\":true,\"cursor_guard_version\":1,\"keybd_event_guard_version\":1,\"keybd_event_hooks_ready\":true}":response);
      await writer.FlushAsync();
     }
    }

@@ -20,7 +20,7 @@ import { burstImage } from "./burstimage.js";
 import { requireSequenceWait, sequenceWaitError, waitSequence } from "./sequencewait.js";
 import { requireTextBoundary } from "./textboundary.js";
 
-const VERSION = "0.2.4";
+const VERSION = "0.2.5";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 

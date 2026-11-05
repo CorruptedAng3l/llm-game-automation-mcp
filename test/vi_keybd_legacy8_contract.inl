@@ -1,0 +1,2 @@
+// Exact legacy8 CLI helper from the pinned pre-keybd source; renamed only.
+static bool LegacyCursorGuardHandshakeReady(const std::string& response){vi_ready_json::Reader parsed{response,0,{}};bool ready=false,ok=false,hooks=false;if(!parsed.Parse()||!parsed.Bool("ok",ok)||!ok||!parsed.Bool("hook_ready",hooks)||!hooks||!parsed.Bool("cursor_hooks_ready",ready)||!ready)return false;auto version=parsed.fields.find("cursor_guard_version");return version!=parsed.fields.end()&&version->second.type=='n'&&version->second.raw=="1";}

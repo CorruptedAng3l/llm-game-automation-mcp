@@ -27,6 +27,9 @@ other foreground-taking tools on your machine use, or they use `build\foreground
 | script | covers |
 |---|---|
 | `run_selftest.ps1` | every input channel on x64 / x86, injected DLL and compiled-in mode, D3D11 capture, background isolation; then every background case of `vi_suiteplan.ps1` (the scripts below and the ones in the next rows) |
+| `run_claimedkeybdnativetest.ps1`, `run_claimedkeybdmemory.py` | a claimed target's own `keybd_event` calls are fenced off the real keyboard, and readiness reports the guard |
+| `run_sequencewaitnativetest.ps1` | `key_sequence` wait steps through the real CLI and DLL |
+| `run_padcensusaliastest.ps1` | optional controller observers stay off when their hook alias can't be made safe |
 | `run_inputjobstest.ps1`, `run_steeringsemanticstest.ps1` | owned input jobs (async key / hold / pad, job status / cancel / replace, deadlines), key PWM duty, XInput ramps and timelines with frame pacing |
 | `run_dipollclicktest.ps1`, `run_direleasepolltest.ps1`, `run_placementtest.ps1`, `run_edgeguardtest.ps1` | polled click press / release evidence through DirectInput, owned placement drag, edge guard paths |
 | `run_captureoutputtest.ps1`, `run_imageencodetest.ps1`, `run_outputreusecontracttest.ps1`, `run_capturetimingtest.ps1` | in-game scaling / JPEG output and its capture-space map, capture bursts, encoder, capture timing |

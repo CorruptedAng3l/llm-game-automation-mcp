@@ -39,7 +39,7 @@ static DWORD WINAPI Server(LPVOID){
         if(request.find("\"cmd\":\"readiness\"")!=std::string::npos){
             // Synthetic compatibility capability, not a claim about installed hooks.
             // The only modeled key delivery is WM_APP+1 to our own offscreen UI.
-            Note("MODELED_CURSOR_CAPABILITY");Reply(pipe,"{\"ok\":true,\"hook_ready\":true,\"cursor_hooks_ready\":true,\"cursor_guard_version\":1}");
+            Note("MODELED_CURSOR_CAPABILITY");Reply(pipe,"{\"ok\":true,\"hook_ready\":true,\"cursor_hooks_ready\":true,\"cursor_guard_version\":1,\"keybd_event_guard_version\":1,\"keybd_event_hooks_ready\":true}");
         }else if(request.find("\"cmd\":\"status\"")!=std::string::npos){
             wchar_t title[128]={};SendMessageW(windowHandle,WM_GETTEXT,128,(LPARAM)title); // deliberate real UI dependency
             RECT r{};GetClientRect(windowHandle,&r);char json[300];sprintf_s(json,"{\"ok\":true,\"hwnd\":\"0x%llX\",\"client_w\":%ld,\"client_h\":%ld,\"frames\":0}",(unsigned long long)(ULONG_PTR)windowHandle,r.right,r.bottom);Reply(pipe,json);

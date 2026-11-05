@@ -2,8 +2,9 @@
 #include <atomic>
 #include <cstdint>
 namespace vi_cursor_guard {
-enum Api {SetPosition,SetPhysicalPosition,Clip,Send,MouseEvent,GetClip,GetPosition,GetPhysicalPosition,ApiCount};
-inline const char* Name(unsigned api){static const char* names[]={"SetCursorPos","SetPhysicalCursorPos","ClipCursor","SendInput","mouse_event","GetClipCursor","GetCursorPos","GetPhysicalCursorPos"};return api<ApiCount?names[api]:"unknown";}
+enum Api {SetPosition,SetPhysicalPosition,Clip,Send,MouseEvent,GetClip,GetPosition,GetPhysicalPosition,KeybdEvent,ApiCount};
+inline const char* Name(unsigned api){static const char* names[]={"SetCursorPos","SetPhysicalCursorPos","ClipCursor","SendInput","mouse_event","GetClipCursor","GetCursorPos","GetPhysicalCursorPos","keybd_event"};return api<ApiCount?names[api]:"unknown";}
+constexpr unsigned LegacyApiCount=GetPhysicalPosition+1;
 struct Arbitration {std::uint64_t takeover=0,automation=0;void Human(std::uint64_t token){if(token>takeover)takeover=token;}bool AdmitAgent(std::uint64_t token,bool accepted){if(!accepted||!token||token<=automation)return false;automation=token;return true;}bool Holding()const{return takeover>automation;}bool Automation()const{return automation&&automation>=takeover;}};
 struct Owner {bool foregroundVerified=false,foregroundOwned=false,windowReady=false,humanFresh=false,lease=false,forcedVirtual=false,humanHolding=false,agentPosition=false;std::uint64_t humanEpoch=0,agentEpoch=0;std::uintptr_t foregroundRoot=0;bool agentClaimLive=false;};
 inline bool ReaderAllowed(const Owner& owner){return owner.foregroundVerified&&owner.foregroundOwned;}

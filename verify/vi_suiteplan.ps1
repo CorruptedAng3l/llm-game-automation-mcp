@@ -59,6 +59,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'recenterguard' 'run_recenterguardtest.ps1'
  New-VinputSuiteCase 'cursor_guard' 'run_cursorguardtest.ps1'
  New-VinputSuiteCase 'claimed_cursor_writer' 'run_claimedcursorwritetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
+ New-VinputSuiteCase 'claimed_keybd_native' 'run_claimedkeybdnativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'physical_readers' 'run_physicalreaderstest.ps1'
  New-VinputSuiteCase 'character_translation' 'run_chartranslatetest.ps1'
  New-VinputSuiteCase 'di_type_lifetime' 'run_ditypelifetimetest.ps1'
@@ -103,6 +104,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'output_reuse' 'run_outputreusecontracttest.ps1'
  New-VinputSuiteCase 'steering_semantics' 'run_steeringsemanticstest.ps1'
  New-VinputSuiteCase 'input_jobs' 'run_inputjobstest.ps1'
+ New-VinputSuiteCase 'sequence_wait_native' 'run_sequencewaitnativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');McpBuildDir=(Join-Path $PSScriptRoot '..\mcp\build');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'pad_phases' 'run_padphasetest.ps1'
  New-VinputSuiteCase 'pad_triggers' 'run_padtriggerstest.ps1'
  New-VinputSuiteCase 'key_sequence' 'run_keysequencetest.ps1'

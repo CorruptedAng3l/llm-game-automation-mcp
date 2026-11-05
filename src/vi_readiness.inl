@@ -22,9 +22,9 @@ bool InputReadySame(const InputReadySnapshot& old) {
 std::string WaitInputReady(unsigned waitMs,bool hooksOnly) {
  const auto began=HousekeepingNow();InputReadySnapshot window;ULONG_PTR ticket=0;bool queue=false;std::string reason;
  for(;;) {
-  const bool hooks=g_inputHooksReady.load()&&g_inputHookInstallFinished.load()&&CursorProtectionReady();
+  const bool hooks=g_inputHooksReady.load()&&g_inputHookInstallFinished.load()&&CursorInputProtectionReady();
   if(hooks&&hooksOnly){reason.clear();break;}
-  if(!hooks)reason=!CursorProtectionReady()?(g_cursorInstallFinished?"cursor_hook_coverage_failed_or_changed":"cursor_hooks_not_armed"):(g_inputHookInstallFinished?"required_keyboard_or_focus_hook_failed":"hooks_not_armed");
+  if(!hooks)reason=!CursorApiReady(vi_cursor_guard::KeybdEvent)?(g_cursorInstallFinished?"keybd_event_hook_coverage_failed_or_changed":"keybd_event_hooks_not_armed"):!CursorProtectionReady()?(g_cursorInstallFinished?"cursor_hook_coverage_failed_or_changed":"cursor_hooks_not_armed"):(g_inputHookInstallFinished?"required_keyboard_or_focus_hook_failed":"hooks_not_armed");
   else {
    auto latest=InputReadyWindow();
    if(!latest.ready){window=latest;ticket=0;reason="window_not_adopted_or_subclassed";}
@@ -43,13 +43,13 @@ std::string WaitInputReady(unsigned waitMs,bool hooksOnly) {
   Sleep(5);
  }
  if(hooksOnly)window=InputReadyWindow();
- const bool hooks=g_inputHooksReady.load()&&g_inputHookInstallFinished.load()&&CursorProtectionReady();
+ const bool hooks=g_inputHooksReady.load()&&g_inputHookInstallFinished.load()&&CursorInputProtectionReady();
  const bool adopted=window.ready&&InputReadySame(window);
  const bool ok=hooks&&(hooksOnly||(adopted&&queue));
  JOut out;out.bol("ok",ok);out.num("readiness_version",1);out.str("version",VI_VERSION);
  out.str("scope",hooksOnly?"hooks":"window_queue");out.bol("hook_ready",hooks);out.bol("hook_install_complete",g_inputHookInstallFinished);
  out.bol("window_ready",adopted);out.bol("queue_ready",adopted&&queue);out.num("waited_ms",(double)(HousekeepingNow()-began));
- out.num("cursor_guard_version",1);out.bol("cursor_hooks_ready",CursorProtectionReady());out.bol("translator_hook_ready",g_translationInstalled);out.bol("posted_dispatch_hooks_ready",g_postedDispatchReady);out.bol("isolated_character_translation_ready",g_translationInstalled&&g_postedDispatchReady&&g_translationNoState);
+ out.num("cursor_guard_version",1);out.bol("cursor_hooks_ready",CursorProtectionReady());out.num("keybd_event_guard_version",1);out.bol("keybd_event_hooks_ready",CursorApiReady(vi_cursor_guard::KeybdEvent));out.bol("translator_hook_ready",g_translationInstalled);out.bol("posted_dispatch_hooks_ready",g_postedDispatchReady);out.bol("isolated_character_translation_ready",g_translationInstalled&&g_postedDispatchReady&&g_translationNoState);
  out.num("window_generation",(double)window.generation);char hwnd[32];sprintf_s(hwnd,"0x%llX",(unsigned long long)(ULONG_PTR)window.window);out.str("hwnd",hwnd);
  out.raw("application_ready","null");out.str("application_readiness","not measured: host startup and semantic input acceptance remain application-observed");
  if(!ok){if(reason.empty())reason="readiness_changed_before_reply";out.str("readiness_reason",reason);out.str("error","input infrastructure is not ready: "+reason+"; no input was injected");out.bol("input_injected",false);}
@@ -63,7 +63,7 @@ std::string InputReadyCommand(const JObj& request) {
 }
 std::string CommandInputReadiness(const std::string& cmd,const JObj& request) {
  auto window=InputReadyWindow();
- if(g_inputHooksReady&&g_inputHookInstallFinished&&CursorProtectionReady()&&window.ready&&
+ if(g_inputHooksReady&&g_inputHookInstallFinished&&CursorInputProtectionReady()&&window.ready&&
     g_commandReadyWindow==window.window&&g_commandReadyGeneration==window.generation)return OkJ();
  unsigned cap=5000;
  // First-time arming must not wait out an explicitly short click-hover cap.

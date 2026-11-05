@@ -764,6 +764,7 @@ BOOL WINAPI h_GetPhysicalCursorPos(LPPOINT p) {
     return o_GetPhysicalCursorPos(p);
 }
 #include "vi_cursor_write_hooks.inl"
+#include "vi_keybd_event_guard.inl"
 HWND WINAPI h_WindowFromPoint(POINT pt) {
     if (UseVirtualCursor()) {
         POINT c{g_vcurX, g_vcurY}; ClientToScreen(g_hwnd, &c);
@@ -1503,7 +1504,7 @@ void InstallUser32Hooks() {
     InstallSelfRawHooks(); // raw envelope remains optional; posted Dispatch scope is required
     keyboardSafe=g_postedDispatchReady.load()&&keyboardSafe;
     // Optional graphics/raw/device APIs may fail without disarming keyboard readiness.
-    g_inputHooksReady=keyboardSafe&&focusSafe&&CursorProtectionReady()&&g_inputReadyMessage!=0;
+    g_inputHooksReady=keyboardSafe&&focusSafe&&CursorInputProtectionReady()&&g_inputReadyMessage!=0;
     g_inputHookInstallFinished=true;
 }
 
@@ -1983,7 +1984,7 @@ std::string StatusJson() {
     o.num("key_sequence_version",1);
     o.num("pad_api_census_version",1);o.raw("pad_api_census",PadApiCensusJson());
     o.num("claimed_di_guard_version",1);o.raw("claimed_di_guard",ClaimedDiStatusJson());
-    o.num("cursor_guard_version",1);o.raw("cursor_guard",CursorGuardStatus());
+    o.num("cursor_guard_version",1);o.num("keybd_event_guard_version",1);o.bol("keybd_event_hooks_ready",CursorApiReady(vi_cursor_guard::KeybdEvent));o.raw("cursor_guard",CursorGuardStatus());
     o.num("pad_timeline_version",2);o.num("pad_readiness_version",1);o.raw("virtual_pad",PadReadinessStatusJson());
 #ifdef _WIN64
     o.num("bits", 64);
@@ -2238,11 +2239,11 @@ std::string Exec(const std::string& line) {
     { std::string refused = ClaimGate(cmd, j); if (!refused.empty()) return refused; }
     if (g_acProduct.load() && cmd != "ping" && cmd != "status" && cmd != "log") { EnforceAntiCheat(); return AntiCheatRefusal(); }
     if(cmd=="readiness")return InputReadyCommand(j);
-    if(CursorInputProducer(cmd)&&!(cmd=="pad"&&PadIsOff(JStr(j,"buttons")))&&!CursorProtectionReady())return CursorInputRefusal();
+    if(CursorInputProducer(cmd)&&!(cmd=="pad"&&PadIsOff(JStr(j,"buttons")))&&!CursorInputProtectionReady())return CursorInputRefusal();
     if(InputNeedsReady(cmd,j)) {
         std::string ready=CommandInputReadiness(cmd,j);JObj state;
         if(!ParseJson(ready,state)||!JBool(state,"ok",false))return ready;
-        if(!CursorProtectionReady())return CursorInputRefusal();
+        if(!CursorInputProtectionReady())return CursorInputRefusal();
         // Ownership can change while the window or its queue is becoming ready.
         std::string refused=ClaimGate(cmd,j);if(!refused.empty())return refused;
     }

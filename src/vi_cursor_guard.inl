@@ -44,9 +44,11 @@ bool CursorEntryReaches(void* entry,void* expected){
 }
 bool CursorProtectionReady(){
  if(!g_cursorInstallFinished.load())return false;
- for(unsigned i=0;i<vi_cursor_guard::ApiCount;i++)if(!g_cursorInstalled[i]||!CursorEntryReaches(g_cursorEntries[i],g_cursorDetours[i]))return false;
+ for(unsigned i=0;i<vi_cursor_guard::LegacyApiCount;i++)if(!g_cursorInstalled[i]||!CursorEntryReaches(g_cursorEntries[i],g_cursorDetours[i]))return false;
  return true;
 }
+bool CursorApiReady(unsigned api){return g_cursorInstallFinished.load()&&api<vi_cursor_guard::ApiCount&&g_cursorInstalled[api]&&CursorEntryReaches(g_cursorEntries[api],g_cursorDetours[api]);}
+bool CursorInputProtectionReady(){return CursorProtectionReady()&&CursorApiReady(vi_cursor_guard::KeybdEvent);}
 vi_cursor_guard::Owner CursorOwnerSnapshot(){
  vi_cursor_guard::Owner owner;const HWND upstream=RealForeground();GUITHREADINFO gui{sizeof(gui)};
  const bool queried=GetGUIThreadInfo(0,&gui)!=FALSE;const HWND independent=queried?gui.hwndActive:nullptr;const HWND after=RealForeground();

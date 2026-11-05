@@ -21,11 +21,11 @@ std::string PadApiCensusJson(){
  for(unsigned slot=0;slot<5;slot++){
   const unsigned state=g_padApiExportState[slot].load();JOut item;item.num("slot",slot);
   item.str("api",slot<4?"XInputGetCapabilities":"joyGetPosEx");if(slot<4)item.str("dll",slot==0?"xinput1_4.dll":slot==1?"xinput1_3.dll":slot==2?"xinput9_1_0.dll":"xinputuap.dll");else item.str("dll","winmm.dll");
-  item.str("install",state==2?"installed_observed":state==4?"exact_typed_alias":state==3?"failed_or_unknown":state==1?"pending":"unmeasured_not_observed_loaded");
+  item.str("install",state==5?"disabled_unproved_future_abi_alias":state==2?"installed_observed":state==4?"exact_typed_alias":state==3?"failed_or_unknown":state==1?"pending":"unmeasured_not_observed_loaded");
   if(state==4)item.num("canonical_slot",g_padApiExportAlias[slot].load());if(slot<4&&(state==2||state==4))capsInstalled=true;
   if(slot)exports+=',';exports+=item.done();
  }
- out.raw("exports",exports+"]");out.raw("xinput_capabilities",PadApiCallsJson(0,4,g_padApiCapabilities,capsInstalled));
+ out.raw("exports",exports+"]");out.str("optional_flat_scope","capabilities/joy code-entry hooks disabled: no safe generic later-load ABI/lifetime boundary; counts remain unmeasured, native behavior unchanged");out.raw("xinput_capabilities",PadApiCallsJson(0,4,g_padApiCapabilities,capsInstalled));
  JOut joy;const bool joyMeasured=g_padApiExportState[4]==2||g_padApiJoy.entries!=0;
  joy.str("coverage",joyMeasured?"installed_or_observed":"unmeasured");
  if(joyMeasured){joy.str("entries",std::to_string(g_padApiJoy.entries.load()));joy.str("success_returns",std::to_string(g_padApiJoy.ok.load()));joy.str("error_returns",std::to_string(g_padApiJoy.error.load()));}else{joy.raw("entries","null");joy.raw("success_returns","null");joy.raw("error_returns","null");}out.raw("joy_get_pos_ex",joy.done());
