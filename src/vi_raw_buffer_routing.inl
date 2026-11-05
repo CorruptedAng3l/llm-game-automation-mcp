@@ -8,7 +8,24 @@ bool RawBufferCurrent(const RawBufferedPacket& packet,ULONGLONG now){
        (ULONG_PTR)GetPropW(packet.window,kRawBufferWindowProperty)!=packet.stamp||!WndBindingRawAllowed(packet.window))return false;
     return packet.selected?packet.selected->window==g_hwnd&&WndBindingLive(packet.selected)&&WndBindingFind(packet.selected->window)==packet.selected:!g_hwnd;
 }
-void RawBufferPruneLocked(ULONGLONG now){for(auto it=g_rawQ.begin();it!=g_rawQ.end();)if(!RawBufferCurrent(*it,now)){it=g_rawQ.erase(it);++g_rawBufferRevoked;}else ++it;}
+void RawBufferPruneLocked(ULONGLONG now){
+    // A burst normally shares one destination/binding. Repeating its USER32
+    // lifetime probes for every retained packet on every admission makes the
+    // burst quadratic and can expire accepted packets before the reader runs.
+    // Cache only within this pass; each admission/drain probes lifetimes anew.
+    using Lifetime=std::tuple<ULONG_PTR,DWORD,ULONG_PTR,ULONG_PTR>;
+    std::map<Lifetime,bool> current;
+    for(auto it=g_rawQ.begin();it!=g_rawQ.end();){
+        bool live=false;
+        if(now<it->expires){
+            const Lifetime key{(ULONG_PTR)it->window,it->thread,it->stamp,(ULONG_PTR)it->selected.get()};
+            auto found=current.find(key);
+            if(found==current.end())found=current.emplace(key,RawBufferCurrent(*it,now)).first;
+            live=found->second;
+        }
+        if(!live){it=g_rawQ.erase(it);++g_rawBufferRevoked;}else ++it;
+    }
+}
 bool RawBufferRecent(DWORD thread){
     if(!thread)return false;const auto now=HousekeepingNow();std::lock_guard<std::mutex> lock(g_rawQMx);auto it=g_rawBufferReaders.find(thread);
     if(it==g_rawBufferReaders.end())return false;

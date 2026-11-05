@@ -93,7 +93,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'di_discovery' 'run_didiscoverytest.ps1'
  New-VinputSuiteCase 'di_keyboard_formats' 'run_diformattest.ps1'
  New-VinputSuiteCase 'di_keyboard_native' 'run_dikeyboardtest.ps1'
- New-VinputSuiteCase 'raw_thread_routing' 'run_rawroutingtest.ps1'
+ New-VinputSuiteCase 'raw_thread_routing' 'run_rawroutingtest.ps1' @{} 'Destination/thread/generation isolation and bounded lifetime queries during a capacity burst.'
  New-VinputSuiteCase 'clickpoint' 'run_clickpointtest.ps1'
  New-VinputSuiteCase 'lease_invariants' 'run_locktest.ps1'
  New-VinputSuiteCase 'legacylock' 'run_legacylocktest.ps1' @{CliCheck=$true}

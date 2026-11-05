@@ -2,6 +2,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <tuple>
 struct WndProcBinding;
 struct RawBufferedPacket {
     RAWINPUT record{};HWND window=nullptr;DWORD thread=0;ULONG_PTR stamp=0;ULONGLONG expires=0;

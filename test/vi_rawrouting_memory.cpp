@@ -11,12 +11,12 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
-static DWORD threadId=10,g_pid=42;static ULONGLONG tick=1000;static HWND a=(HWND)(ULONG_PTR)1,b=(HWND)(ULONG_PTR)2,g_hwnd=a;
+static DWORD threadId=10,g_pid=42;static ULONGLONG tick=1000;static unsigned propertyReads=0;static HWND a=(HWND)(ULONG_PTR)1,b=(HWND)(ULONG_PTR)2,g_hwnd=a;
 struct Window{DWORD thread=0;bool alive=true;ULONG_PTR property=0;};static std::map<HWND,Window> windows;
 struct WndProcBinding{HWND window=nullptr;bool live=true;};static std::map<HWND,std::shared_ptr<WndProcBinding>> bindings;
 static std::map<HANDLE,DWORD> handles;static std::map<DWORD,bool> aliveThreads;static unsigned nextHandle=100,closed=0;
 static DWORD WINAPI Thread(){return threadId;}static DWORD WINAPI ThreadOf(HWND window,LPDWORD pid){auto i=windows.find(window);if(i==windows.end()||!i->second.alive){if(pid)*pid=0;return 0;}if(pid)*pid=g_pid;return i->second.thread;}
-static HANDLE WINAPI Property(HWND window,LPCWSTR){return (HANDLE)windows[window].property;}static BOOL WINAPI SetProperty(HWND window,LPCWSTR,HANDLE value){windows[window].property=(ULONG_PTR)value;return TRUE;}
+static HANDLE WINAPI Property(HWND window,LPCWSTR){++propertyReads;return (HANDLE)windows[window].property;}static BOOL WINAPI SetProperty(HWND window,LPCWSTR,HANDLE value){windows[window].property=(ULONG_PTR)value;return TRUE;}
 static HANDLE WINAPI Process(){return (HANDLE)(ULONG_PTR)1;}static HANDLE WINAPI CurrentThread(){return (HANDLE)(ULONG_PTR)threadId;}
 static BOOL WINAPI Duplicate(HANDLE,HANDLE,HANDLE,HANDLE* out,DWORD,BOOL,DWORD){*out=(HANDLE)(ULONG_PTR)++nextHandle;handles[*out]=threadId;return TRUE;}
 static BOOL WINAPI Close(HANDLE h){handles.erase(h);++closed;return TRUE;}static DWORD WINAPI Wait(HANDLE h,DWORD){auto i=handles.find(h);return i!=handles.end()&&aliveThreads[i->second]?WAIT_TIMEOUT:WAIT_OBJECT_0;}
@@ -59,6 +59,17 @@ g_rawBufferReaders.clear();
 int main(){
  Reset();threadId=20;Read();threadId=10;const auto key=Key();const int route=EmitRaw(key,a);Check(route==1&&posted==1&&postedTo==a,"unrelated buffer reader never diverts destination keyboard from posted route");
 #ifdef _WIN64
+ Reset();g_cfg.rawmode=2;propertyReads=0;unsigned accepted=0,rejected=0;
+ for(unsigned i=0;i<1500;i++){const int result=EmitRaw(key,a);accepted+=result==2;rejected+=result==6;}
+ Check(accepted==1024&&rejected==476,"1500-packet burst retains exactly capacity and refuses the remaining 476");
+ printf("burst property reads: %u\n",propertyReads);
+ Check(propertyReads<=6000,"burst lifetime validation uses bounded window queries per admission instead of rescanning every packet through USER32");
+ unsigned drained=0;for(unsigned i=0;i<1025;i++){const auto count=Read();if(!count||count==(UINT)-1)break;drained+=count;}
+ Check(drained==1024&&g_rawQ.empty(),"capacity burst drains all 1024 retained packets exactly once");
+ Reset();g_cfg.rawmode=2;EmitRaw(key,a);tick+=9999;EmitRaw(key,a);tick+=2;
+ Check(Read()==1,"expiry is checked per packet even when packets share a window generation");
+ Reset();g_cfg.rawmode=2;EmitRaw(key,a);EmitRaw(key,b);windows[b].property=0;
+ Check(Read()==1&&g_rawQ.empty(),"one revoked destination cannot borrow another destination's valid generation");
  Reset();threadId=10;Read();EmitRaw(key,a);Check(Read()==1,"positive control destination buffer reader receives one synthetic packet");
  Reset();threadId=10;Read();EmitRaw(key,a);threadId=20;Check(Read()==0&&g_keyTrace['W'].raw_buffer.reads==0,"foreign thread cannot drain or claim destination virtual key");threadId=10;Check(Read()==1&&g_keyTrace['W'].raw_buffer.reads==1,"registered destination thread receives its own buffered key");
  Reset();threadId=10;Read();EmitRaw(key,a);windows[a].property=0;Check(Read()==0,"window-generation revocation discards queued virtual key");
