@@ -64,7 +64,7 @@ if (cmd === "capture" && rest[1]) {
 }
 if (cmd === "capture-burst" && rest[1] && (scen.replies?.["capture-burst"]?.ok ?? true) !== false)
   writeFileSync(rest[1], Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
-let rep = scen.replies?.[cmd] ?? (cmd === "help" ? { ok: true, text_word_boundary_version: 1 } : { ok: true });
+let rep = scen.replies?.[cmd] ?? (cmd === "help" ? { ok: true, text_word_boundary_version: 1, text_line_match_version:1 } : { ok: true });
 if (cmd === "capture" && rep.ok !== false && rest[1] && rep.path === undefined) rep = { ...rep, path: rest[1] };
 if (rep._delay_ms) await sleep(rep._delay_ms);
 if (rep._stderr) process.stderr.write(rep._stderr);

@@ -1,6 +1,7 @@
 // Capture-only derivative of tracked test/vi_char_spies.h (paired-safety commit).
 // Ordinary MinHook is separate from the injected DLL's renamed MinHook instance.
-// No Probe/entry-replacement helper is included. ALL write spies are terminal.
+// No Probe/entry-replacement helper is included. Default write spies are terminal;
+// a typed SetWindowPos override may admit only proved own offscreen geometry.
 #pragma once
 #include <windows.h>
 #include <atomic>
@@ -56,10 +57,14 @@ inline bool Add(const char* name, void* detour) {
     if (MH_CreateHook(entry, detour, &original) != MH_OK || !original || MH_EnableHook(entry) != MH_OK || !Reaches(entry, detour)) return false;
     hooks.push_back({entry, detour, original}); return true;
 }
-inline bool Install() {
+using WindowPosition=BOOL(WINAPI*)(HWND,HWND,int,int,int,int,UINT);
+// The optional fixture dispatcher must refuse all but proved own, nonactivating
+// offscreen geometry. All default write spies remain terminal absorbers.
+inline bool Install(WindowPosition position=&WindowPos) {
+    if(!position)return false;
     if (MH_Initialize() != MH_OK) return false;
     const char* names[] = {"SetCursorPos", "SetPhysicalCursorPos", "ClipCursor", "SendInput", "mouse_event", "SetForegroundWindow", "BringWindowToTop", "SetActiveWindow", "SetFocus", "SwitchToThisWindow", "AttachThreadInput", "SetCapture", "ReleaseCapture", "AllowSetForegroundWindow", "LockSetForegroundWindow", "SetWindowPos", "ShowWindow", "ShowWindowAsync"};
-    void* detours[] = {reinterpret_cast<void*>(&Position), reinterpret_cast<void*>(&Position), reinterpret_cast<void*>(&Clip), reinterpret_cast<void*>(&Send), reinterpret_cast<void*>(&Mouse), reinterpret_cast<void*>(&Foreground), reinterpret_cast<void*>(&Foreground), reinterpret_cast<void*>(&Focus), reinterpret_cast<void*>(&Focus), reinterpret_cast<void*>(&Switch), reinterpret_cast<void*>(&Attach), reinterpret_cast<void*>(&Capture), reinterpret_cast<void*>(&Release), reinterpret_cast<void*>(&Permission), reinterpret_cast<void*>(&LockPermission), reinterpret_cast<void*>(&WindowPos), reinterpret_cast<void*>(&Show), reinterpret_cast<void*>(&Show)};
+    void* detours[] = {reinterpret_cast<void*>(&Position), reinterpret_cast<void*>(&Position), reinterpret_cast<void*>(&Clip), reinterpret_cast<void*>(&Send), reinterpret_cast<void*>(&Mouse), reinterpret_cast<void*>(&Foreground), reinterpret_cast<void*>(&Foreground), reinterpret_cast<void*>(&Focus), reinterpret_cast<void*>(&Focus), reinterpret_cast<void*>(&Switch), reinterpret_cast<void*>(&Attach), reinterpret_cast<void*>(&Capture), reinterpret_cast<void*>(&Release), reinterpret_cast<void*>(&Permission), reinterpret_cast<void*>(&LockPermission), reinterpret_cast<void*>(position), reinterpret_cast<void*>(&Show), reinterpret_cast<void*>(&Show)};
     for (unsigned n = 0; n < sizeof(names) / sizeof(names[0]); ++n) if (!Add(names[n], detours[n])) return false;
     return true;
 }

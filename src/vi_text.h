@@ -11,6 +11,7 @@
 //  * hits are returned in reading order (rows top to bottom, left to right inside a row); --nth is 1-based on that order.
 //  * a hit's box is the union of the OCR words it touches (a match starting mid-word boxes the whole word).
 #pragma once
+#define VI_TEXT_LINE_MATCH 1
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -34,7 +35,7 @@ struct Hit {
     std::wstring line_text;
     std::wstring query;                  // populated by multi-query CLI search; not OCR confidence
 };
-struct Options { bool exact = false; int fuzzy = 0; bool whole_word = false; };
+struct Options { bool exact = false; int fuzzy = 0; bool whole_word = false; bool exact_line = false; };
 
 inline std::wstring Lower(std::wstring s) {
     if (!s.empty()) CharLowerBuffW(&s[0], static_cast<DWORD>(s.size()));
@@ -84,6 +85,7 @@ inline void FindInLine(const Line& line, int lineIndex, const std::wstring& quer
     };
     for (size_t pos = s.find(q); pos != std::wstring::npos; pos = s.find(q, pos + q.size())) {
         const size_t end = pos + q.size() - 1;
+        if(opt.exact_line&&(pos!=0||end+1!=s.size()))continue;
         if ((opt.exact || opt.whole_word) && !(wordStart[pos] && wordEnd[end])) continue;
         addHit(owner[pos], owner[end], 1.0);
     }
@@ -96,6 +98,7 @@ inline void FindInLine(const Line& line, int lineIndex, const std::wstring& quer
                 joined += opt.exact ? t : Lower(t);
                 if (joined.size() > q.size() + static_cast<size_t>(opt.fuzzy)) break;
                 if (joined.size() + static_cast<size_t>(opt.fuzzy) < q.size()) continue;
+                if(opt.exact_line&&(i!=0||j+1!=n))continue;
                 const int d = Edits(joined, q);
                 if (d == 0 || d > opt.fuzzy) continue;
                 bool overlaps = false;

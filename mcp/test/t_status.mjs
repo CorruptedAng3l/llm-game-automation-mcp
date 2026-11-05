@@ -44,6 +44,15 @@ try {
   t.setScenario({ replies: { status: fullStatus({ owner_active: false, cursor_effective: "virtual" }) } });
   const oi = await t.call("status", { pid });
   check(!oi.json?.owner_active && oi.json?.cursor_effective === "virtual" && !/owner_active/.test((oi.json?.warnings ?? []).join(" ")), "inactive owner: cursor_effective shown, no warning");
+  t.setScenario({ replies: { status: fullStatus({ cursor_guard: { owner_active: true, cursor_effective: "real" } }) } });
+  const nested = await t.call("status", { pid });
+  check(nested.json?.owner_active === true && nested.json?.cursor_effective === "real" && /owner_active/.test((nested.json?.warnings ?? []).join(" ")), "current nested native ownership and effective cursor reach compact status");
+  t.setScenario({ replies: { status: fullStatus({ cursor_guard: { owner_active: false, cursor_effective: "virtual" } }) } });
+  const inactive = await t.call("status", { pid });
+  check(!inactive.json?.owner_active && inactive.json?.cursor_effective === "virtual" && !/owner_active/.test((inactive.json?.warnings ?? []).join(" ")), "nested inactive native ownership retains effective cursor without a warning");
+  t.setScenario({ replies: { status: fullStatus({ cursor_guard: { owner_active: "true", cursor_effective: 1 } }) } });
+  const malformed = await t.call("status", { pid });
+  check(!malformed.json?.owner_active && malformed.json?.cursor_effective === undefined, "malformed nested ownership is not coerced into active evidence");
 
   t.setScenario({ replies: { status: { ok: false, error: "boom" } } });
   const e = await t.call("status", { pid });

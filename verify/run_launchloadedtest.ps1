@@ -1,0 +1,8 @@
+param([string]$RepoRoot=(Split-Path $PSScriptRoot -Parent),[string]$Out="$PSScriptRoot\_out\launch_loaded",[string]$ServerJs='')
+$ErrorActionPreference='Stop';$RepoRoot=(Resolve-Path -LiteralPath $RepoRoot).Path;$run=Join-Path ([IO.Path]::GetFullPath($Out)) ('run_'+[guid]::NewGuid().ToString('N'))
+[void](New-Item -ItemType Directory -Force $run,"$run\temp");$env:TEMP="$run\temp";$env:TMP=$env:TEMP;$errorText=$null;$result=$null;$code=$null
+$oldServer=$env:VINPUT_TEST_SERVER;if($ServerJs){$env:VINPUT_TEST_SERVER=(Resolve-Path -LiteralPath $ServerJs).Path}else{Remove-Item Env:VINPUT_TEST_SERVER -ErrorAction SilentlyContinue}
+Push-Location "$RepoRoot\mcp"
+try{& npm run build *> "$run\build.log";if($LASTEXITCODE-ne0){throw 'TypeScript build failed'};& node test/t_launch_loaded.mjs *> "$run\test.log";$code=$LASTEXITCODE;$line=@(Get-Content -LiteralPath "$run\test.log"|Where-Object {$_.StartsWith('LAUNCH_LOADED_RESULT ')})|Select-Object -Last 1;if(-not$line){throw 'missing complete launch-loaded result'};$result=$line.Substring(21)|ConvertFrom-Json}catch{$errorText=$_.Exception.Message}finally{Pop-Location;if($null-eq$oldServer){Remove-Item Env:VINPUT_TEST_SERVER -ErrorAction SilentlyContinue}else{$env:VINPUT_TEST_SERVER=$oldServer}}
+@{completed=($result.completed-eq$true-and-not$errorText);passed=$result.passed;failed=$result.failed;exit=$code;error=$errorText;result=$result;scope='pure receipt model and fake-target actual MCP; no native game or process-state proof'}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath "$run\result.json" -Encoding utf8NoBOM
+Write-Output "RESULT $($result.passed) PASS / $($result.failed) FAIL $run";if($errorText-or$code-ne0-or$result.failed){exit 1};exit 0

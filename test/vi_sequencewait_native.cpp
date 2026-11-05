@@ -24,7 +24,7 @@ constexpr const wchar_t* Property=L"vi.sequencewait.fixture.v1";
 int lifetimeToken=0;HWND target=nullptr;DWORD uiThread=0;FILE* output=nullptr;std::mutex logMutex,stateMutex;bool exiting=false;
 struct State {
  U64 epoch=1,lastTick=0,sampleSerial=0,polls=0,firstChordTick=0,completedTick=0,lastToken=0,captures=0,edgeRecords=0,wmRecords=0,recordsDropped=0;
- DWORD sampleThread=0;unsigned mask=0,keyStateMask=0,keyboardMask=0;bool keyboardOk=false,chordSeen=false,completed=false;
+ DWORD sampleThread=0;unsigned mask=0,keyStateMask=0,keyboardMask=0,eventCaptures=0;bool keyboardOk=false,chordSeen=false,completed=false,eventVisible=false;
  std::array<U64,3> reads{},high{},down{},up{},wmDown{},wmUp{};
 };
 State state;std::atomic<U64> nextSample{0};
@@ -65,17 +65,22 @@ void Snapshot(U64 token,const char* event="snapshot"){
 BOOL WINAPI SurrogatePrint(HWND h,HDC dc,UINT){
  if(!Own(h)||!dc||GetObjectType(dc)!=OBJ_MEMDC){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
  RECT client{};if(!GetClientRect(h,&client)||client.left!=0||client.top!=0||client.right!=640||client.bottom!=480){SetLastError(ERROR_INVALID_WINDOW_HANDLE);return FALSE;}
- if(!Poll()){SetLastError(ERROR_RETRY);return FALSE;}const State value=CopyState();const bool done=value.completed&&value.mask==0;const int red=done?30:value.chordSeen?220:30,green=done?180:value.chordSeen?160:80,blue=done?60:value.chordSeen?40:150;
+ // Private control2 arms an explicit known-source change on the second capture,
+ // so the real MCP observer must see a baseline and a later different image.
+ if(!Poll()){SetLastError(ERROR_RETRY);return FALSE;}{std::lock_guard<std::mutex> lock(stateMutex);if(state.eventCaptures&&!--state.eventCaptures)state.eventVisible=true;}const State value=CopyState();const bool done=value.completed&&value.mask==0;const int red=done?30:value.chordSeen?220:value.eventVisible?80:30,green=done?180:value.chordSeen?160:value.eventVisible?120:80,blue=done?60:value.chordSeen?40:value.eventVisible?210:150;
  HBRUSH brush=CreateSolidBrush(RGB(red,green,blue));if(!brush)return FALSE;const bool painted=FillRect(dc,&client,brush)!=0;DeleteObject(brush);if(!painted)return FALSE;
+ // A separate constant ROI supports a non-triggering guard while the event ROI
+ // and known consumer state change. Both are painted into caller-owned memory.
+ RECT constantRegion{0,0,32,32};brush=CreateSolidBrush(RGB(40,40,40));if(!brush)return FALSE;const bool constantPainted=FillRect(dc,&constantRegion,brush)!=0;DeleteObject(brush);if(!constantPainted)return FALSE;
  U64 capture=0;{std::lock_guard<std::mutex> lock(stateMutex);capture=++state.captures;}
- Log("{\"event\":\"capture\",\"capture\":%llu,\"epoch\":%llu,\"token\":%llu,\"sample_tick\":%llu,\"sample_serial\":%llu,\"sample_thread\":%lu,\"mask\":%u,\"chord_seen\":%s,\"completed_latch\":%s,\"r\":%d,\"g\":%d,\"b\":%d,\"source\":\"owned-known-state PrintWindow API surrogate; memory DC only\",\"native_printwindow_called\":false}",capture,value.epoch,value.lastToken,value.lastTick,value.sampleSerial,value.sampleThread,value.mask,Bool(value.chordSeen),Bool(value.completed),red,green,blue);return TRUE;
+ Log("{\"event\":\"capture\",\"capture\":%llu,\"epoch\":%llu,\"token\":%llu,\"sample_tick\":%llu,\"sample_serial\":%llu,\"sample_thread\":%lu,\"mask\":%u,\"chord_seen\":%s,\"completed_latch\":%s,\"event_visible\":%s,\"constant_roi\":true,\"r\":%d,\"g\":%d,\"b\":%d,\"source\":\"owned-known-state PrintWindow API surrogate; memory DC only\",\"native_printwindow_called\":false}",capture,value.epoch,value.lastToken,value.lastTick,value.sampleSerial,value.sampleThread,value.mask,Bool(value.chordSeen),Bool(value.completed),Bool(value.eventVisible),red,green,blue);return TRUE;
 }
 LRESULT CALLBACK Window(HWND h,UINT message,WPARAM w,LPARAM l){
  if(message==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
  if(message==WM_KEYDOWN||message==WM_KEYUP||message==WM_SYSKEYDOWN||message==WM_SYSKEYUP){
   const bool down=message==WM_KEYDOWN||message==WM_SYSKEYDOWN;for(unsigned i=0;i<3;i++)if(w==static_cast<WPARAM>(Keys[i])||(i==2&&(w==VK_LSHIFT||w==VK_RSHIFT))){bool emit=false;U64 epoch=0;{std::lock_guard<std::mutex> lock(stateMutex);if(down)++state.wmDown[i];else ++state.wmUp[i];epoch=state.epoch;if(state.wmRecords<256){++state.wmRecords;emit=true;}else ++state.recordsDropped;}if(emit)Log("{\"event\":\"key_message\",\"epoch\":%llu,\"tick\":%llu,\"name\":\"%s\",\"vk\":%llu,\"down\":%s,\"message\":%u}",epoch,GetTickCount64(),Names[i],static_cast<U64>(w),Bool(down),message);break;}
  }
- if(message==ControlMessage){const U64 token=static_cast<U64>(static_cast<ULONG_PTR>(l));bool ok=Own(h);Poll();if(ok&&w==1){std::lock_guard<std::mutex> lock(stateMutex);if(state.mask)ok=false;else{const U64 next=state.epoch+1;state=State{};state.epoch=next;state.lastTick=GetTickCount64();}}else if(ok&&w==8)exiting=true;else if(w!=0)ok=false;{std::lock_guard<std::mutex> lock(stateMutex);state.lastToken=token;}Snapshot(token);Log("{\"event\":\"control\",\"token\":%llu,\"action\":%llu,\"ok\":%s}",token,static_cast<U64>(w),Bool(ok));return 0;}
+ if(message==ControlMessage){const U64 token=static_cast<U64>(static_cast<ULONG_PTR>(l));bool ok=Own(h);Poll();if(ok&&w==1){std::lock_guard<std::mutex> lock(stateMutex);if(state.mask)ok=false;else{const U64 next=state.epoch+1;state=State{};state.epoch=next;state.lastTick=GetTickCount64();}}else if(ok&&w==2){std::lock_guard<std::mutex> lock(stateMutex);if(state.mask)ok=false;else{state.eventCaptures=2;state.eventVisible=false;}}else if(ok&&w==8)exiting=true;else if(w!=0)ok=false;{std::lock_guard<std::mutex> lock(stateMutex);state.lastToken=token;}Snapshot(token);Log("{\"event\":\"control\",\"token\":%llu,\"action\":%llu,\"ok\":%s}",token,static_cast<U64>(w),Bool(ok));return 0;}
  if(message==WM_CLOSE||message==WM_DESTROY){exiting=true;return 0;}return DefWindowProcW(h,message,w,l);
 }
 bool Verify(){for(const auto& hook:capture_spy::hooks)if(!capture_spy::Reaches(hook.entry,hook.detour))return false;return true;}

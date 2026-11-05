@@ -55,11 +55,16 @@ const FIX = "Fix: set the game to windowed or borderless in its own settings or 
 /** Read frame health out of a status reply: nothing presented, and exclusive-fullscreen refusals piling up. */
 export function diagnoseFrames(s: Obj): FrameDiag {
   const c = (s.counters ?? {}) as Record<string, unknown>;
-  const present = typeof c.present === "number" ? c.present : undefined;
+  const present = typeof s.frames === "number" ? s.frames : typeof c.present === "number" ? c.present : undefined;
   const refusals = typeof c.fs_refused === "number" ? c.fs_refused : 0;
   const nothingPresented = present === 0;
   const stuck = nothingPresented && refusals > 0;
   const d: FrameDiag = { nothingPresented, refusals, stuck };
+  const d9 = s.d3d9 && typeof s.d3d9 === "object" ? s.d3d9 as Obj : undefined;
+  if (nothingPresented && typeof d9?.render_warning === "string") {
+    d.warning = d9.render_warning;
+    return d;
+  }
   if (stuck) {
     d.warning = `The game has not presented a single frame and tried to enter exclusive fullscreen ${refusals} time(s); vinput refuses ` +
       `that because exclusive fullscreen cannot be captured or driven in the background, so the game is stuck retrying. ${FIX} ` +
@@ -71,6 +76,24 @@ export function diagnoseFrames(s: Obj): FrameDiag {
       "with DirectDraw / GDI, which capture reads through PrintWindow and is fine. If capture stays black, see log and status.";
   }
   return d;
+}
+
+/** Aggregate drops include deliberately isolated unrecognized messages. Owned
+ * delivery is separate evidence and still does not establish application action. */
+export function mouseMessageHealth(s: Obj): Obj | undefined {
+  const c = s.counters && typeof s.counters === "object" ? s.counters as Obj : {};
+  const count = (k: string) => typeof c[k] === "number" && Number.isSafeInteger(c[k]) && (c[k] as number) >= 0 ? c[k] as number : undefined;
+  const total = count("wm_mouse"), dropped = count("wm_mouse_dropped");
+  if (total === undefined || dropped === undefined || dropped > total) return;
+  const ratio = total ? dropped / total : 0;
+  const owned = count("wm_mouse_owned"), delivered = count("wm_mouse_owned_delivered"), ownedDropped = count("wm_mouse_owned_dropped"), unrecognizedDropped = count("wm_mouse_unrecognized_dropped");
+  const out: Obj = { received: total, dropped, drop_ratio: ratio };
+  const known = owned !== undefined && delivered !== undefined && ownedDropped !== undefined && unrecognizedDropped !== undefined && delivered + ownedDropped <= owned && owned <= total;
+  Object.assign(out, known ? { owned_received: owned, owned_delivered: delivered, owned_dropped: ownedDropped, unrecognized_dropped: unrecognizedDropped } : { owned_received: null, owned_delivered: null, owned_dropped: null, unrecognized_dropped: null });
+  if (total >= 20 && ratio >= 0.5) out.warning = `Mouse message isolation suppressed ${dropped} of ${total} messages (${Math.round(ratio * 100)}%). ` +
+    (known ? `${delivered} vinput-owned messages reached the window callback; ${ownedDropped} owned messages were dropped. ` : "This DLL does not separate owned and unrecognized mouse delivery. ") +
+    "Unrecognized sources include real input and application-generated messages; this ratio alone does not identify why a click had no effect. Check capture and trace before retrying.";
+  return out;
 }
 
 /** Completed virtual XInput returns, not key-trace reads or game acceptance. */
@@ -108,6 +131,10 @@ export function compactStatus(s: Obj): Obj {
     warnings.push(`app_active is 0 while the game is in the background: the game believes it is inactive and may ignore input (old DirectDraw-era games often do). ${s.autoactivate === false ? "autoactivate is OFF: set config autoactivate=true. " : "autoactivate is on, so this should clear shortly after the first input. "}If it persists, check the game's own background-input settings.`);
   if (s.minimized === true) warnings.push("The game window is minimized; minimized games stop rendering, so captures go stale. Restore it (keepvisible=true keeps it visible).");
   if (typeof s.hooks_failed === "string" && s.hooks_failed) warnings.push(`Some hooks failed to install: ${s.hooks_failed}. Related input or capture channels may not work.`);
+  const mouse = s.directinput_mouse && typeof s.directinput_mouse === "object" ? s.directinput_mouse as Obj : undefined;
+  if (typeof mouse?.warning === "string") warnings.push(mouse.warning);
+  const messages = mouseMessageHealth(s);
+  if (typeof messages?.warning === "string") warnings.push(messages.warning);
   if (s.anticheat_disabled === true) warnings.push("An anti-cheat module was detected after injection: vinput refuses input and capture commands for this game.");
   const claim = s.claim as { active?: boolean; owner?: string } | undefined;
   const out: Obj = {
@@ -126,8 +153,10 @@ export function compactStatus(s: Obj): Obj {
   if (pad) out.virtual_pad = pad;
   if (claim?.active) out.claimed_by = claim.owner;
   // the owner (human) is using the game window: real input passes through and the virtual cursor stands down until the next agent command
-  if (typeof s.cursor_effective === "string") out.cursor_effective = s.cursor_effective;
-  if (s.owner_active === true) {
+  const cursorGuard = s.cursor_guard && typeof s.cursor_guard === "object" && !Array.isArray(s.cursor_guard) ? s.cursor_guard as Obj : undefined;
+  if (typeof cursorGuard?.cursor_effective === "string") out.cursor_effective = cursorGuard.cursor_effective;
+  else if (typeof s.cursor_effective === "string") out.cursor_effective = s.cursor_effective;
+  if (s.owner_active === true || cursorGuard?.owner_active === true) {
     out.owner_active = true;
     warnings.push("The user is using the game window right now (owner_active): their real mouse and keyboard reach the game and the cursor the game reads is the real one, until your next input command. Expect the picture to change under you; look before you act.");
   }
@@ -139,6 +168,14 @@ export function compactStatus(s: Obj): Obj {
   if (s.edge_contact === true) { out.edge_contact = true; out.edge_sides = s.edge_sides;
     warnings.push("The virtual cursor rests on the window edge (edge_contact): games with edge scrolling pan the view while it stays there. Move it inside, or use park_cursor."); }
   if (fsPolicy(s) !== undefined) out.fullscreen = s.fullscreen;
+  if (s.d3d9 && typeof s.d3d9 === "object") {
+    const d9 = s.d3d9 as Obj;
+    if (d9.hooked || d9.present_hooked || d9.render_warning) out.d3d9 = Object.fromEntries(
+      ["hooked", "present_hooked", "present_attempts", "presented", "last_present_hresult", "device_lost_returns", "capture_failures", "late_probe_attempted", "late_probe_9_hresult", "late_probe_ex_hresult", "render_warning"]
+        .filter(k => d9[k] !== undefined).map(k => [k, d9[k]]));
+  }
+  if (mouse) out.directinput_mouse = mouse;
+  if (messages) out.mouse_messages = messages;
   out.warnings = warnings;
   return out;
 }

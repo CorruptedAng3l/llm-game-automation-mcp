@@ -3,7 +3,7 @@
 import { type CliResult, runVinput } from "./vinput.js";
 
 export type SequenceWaitContext = { pid: number; owner: string; prefix: string[]; epoch: number; currentEpoch: () => number };
-type Job = Record<string, unknown> & { job_id: string; job_state: string; job_complete: boolean; requested_ms: number };
+export type Job = Record<string, unknown> & { job_id: string; job_state: string; job_complete: boolean; requested_ms: number };
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const terminal = new Set(["completed", "cancelled", "failed"]);
@@ -13,7 +13,7 @@ function identity(id: unknown, pid: number): id is string {
   return !!m && BigInt(m[1]) === BigInt(pid) && BigInt(m[1]) <= 4294967295n &&
     BigInt(m[2]) <= 18446744073709551615n && BigInt(m[3]) <= 18446744073709551615n;
 }
-function job(value: unknown, ctx: SequenceWaitContext, accepted: boolean, id?: string): Job | undefined {
+export function sequenceJob(value: unknown, ctx: SequenceWaitContext, accepted: boolean, id?: string): Job | undefined {
   const j = object(value);
   if (!j || !identity(j.job_id, ctx.pid) || (id !== undefined && j.job_id !== id) || j.owner !== ctx.owner || j.job_kind !== "sequence" ||
       j.accepted !== accepted || typeof j.job_complete !== "boolean" || typeof j.job_state !== "string" ||
@@ -46,7 +46,7 @@ export function sequenceWaitError(initial: CliResult, outcome: string, error: st
     ...(completed ? {} : { error }) } };
 }
 export async function waitSequence(initial: CliResult, ctx: SequenceWaitContext, explicitTimeout?: number): Promise<CliResult> {
-  const start = performance.now(), admitted = job(initial.json, ctx, true);
+  const start = performance.now(), admitted = sequenceJob(initial.json, ctx, true);
   if (!admitted) return sequenceWaitError(initial, "invalid_ack", "sequence may have started, but its generation-bound acknowledgement is invalid; no input was retried", 0, explicitTimeout);
   const timeout = explicitTimeout ?? Math.min(120000, Math.ceil(admitted.requested_ms) + 5000), deadline = start + timeout;
   let last = admitted;
@@ -60,7 +60,7 @@ export async function waitSequence(initial: CliResult, ctx: SequenceWaitContext,
     const outer = object(status.json);
     if (!status.ok) return sequenceWaitError(initial, "status_unavailable",
       `sequence status unavailable; no input was retried: ${String(outer?.error ?? "transport failure").slice(0, 1000)}`, performance.now() - start, timeout, last);
-    const observed = job(outer?.job, ctx, false, admitted.job_id);
+    const observed = sequenceJob(outer?.job, ctx, false, admitted.job_id);
     if (!observed) return sequenceWaitError(initial, "invalid_status", "status did not identify the exact admitted sequence generation/owner or had inconsistent state; no input was retried", performance.now() - start, timeout, last);
     last = observed;
     if (last.job_complete) {

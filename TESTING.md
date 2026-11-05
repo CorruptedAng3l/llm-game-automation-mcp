@@ -27,6 +27,13 @@ other foreground-taking tools on your machine use, or they use `build\foreground
 | script | covers |
 |---|---|
 | `run_selftest.ps1` | every input channel on x64 / x86, injected DLL and compiled-in mode, D3D11 capture, background isolation; then every background case of `vi_suiteplan.ps1` (the scripts below and the ones in the next rows) |
+| `run_d3d9presenttest.ps1`, `run_d3d9lifetimetest.ps1` | D3D9 Present-frame capture, devices found after creation, and no probe devices after a refused fullscreen create |
+| `run_launchaffinitytest.ps1`, `run_launchloadedtest.ps1`, `run_launchsnapshotmodel.ps1` | optional CPU affinity applied before startup; loaded-but-failed launches and unconfirmed claim TTL stay visible; launcher ancestry is fenced against PID reuse |
+| `run_sequencedeadlinemodel.ps1`, `run_sequenceguardmemory.ps1` | key sequences anchored to QPC deadlines with cumulative drift; event-anchored starts and observer expiry |
+| `run_holduntilchangetest.ps1` | one held input released when a scoped screen region changes |
+| `run_mousemessagehealthtest.ps1`, `run_mousemodifiertest.ps1` | owned vs dropped mouse message accounting; scroll and clicks with held modifier keys |
+| `run_ocrreadtest.ps1`, `run_textlinetest.ps1` | one retry of an empty OCR read; default text clicks match a complete OCR line |
+| `run_inputscopememory.ps1`, `run_relativescopetest.ps1`, `run_visualcameratest.ps1`, `run_visualcapturebuildtest.ps1` | background input and camera motion fenced to the captured window; visual camera landmark calibration |
 | `run_launchfollowtest.ps1` | `launch` follows a launcher's child processes to the real game window and returns interactive launchers as-is |
 | `run_di8mousetest.ps1` | DirectInput8 mouse reads are fed from vinput across distinct polling implementations |
 | `run_claimedkeybdnativetest.ps1`, `run_claimedkeybdmemory.py` | a claimed target's own `keybd_event` calls are fenced off the real keyboard, and readiness reports the guard |

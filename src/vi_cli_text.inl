@@ -40,6 +40,9 @@ static bool ParseTextQuery(const Args& a, const char* cmd, TextQuery& q, std::st
     const std::string wholeWord = GetOpt(a, "whole-word", "false");
     if (wholeWord != "true" && wholeWord != "false") { err = "--whole-word accepts true or false"; return false; }
     q.opt.whole_word = wholeWord == "true";
+    const std::string exactLine=GetOpt(a,"exact-line","false");
+    if(exactLine!="true"&&exactLine!="false"){err="--exact-line accepts true or false";return false;}
+    q.opt.exact_line=exactLine=="true";
     q.opt.fuzzy = atoi(GetOpt(a, "fuzzy", "0").c_str());
     if (q.opt.fuzzy < 0 || q.opt.fuzzy > 3) { err = "--fuzzy must be 0..3"; return false; }
     q.preprocess = GetOpt(a, "preprocess", "auto");
@@ -94,7 +97,9 @@ static bool SearchText(DWORD pid, const Args& a, const TextQuery& q, Frame& f, s
             auto h = FindQueries(l, q); RememberOcr(l, lines);
             if (!h.empty()) { lines = std::move(l); hits = std::move(h); return true; }
         }
-        if (pass.tiles || (!full && !HasOpt(a, "no-tiles"))) {
+        // A crop can turn a paragraph fragment into an apparent standalone label.
+        // Strict line selection must keep the full requested capture context.
+        if (!q.opt.exact_line&&(pass.tiles || (!full && !HasOpt(a, "no-tiles")))) {
             ++scan.passes;
             if (!OcrTiles(f, pass.scale, a, l, lang, err, pass.mode)) return false;
             analyzed = true;
@@ -102,7 +107,7 @@ static bool SearchText(DWORD pid, const Args& a, const TextQuery& q, Frame& f, s
             if (!h.empty()) { lines = std::move(l); hits = std::move(h); return true; }
         }
     }
-    if (!analyzed) { err = "no OCR pass fits OcrEngine.MaxImageDimension; use --region or remove --no-tiles"; return false; }
+    if (!analyzed) { err = q.opt.exact_line?"no complete-line OCR pass fits OcrEngine.MaxImageDimension; use --region; tiled paragraph fragments are not eligible":"no OCR pass fits OcrEngine.MaxImageDimension; use --region or remove --no-tiles"; return false; }
     return true;
 }
 
@@ -176,7 +181,7 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
         ++polls;
         const DWORD elapsed = GetTickCount() - t0;
         std::string stats = "\"elapsed_ms\":" + std::to_string(elapsed) + ",\"polls\":" + std::to_string(polls) +
-            ",\"ocr_pass\":\"" + scan.preprocessing + "\",\"ocr_scale\":" + Num(scan.scale) + ",\"ocr_passes\":" + std::to_string(scan.passes) + ",\"capture_space_updated\":false,\"text_word_boundary_version\":1,\"whole_word\":" + (q.opt.whole_word || q.opt.exact ? "true" : "false") + ",\"case_sensitive\":" + (q.opt.exact ? "true" : "false");
+            ",\"ocr_pass\":\"" + scan.preprocessing + "\",\"ocr_scale\":" + Num(scan.scale) + ",\"ocr_passes\":" + std::to_string(scan.passes) + ",\"capture_space_updated\":false,\"text_word_boundary_version\":1,\"whole_word\":" + (q.opt.whole_word || q.opt.exact ? "true" : "false") + ",\"case_sensitive\":" + (q.opt.exact ? "true" : "false")+",\"text_line_match_version\":1,\"exact_line\":"+(q.opt.exact_line?"true":"false")+",\"candidate_limit\":20,\"candidates_truncated\":"+(hits.size()>20?"true":"false");
         if (mode == 0) {
             if (!hits.empty()) {
                 if (nth == 0 && hits.size() > 1)
@@ -187,9 +192,9 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
                 const int index = nth ? nth : 1; const vi_text::Hit& h = hits[(size_t)index - 1];
                 const vi_text::Box b = ToClient(f, h.box); const int cx = b.x + b.w / 2, cy = b.y + b.h / 2;
                 std::string match = HitJson(f, lines, h, index);
-                if (HasOpt(a, "dry-run")) return {true, "{\"ok\":true,\"clicked\":false,\"dry_run\":true,\"match\":" + match + ",\"match_count\":" + std::to_string(hits.size()) + "," + kNoConfidence + "," + stats + "}"};
+                if (HasOpt(a, "dry-run")) return {true, "{\"ok\":true,\"clicked\":false,\"dry_run\":true,\"match\":" + match + ",\"match_count\":" + std::to_string(hits.size()) + ",\"candidates\":"+CandidatesJson(f,lines,hits)+"," + kNoConfidence + "," + stats + "}"};
                 std::string resp; bool ok = Request(pid, ClickJson(a, cx, cy), resp) && resp.find("\"ok\":true") != std::string::npos;
-                return {ok, std::string("{\"ok\":") + (ok ? "true" : "false") + ",\"clicked\":" + (ok ? "true" : "false") + ",\"match\":" + match + ",\"match_count\":" + std::to_string(hits.size()) + "," + kNoConfidence + "," + stats + ",\"click\":" + resp + "}"};
+                return {ok, std::string("{\"ok\":") + (ok ? "true" : "false") + ",\"clicked\":" + (ok ? "true" : "false") + ",\"match\":" + match + ",\"match_count\":" + std::to_string(hits.size()) + ",\"candidates\":"+CandidatesJson(f,lines,hits)+"," + kNoConfidence + "," + stats + ",\"click\":" + resp + "}"};
             }
         } else if (gone ? hits.empty() : !hits.empty()) {
             std::string match = hits.empty() ? "null" : HitJson(f, lines, hits[(size_t)((nth ? nth : 1) <= (int)hits.size() ? (nth ? nth : 1) : 1) - 1], nth ? nth : 1);
@@ -200,7 +205,7 @@ static Reply CmdText(DWORD pid, const Args& a, int mode) {
                 ",\"candidate_score_note\":\"text edit similarity only; suggestions were not accepted or clicked\"";
             if (mode == 0 && HasOpt(a, "optional")) return {true, "{\"ok\":true,\"clicked\":false,\"skipped\":true,\"reason\":\"text not present (--optional)\"," + diagnostics + "," + stats + "}"};
             if (mode == 1 && !gone && HasOpt(a, "optional")) return {true, "{\"ok\":true,\"found\":false,\"skipped\":true,\"reason\":\"text not present (--optional)\"," + diagnostics + "," + stats + "}"};
-            const std::string what = mode == 0 ? "text not found" : gone ? "text still present" : "text not found";
+            const std::string what = mode == 0&&q.opt.exact_line?"text not found as a complete OCR line (inspect candidates or explicitly use --exact-line=false for text inside a paragraph)":mode == 0 ? "text not found" : gone ? "text still present" : "text not found";
             return Fail(std::string(name) + ": " + what + (timeout > 0 ? " before timeout" : ""),
                         std::string("\"timed_out\":") + (timeout > 0 ? "true" : "false") + ",\"match_count\":" + std::to_string(hits.size()) + "," + diagnostics + "," + stats);
         }

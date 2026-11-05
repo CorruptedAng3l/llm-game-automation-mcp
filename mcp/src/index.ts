@@ -17,10 +17,16 @@ import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 import { completedJobView, isCompletedJobOutcome } from "./completedjob.js";
 import { burstImage } from "./burstimage.js";
-import { requireSequenceWait, sequenceWaitError, waitSequence } from "./sequencewait.js";
+import { requireSequenceWait, sequenceWaitError, waitSequence, sequenceJob } from "./sequencewait.js";
 import { requireTextBoundary } from "./textboundary.js";
+import { keyScheduleLines } from "./keyschedule.js";
+import { withMouseModifiers } from "./mousemodifiers.js";
+import { presentOcr } from "./ocr.js";
+import { registerCameraHelpers } from "./camerahelpers.js";
+import { loadedLaunchFailure } from "./launchstate.js";
+import { prepareSequenceConditions, guardSequence, type PreparedConditions } from "./sequenceconditions.js";
 
-const VERSION = "0.2.6";
+const VERSION = "0.2.7";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -178,6 +184,7 @@ tool("launch", "Launch a game",
     follow_created: z.string().regex(/^\d+$/).optional().describe("process_created from the launcher receipt; decimal string retains its identity after the launcher exits."),
     args: z.string().optional().describe("Command line arguments for the game, e.g. \"-windowed -width 1280 -height 720\". Many games ignore size switches because a saved setting wins: launch then warns (warnings, requested_size_ignored) when the window's client size differs from the size you asked for, so set the size in the game's own options."),
     cwd: z.string().optional().describe("Working directory for the game (exe launches only). Default: the exe's own folder, which is what most old games need, so leave it out unless the game wants something else."),
+    cpu_affinity: z.string().regex(/^0[xX][0-9a-fA-F]+$/).optional().describe("Optional nonzero hexadecimal CPU mask for direct exe launches, applied before the first instruction. Example: '0xF' uses four cores, matching Prototype's Restrict Cores.bat. Does not apply to Steam/AUMID/follow_pid launches or assert a relaunched child's affinity."),
     aumid: z.string().optional().describe("UWP / Xbox app user model id, e.g. 'Publisher.Game_abc123!App'."),
     steam_appid: z.string().optional().describe("Steam app id; starts the game through Steam (needs wait_exe)."),
     wait_exe: z.string().optional().describe("Executable name to wait for, e.g. 'Game-Win64-Shipping.exe' (launchers, Steam relaunches)."),
@@ -196,6 +203,8 @@ tool("launch", "Launch a game",
     const n = [a.exe, a.aumid, a.steam_appid, a.follow_pid].filter((v) => v).length;
     if (n !== 1) return fail("give exactly one of exe, aumid, steam_appid or follow_pid");
     if (a.follow_created !== undefined && !a.follow_pid) return fail("follow_created requires follow_pid");
+    if (a.cpu_affinity !== undefined && !a.exe) return fail("cpu_affinity requires a direct exe launch");
+    if (a.cpu_affinity !== undefined && /^0x0+$/i.test(a.cpu_affinity)) return fail("cpu_affinity must be nonzero");
     let cwd: string | undefined;
     if (a.cwd) {
       if (!a.exe) return fail("cwd only applies to exe launches (aumid / steam_appid games choose their own folder)");
@@ -206,6 +215,7 @@ tool("launch", "Launch a game",
     const argv = ["--owner", OWNER, "launch",
       ...opt("--exe", a.exe), ...opt("--aumid", a.aumid), ...opt("--steam", a.steam_appid), ...opt("--wait-exe", a.wait_exe),
       ...opt("--follow-pid", a.follow_pid), ...opt("--follow-created", a.follow_created),
+      ...opt("--cpu-affinity", a.cpu_affinity),
       ...(a.args === undefined ? [] : [`--args=${a.args}`]), ...opt("--cwd", cwd), ...opt("--early", a.early), ...opt("--settle", a.settle_s), ...opt("--timeout", a.timeout_s),
       ...opt("--lock", a.lock), ...opt("--claim-ttl", a.claim ? a.claim_ttl_s ?? 3600 : undefined)];
     const r = await runVinput(argv, ((a.timeout_s ?? 240) + (a.settle_s ?? 5) + 120) * 1000);
@@ -213,6 +223,7 @@ tool("launch", "Launch a game",
     const candidatePid = (r.json as { pid?: unknown } | null)?.pid;
     const lp = r.ok && typeof candidatePid === "number" && Number.isSafeInteger(candidatePid) && candidatePid > 0 ? candidatePid : undefined;
     const extra: Record<string, unknown> = {};
+    if (!r.ok) Object.assign(extra, loadedLaunchFailure(r.json, a.claim === true, a.claim_ttl_s));
     let claimOk = true, compoundOk = r.ok;
     if (r.ok && a.claim && !lp) {
       compoundOk = claimOk = false; extra.claim_ok = false;
@@ -636,38 +647,43 @@ const actionObservation = (a: CaptureImageOptions & { pid: number; capture_settl
 
 tool("ocr", "Read text on screen",
   "OCR the current frame with the built-in Windows OCR engine. Returns text and lines[] with boxes [x,y,w,h] in client " +
-  "pixels (words[] too when words:true). Small or stylised text: use region and scale 2.",
+  "pixels (words[] too when words:true). Empty results automatically try bounded upscale/contrast passes on the SAME captured image. " +
+  "Nonempty OCR is not retried and may still be wrong. text_only omits geometry and verbose metadata while preserving capture/timing provenance.",
   {
     pid, region: regionSchema.optional(),
     scale: z.number().min(1).max(4).optional().describe("Upscale before OCR (2 helps small text)."),
     lang: z.string().optional().describe("OCR language tag, e.g. en-US (default: the user's profile language)."),
     words: z.boolean().optional().describe("Also return every word with its box (bigger reply)."),
     tiles: z.boolean().optional().describe("Tiled second pass that finds words the full-frame pass drops (default true; false is faster)."),
+    preprocess: z.enum(['none','gray','contrast','threshold','invert','auto']).optional().describe('Initial preprocessing. An explicit mode is retained during retries; auto starts with contrast.'),
+    retry_empty: z.boolean().optional().describe('Retry successful empty OCR with bounded upscale/contrast passes on the same capture (default true). Explicit scale is respected; false keeps one requested-scale pass.'),
+    text_only: z.boolean().optional().describe('Compact text/count plus selected pass and capture/timing provenance; omit line/word boxes and confidence prose.'),
   },
-  async (a) => reply(await runVinput([...at(a.pid), "ocr", ...region(a.region), ...opt("--scale", a.scale), ...opt("--lang", a.lang),
-    ...(a.words ? [] : ["--lines-only"]), ...(a.tiles === false ? [] : ["--tiles"])], 60000)), true);
+  async (a) => reply(presentOcr(await runVinput([...at(a.pid), "ocr", ...region(a.region), ...opt("--scale", a.scale), ...opt("--lang", a.lang),...opt('--preprocess',a.preprocess),
+    ...(a.words ? [] : ["--lines-only"]), ...(a.tiles === false ? [] : ["--tiles"]),`--retry-empty=${a.retry_empty!==false}`,...(a.text_only?['--text-only']:[])], 60000),!!a.text_only,a.retry_empty!==false)), true);
 
 const textMatch = {
   text: z.string().min(1).describe("Text to find. Default matching: case-insensitive, whitespace ignored, substring of a line."),
   nth: z.number().int().min(1).optional().describe("Pick the Nth match in reading order (1-based). Without it, several matches = refusal listing the candidates."),
   exact: z.boolean().optional().describe("Case-sensitive, whole-word match."),
+  exact_line: z.boolean().optional().describe('Require the query to cover an entire OCR line under the selected case/whitespace/fuzzy rules. Prevents clicking an ordinary word inside a paragraph. Strict line searches keep the requested capture context and do not accept clipped OCR tiles.'),
   fuzzy: z.number().int().min(0).max(3).optional().describe("Also accept whole words within N edits (OCR slips)."),
   region: regionSchema.optional(),
 };
-const textArgs = (a: { text: string; nth?: number; exact?: boolean; whole_word?: boolean; fuzzy?: number; region?: z.infer<typeof regionSchema> }) =>
+const textArgs = (a: { text: string; nth?: number; exact?: boolean; exact_line?: boolean; whole_word?: boolean; fuzzy?: number; region?: z.infer<typeof regionSchema> }) =>
   [a.text, ...opt("--nth", a.nth), ...opt("--exact", a.exact),
-    ...(a.whole_word === undefined ? [] : [`--whole-word=${a.whole_word}`]), ...opt("--fuzzy", a.fuzzy), ...region(a.region)];
+    ...(a.whole_word === undefined ? [] : [`--whole-word=${a.whole_word}`]), ...(a.exact_line===undefined?[]:[`--exact-line=${a.exact_line}`]), ...opt("--fuzzy", a.fuzzy), ...region(a.region)];
 
 tool("find_text", "Find text on screen",
   "Locate text without clicking. Returns the matched box, centre, match_count and match_score, or ok:false (with what OCR " +
   "did read) when it is not there.",
   { pid, ...textMatch, timeout_ms: timeoutMs(0) },
-  async (a) => reply(await runVinput([...at(a.pid), "click-text", ...textArgs(a), "--dry-run", "--timeout", String(a.timeout_ms ?? 0)], (a.timeout_ms ?? 0) + 60000)), true);
+  async (a) => {const unsupported=await requireTextBoundary(false,false,a.exact_line);if(unsupported)return reply(unsupported);return reply(await runVinput([...at(a.pid), "click-text", ...textArgs(a), "--dry-run", "--timeout", String(a.timeout_ms ?? 0)], (a.timeout_ms ?? 0) + 60000));}, true);
 
 tool("click_text", "Click text on screen",
   "Find text with OCR and click the centre of its box (keeps looking for timeout_ms). Refuses and clicks nothing when " +
-  "the text matches more than once and nth is not given. Defaults to case-insensitive whole OCR words, so PLAY does not select Player. Verify the result with wait_text / capture.",
-  { pid, ...textMatch, text: textMatch.text.describe("Text to click; case-insensitive whole OCR words by default, whitespace ignored. exact:true also requires case. Explicit fuzzy may accept different whole words within its edit budget."),
+  "the text matches more than once and nth is not given. Defaults to complete OCR lines, so Next in a tutorial paragraph is not a button. exact_line:false permits text within a longer line. Explicit exact:true or whole_word:false retain their legacy matching unless exact_line:true is requested. Verify the result with wait_text / capture.",
+  { pid, ...textMatch, text: textMatch.text.describe("Text to click; defaults to a complete case-insensitive OCR line, whitespace ignored. exact_line:false permits a word within longer text. exact:true also requires case; fuzzy applies to the complete eligible label."),
     whole_word: z.boolean().default(true).describe("Require complete OCR-word boundaries independently of case (default true). false explicitly restores legacy substring matching. exact:true always requires word boundaries. Default mode preflights the CLI capability before input."),
     timeout_ms: timeoutMs(5000), button: button.optional(),
     optional: z.boolean().optional().describe("Succeed with skipped:true if the text never appears (for dialogs that may not show)."),
@@ -676,11 +692,12 @@ tool("click_text", "Click text on screen",
     const captureError = actionCaptureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region });
     if (captureError) return fail(captureError);
     const observation = actionObservation(a);
-    const unsupported = await requireTextBoundary(a.whole_word, a.exact);
+    const exactLine=a.exact_line??(!a.exact&&a.whole_word!==false);
+    const unsupported = await requireTextBoundary(a.whole_word, a.exact,exactLine);
     if (unsupported) return reply(unsupported);
     if ((captureSessionEpoch.get(a.pid) ?? 0) !== observation.attachment_epoch)
       return fail("attachment changed during text capability preflight; no click was sent");
-    const r = await runVinput([...at(a.pid), "click-text", ...textArgs(a), ...opt("--timeout", a.timeout_ms), ...opt("--button", a.button),
+    const r = await runVinput([...at(a.pid), "click-text", ...textArgs({...a,exact_line:exactLine}), ...opt("--timeout", a.timeout_ms), ...opt("--button", a.button),
       ...opt("--optional", a.optional)], (a.timeout_ms ?? 5000) + 60000);
     return look(a.pid, reply(r), a.capture_after, observation);
   });
@@ -688,9 +705,10 @@ tool("click_text", "Click text on screen",
 tool("wait_text", "Wait for text",
   "Block until text appears on screen (or, with gone:true, disappears). Times out with timed_out:true and ocr_saw.",
   { pid, text: textMatch.text, region: regionSchema.optional(), gone: z.boolean().optional().describe("Wait until the text is NOT on screen."),
+    exact_line:textMatch.exact_line,
     timeout_ms: timeoutMs(15000), optional: z.boolean().optional().describe("Succeed with skipped:true on timeout.") },
-  async (a) => reply(await runVinput([...at(a.pid), "wait-text", a.text, ...region(a.region), ...opt("--gone", a.gone),
-    ...opt("--timeout", a.timeout_ms), ...opt("--optional", a.optional)], (a.timeout_ms ?? 15000) + 60000)), true);
+  async (a) => {const unsupported=await requireTextBoundary(false,false,a.exact_line);if(unsupported)return reply(unsupported);return reply(await runVinput([...at(a.pid), "wait-text", a.text, ...region(a.region), ...opt("--gone", a.gone),...(a.exact_line===undefined?[]:[`--exact-line=${a.exact_line}`]),
+    ...opt("--timeout", a.timeout_ms), ...opt("--optional", a.optional)], (a.timeout_ms ?? 15000) + 60000));}, true);
 
 const imageArgs = {
   template: z.string().min(1).describe("Path of a PNG template (e.g. an icon cut from an earlier capture with region)."),
@@ -845,6 +863,7 @@ async function parkCursor(pid: number): Promise<{ x: number; y: number } | undef
 }
 
 const DEFAULT_CLICK_HOVER_MS = 80, DEFAULT_CLICK_HOLD_MS = 140;
+const mouseModifiers={modifiers:z.array(z.enum(['ctrl','shift','alt'])).max(3).optional().describe('Optional temporary ctrl/shift/alt keys. A bounded native job owns new modifiers; exact-ID cancellation preserves newer/manual key holds. Pre-held virtual aliases stay held.'),modifier_hold_ms:z.number().int().min(100).max(118000).optional().describe('Only with modifiers: native hold deadline, default 60000ms. Releases even if MCP exits; expiry or supersession is reported as unconfirmed coverage.')};
 tool("click", "Click",
   "Click a mouse button at a position (or at the current virtual cursor when x/y are omitted). The cursor hovers there " +
   "first (hover_ms) and the button is held for hold_ms, both long enough for games that poll input once a frame. Old menus: hold_ms 300. " +
@@ -864,8 +883,9 @@ tool("click", "Click",
       "N = require both reads within N extra ms each (error if not seen); 0 = do not wait. The reply's evidence " +
       "{di_poll_confirmed, di_release_confirmed} says what was observed; a read is not proof the game acted."),
     di_release_timeout_ms: z.number().int().min(0).max(5000).optional().describe("Separate cap for the release read (0 = do not wait for it)."),
-    ...coordArgs, ...edgeArgs, ...parkArg, ...actionCaptureArgs },
+    ...coordArgs, ...edgeArgs, ...parkArg, ...actionCaptureArgs, ...mouseModifiers },
   async (a) => {
+    if(a.modifier_hold_ms!==undefined&&!a.modifiers?.length)return fail('modifier_hold_ms requires nonempty modifiers; no input was sent');
     const captureError = actionCaptureError(a);
     if (captureError) return fail(captureError);
     const observation = actionObservation(a);
@@ -879,6 +899,7 @@ tool("click", "Click",
       if (m.mapped) mappedInfo = { mapped: { x: m.pts[0][0], y: m.pts[0][1] } };
     }
     const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "click target", x: Number(pos[0]), y: Number(pos[1]) }], a.edge_margin, a.norm);
+    return withMouseModifiers(a.pid,a.modifiers,async()=>{
     const cr = await runVinput([...at(a.pid), "click", a.button ?? "left", ...pos, ...opt("--norm", a.norm), ...opt("--capture-space", a.capture_space),
       ...(a.x === undefined ? [] : ["--settle-ms", String(a.hover_ms ?? DEFAULT_CLICK_HOVER_MS)]),
       ...opt("--count", a.count), "--ms", String(a.hold_ms ?? DEFAULT_CLICK_HOLD_MS),
@@ -888,6 +909,7 @@ tool("click", "Click",
     const parked = a.park_cursor && cr.ok ? await parkCursor(a.pid) : undefined;
     const evidence = inputEvidence(cr.json);
     return look(a.pid, reply(cr, { ...mappedInfo, ...(evidence ? { evidence } : {}), ...(warnings.length ? { warnings } : {}), ...(parked ? { parked } : {}) }), a.capture_after, observation);
+    },runVinput,at,a.modifier_hold_ms);
   });
 
 tool("move", "Move the cursor",
@@ -938,8 +960,9 @@ tool("drag", "Drag",
       "messages); plain drag works there. The reply's evidence shows "+
       "what was observed; it is still not proof the game placed the item."),
     poll_timeout_ms: z.number().int().min(1).max(5000).optional().describe("placement: how long to wait for each read (default 1000)."),
-    ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema },
+    ...coordArgs, ...edgeArgs, ...parkArg, capture_after: captureAfterSchema, ...mouseModifiers },
   async (a) => {
+    if(a.modifier_hold_ms!==undefined&&!a.modifiers?.length)return fail('modifier_hold_ms requires nonempty modifiers; no input was sent');
     const m = mapPoints(a.pid, a, [[a.x1, a.y1], [a.x2, a.y2]]);
     if ("error" in m) return fail(m.error);
     const [[x1, y1], [x2, y2]] = m.pts;
@@ -948,6 +971,7 @@ tool("drag", "Drag",
     const steps = a.steps ?? Math.min(60, Math.max(3, Math.round(ms / 20)));
     const holdStart = a.hold_start_ms ?? DEFAULT_DRAG_HOLD_START_MS, holdEnd = a.hold_end_ms ?? DEFAULT_DRAG_HOLD_END_MS;
     const where = { ...(m.mapped ? { mapped: { x1, y1, x2, y2 } } : {}), ...(warnings.length ? { warnings } : {}) };
+    return withMouseModifiers(a.pid,a.modifiers,async()=>{
     let placementFallback: string | undefined;
     if (a.placement) {
       const pr = await runVinput([...at(a.pid), "placement-drag", String(x1), String(y1), String(x2), String(y2), "--steps", String(Math.min(128, steps)),
@@ -982,17 +1006,19 @@ tool("drag", "Drag",
       json: { ok, steps, ms, hold_start_ms: holdStart, hold_end_ms: holdEnd, down: down.json, move: mv.json, up: up.json,
         ...(ok ? {} : { error: !mv.ok ? `drag: move failed (the button was released): ${JSON.stringify((mv.json as { error?: string }).error ?? mv.json)}` : "drag: mouse up failed" }) } },
       { ...(placementFallback ? { placement_fallback: placementFallback } : {}), ...(Object.keys(evidence).length ? { evidence } : {}), ...where, ...(parked ? { parked } : {}) }), a.capture_after);
+    },runVinput,at,a.modifier_hold_ms);
   });
 
 tool("scroll", "Scroll the mouse wheel",
   "Scroll N wheel notches (positive = up / away, negative = down) at the virtual cursor, after moving it to x,y if given.",
   { pid, notches: z.number().int().min(-100).max(100), x: z.number().optional(), y: z.number().optional(),
-    horizontal: z.boolean().optional(), ...edgeArgs },
+    horizontal: z.boolean().optional(), ...edgeArgs, ...mouseModifiers },
   async (a) => {
+    if(a.modifier_hold_ms!==undefined&&!a.modifiers?.length)return fail('modifier_hold_ms requires nonempty modifiers; no input was sent');
     if ((a.x === undefined) !== (a.y === undefined)) return fail("give both x and y, or neither");
     const pos = a.x === undefined ? [] : [String(a.x), String(a.y)];
     const warnings = a.x === undefined ? [] : await edgeWarnings(a.pid, [{ label: "scroll position", x: a.x, y: a.y as number }], a.edge_margin);
-    return reply(await runVinput([...at(a.pid), "scroll", String(a.notches), ...pos, ...opt("--horizontal", a.horizontal)], 60000), warnings.length ? { warnings } : undefined);
+    return withMouseModifiers(a.pid,a.modifiers,async()=>reply(await runVinput([...at(a.pid), "scroll", String(a.notches), ...pos, ...opt("--horizontal", a.horizontal)], 60000), warnings.length ? { warnings } : undefined),runVinput,at,a.modifier_hold_ms);
   });
 
 // ---------------------------------------------------------------- keyboard / pad
@@ -1275,23 +1301,33 @@ const seqStep = z.object({
   key: keyCombo.optional().describe("Key or chord (hold / key only), e.g. 'w' or 'w+space'."),
   ms: z.number().int().min(1).max(118000),
 }).strict();
+const seqCondition = z.object({kind:z.enum(['frame_change','region_change','text']),region:regionRect.optional(),text:z.string().min(1).max(512).optional(),exact:z.boolean().optional(),
+  timeout_ms:z.number().int().min(100).max(60000).optional(),poll_ms:z.number().int().min(20).max(1000).optional()}).strict();
 tool("key_sequence", "Run a keyboard sequence",
   "Run a validated keyboard sequence as ONE background job inside the game: each step presses a key or chord for ms (hold / key) " +
   "or waits (wait), e.g. [{action:'hold',key:'w+space',ms:1500},{action:'wait',ms:100},{action:'key',key:'d',ms:300}]. Returns a job_id at once; " +
   "follow it with job_status (current step) or stop it with job_cancel, which releases the active chord. Keys of later steps are reserved, " +
-  "so pressing one of them by hand cancels the rest. Limits: 1024 steps, 118000 ms of declared timing. Needs a vinput DLL with key sequences. Default is asynchronous; wait:true observes this exact native job until completed or another terminal outcome. capture_after follows successful completion when waiting, otherwise it observes the queued/running job. Native completion does not prove game consumption.",
-  { pid, steps: z.array(seqStep).min(1).max(1024), replace: replaceArg, ...actionCaptureArgs,
+  "so pressing one of them by hand cancels the rest. Updated DLLs use one QPC anchor for every deadline and expose cumulative_drift_ms and absolute QPC receipts. Wait-only sequences inject no input. Alternatively give schedule:{at_ms:[0,405,810],key:'space',hold_ms:20} for absolute offsets (requires sequence_timing_version>=1). Limits: 1024 steps, 118000 ms of declared timing. Needs a vinput DLL with key sequences. Default is asynchronous; wait:true observes this exact native job until completed or another terminal outcome. capture_after follows successful completion when waiting, otherwise it observes the queued/running job. Native completion does not prove game consumption.",
+  { pid, steps: z.array(seqStep).min(1).max(1024).optional(),
+    schedule: z.object({at_ms:z.array(z.number().int().min(0).max(118000)).min(1).max(1024),key:keyCombo,hold_ms:z.number().int().min(1).max(118000).optional()}).strict().optional(), replace: replaceArg, ...actionCaptureArgs,
+    start_on:seqCondition.optional().describe('Bounded scoped capture/OCR event before admission; frame/region compares against first observation, text matches visible normalized text. Default timeout10000ms. No audio onset or exact game-event alignment.'),
+    abort_on:seqCondition.omit({timeout_ms:true}).optional().describe('Requires wait:true. Stop the exact job on a scoped hash change or matching text. Polling may miss short events; native observer expiry bounds cleanup after disconnect.'),
+    progress_check:z.object({region:regionRect.optional(),max_unchanged_ms:z.number().int().min(100).max(20000)}).strict().optional().describe('Requires wait:true. Stop if the selected frame/region hash remains unchanged; choose a meaningful region. This does not establish gameplay success.'),
+    max_lateness_ms:z.number().int().min(1).max(5000).optional().describe('Abort the entire native sequence before an overdue key edge exceeds this bound. start_on defaults1000ms. No input edge is silently skipped or replayed.'),
     wait: z.boolean().optional().describe("Wait for this exact generation-bound native sequence job. Default false; does not replay input or prove game consumption."),
-    wait_timeout_ms: z.number().int().min(1).max(120000).optional().describe("Only with wait:true: completion-observation budget AFTER the scheduling reply, at most120000ms. Default native requested_ms+5000 capped120000. Timeout leaves the job running; use job_cancel explicitly. Long waits require a sufficient MCP client timeout.") },
+    wait_timeout_ms: z.number().int().min(1).max(120000).optional().describe("Only with wait:true: observation budget AFTER scheduling, at most120000ms. Default native requested_ms+5000 capped120000. Unguarded timeout leaves the job running; guarded timeout requests one exact abort. Native guard expiry remains active after observer loss. Long waits require sufficient MCP client timeout.") },
   async (a) => {
     const captureError = actionCaptureError(a);
     if (captureError) return fail(captureError);
     if (a.wait_timeout_ms !== undefined && !a.wait) return fail("wait_timeout_ms requires wait:true");
+    if ((a.abort_on||a.progress_check)&&!a.wait) return fail('abort_on/progress_check require wait:true; no sequence was sent');
+    if ((a.steps!==undefined)===(a.schedule!==undefined)) return fail("give exactly one of steps or schedule; no sequence was sent");
     const observation = actionObservation({ ...a, async: true });
     const context = { pid: a.pid, owner: OWNER, prefix: at(a.pid), epoch: observation.attachment_epoch,
       currentEpoch: () => captureSessionEpoch.get(a.pid) ?? 0 };
-    const lines: string[] = [];
-    for (const [i, st] of a.steps.entries()) {
+    let lines: string[] = [];
+    if(a.schedule){const built=keyScheduleLines(a.schedule);if(built.error!==undefined)return fail(built.error);lines=built.lines;}
+    for (const [i, st] of (a.steps??[]).entries()) {
       if (st.action === "wait") { if (st.key !== undefined) return fail(`step ${i + 1}: wait takes no key`); lines.push(`wait ${st.ms}`); continue; }
       if (!st.key) return fail(`step ${i + 1}: ${st.action} needs a key`);
       if (/\s/.test(st.key)) return fail(`step ${i + 1}: key names cannot contain spaces`);
@@ -1301,12 +1337,20 @@ tool("key_sequence", "Run a keyboard sequence",
       const unsupported = await requireSequenceWait(context);
       if (unsupported) return reply(unsupported);
     }
+    let conditions:PreparedConditions|undefined;
+    if(a.start_on||a.abort_on||a.progress_check){const prepared=await prepareSequenceConditions(context,{start_on:a.start_on,abort_on:a.abort_on,progress_check:a.progress_check});
+      if('ok' in prepared)return reply(prepared);conditions=prepared;}
+    const guarded=!!(a.abort_on||a.progress_check);
+    const startExtra=conditions?.start?{sequence_start:{observed:true,observations:conditions.observations,observed_capture_qpc_ticks:conditions.start.qpc,qpc_frequency:conditions.start.frequency,capture_scope:JSON.parse(conditions.start.scope),native_deadlines_anchor:'observed_capture',game_event_onset_measured:false,scope:'capture/OCR observation time; event may precede capture and polling may miss brief events'}}:{};
     const dir = mkdtempSync(join(tmpdir(), "vinput-seq-"));
     const file = join(dir, "sequence.vin");
     try {
       writeFileSync(file, lines.join("\n") + "\n");
-      const r = await runVinput([...at(a.pid), "seq", file, ...(a.replace ? ["--replace=true"] : [])], 60000);
-      if (!a.wait) return look(a.pid, reply(r, jobExtra(r)), a.capture_after, observation);
+      const r = await runVinput([...at(a.pid), "seq", file, ...(a.replace ? ["--replace=true"] : []),...(conditions?.scope?['--scope-json',conditions.scope]:[]),...(guarded?['--guard-ms','4000']:[]),
+        ...(conditions?.start?['--start-qpc',conditions.start.qpc,'--start-frequency',conditions.start.frequency]:[]),...opt('--max-lateness-ms',a.max_lateness_ms??(conditions?.start?1000:undefined))], 60000);
+      if(conditions?.start&&r.ok){const j=sequenceJob(r.json,context,true);if(!j||j.anchor_source!=='observed_capture'||j.anchor_qpc_ticks!==conditions.start.qpc||j.qpc_frequency!==conditions.start.frequency||j.capture_scope_checked!==true)
+        return reply(sequenceWaitError(r,'event_anchor_ack_unavailable','sequence event-anchor acknowledgement is inconsistent; no input or control was retried',0,a.wait_timeout_ms),startExtra);}
+      if (!a.wait) return look(a.pid, reply(r, {...jobExtra(r),...startExtra}), a.capture_after, observation);
       if (!r.ok) {
         const input = r.json as { input_injected?: unknown; error?: unknown } | null;
         const refused = input?.input_injected === false;
@@ -1314,9 +1358,9 @@ tool("key_sequence", "Run a keyboard sequence",
           `sequence scheduling ${refused ? "refused" : "unconfirmed"}; no input was retried: ${String(input?.error ?? "scheduling response unavailable")}`, 0, a.wait_timeout_ms));
       }
       let observed: CliResult;
-      try { observed = await waitSequence(r, context, a.wait_timeout_ms); }
+      try { observed = guarded&&conditions?await guardSequence(r,context,conditions,a.wait_timeout_ms):await waitSequence(r, context, a.wait_timeout_ms); }
       catch (error) { observed = sequenceWaitError(r, "observation_error", `sequence observation failed; no input was retried: ${String(error)}`, 0, a.wait_timeout_ms); }
-      return look(a.pid, reply(observed), a.capture_after,
+      return look(a.pid, reply(observed,startExtra), a.capture_after,
         { ...observation, action_state: "native_sequence_completed_game_consumption_unmeasured" });
     } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
   });
@@ -1405,6 +1449,10 @@ tool("detach", "Stop controlling a game",
     const un = await runVinput([...at(a.pid), "unclaim"], 30000);
     return reply(rel, { unclaim: un.json, note: "vinput stays loaded until the game exits; no further input is sent" });
   });
+
+registerCameraHelpers(tool, { owner: OWNER, at, run: runVinput, epoch: p => captureSessionEpoch.get(p) ?? 0,
+  captureError: actionCaptureError, finish: (p, out, options, epoch) => look(p, out, options.capture_after, { ...actionObservation(options), attachment_epoch: epoch }) },
+  actionCaptureArgs, regionSchema, keyCombo);
 
 async function main() {
   const transport = new StdioServerTransport();

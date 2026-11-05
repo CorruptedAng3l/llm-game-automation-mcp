@@ -24,6 +24,7 @@
 #include "vi_text.h"
 #include "vi_ncc.h"
 #include "vi_ocr.h"
+#include "vi_ocr_read.h"
 #include "vi_image_encode.h"
 #include "vi_paths.h"
 #include "vi_user_intent.h"
@@ -904,10 +905,20 @@ static int Launch(const Args& a) {
             std::wstring cl = L"\"" + exe + L"\" " + args;
             STARTUPINFOW si = {sizeof(si)}; PROCESS_INFORMATION pi;
             si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_SHOWNOACTIVATE;
-            if (!CreateProcessW(exe.c_str(), &cl[0], nullptr, nullptr, FALSE, early ? CREATE_SUSPENDED : 0, nullptr, dir.c_str(), &si, &pi)) { launchResult("{\"ok\":false,\"error\":\"CreateProcess failed %lu\"}\n", GetLastError()); break; }
+            const bool suspended=early||launchOptions.affinitySpecified;
+            if (!CreateProcessW(exe.c_str(), &cl[0], nullptr, nullptr, FALSE, suspended ? CREATE_SUSPENDED : 0, nullptr, dir.c_str(), &si, &pi)) {const auto error=GetLastError();launchResult("{\"ok\":false,\"win32_error\":%lu,\"error\":\"CreateProcess failed %lu%s\"}\n",error,error,error==ERROR_ELEVATION_REQUIRED?": executable requires elevation; no game was started; use an elevated vinput session":""); break; }
             pid = pi.dwProcessId; g_initialLaunchPid = pid; g_launchPid = pid;
             rootProcess=LaunchProcess(pid,GetCurrentProcessId(),ProcName(pid),pi.hProcess);processHandles.Retain(rootProcess,pi.hProcess);
             if (!cwdFields.empty()) cwdFields += ",\"cwd_applies_to_spawned_pid\":" + std::to_string(pid);
+            if(launchOptions.affinitySpecified){
+                if(!SetProcessAffinityMask(pi.hProcess,(DWORD_PTR)launchOptions.affinityMask)){
+                    const auto error=GetLastError();const bool terminated=TerminateProcess(pi.hProcess,1)!=FALSE;
+                    CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
+                    launchResult("{\"ok\":false,\"pid\":%lu,\"win32_error\":%lu,\"suspended_child_terminated\":%s,\"error\":\"could not apply requested CPU affinity before startup; child was never resumed\"}",pid,error,terminated?"true":"false");break;
+                }
+                char mask[32];sprintf_s(mask,"0x%llX",(unsigned long long)launchOptions.affinityMask);
+                cwdFields+=",\"cpu_affinity\":\""+std::string(mask)+"\",\"cpu_affinity_applies_to_spawned_pid\":"+std::to_string(pid);
+            }
             if (early) {
                 // Suspended: vinput's hooks (and its DLL-load notification for vulkan-1/opengl32) are installed
                 // before the game's first instruction; the pipe is up before the main thread is resumed.
@@ -924,6 +935,7 @@ static int Launch(const Args& a) {
                 ResumeThread(pi.hThread);
                 fprintf(stderr, "[vinput] early inject ok in %lu ms, main thread resumed\n", GetTickCount() - ti);
             }
+            else if(suspended)ResumeThread(pi.hThread);
             CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
         } else if(followPid) {
             pid=followPid;g_initialLaunchPid=pid;g_launchPid=pid;
@@ -1064,6 +1076,7 @@ static int Launch(const Args& a) {
             std::string dd=vi_doctor::Field(renderStatus,"ddraw");if(dd!="null")render+=",\"ddraw\":"+dd;
             std::string d9=vi_doctor::Field(renderStatus,"d3d9");if(d9!="null")render+=",\"d3d9\":"+d9;
             if(vi_doctor::Field(fs,"blocked_before_first_present")=="true"||vi_doctor::Field(dd,"blocked_before_first_present")=="true"||vi_doctor::Field(d9,"blocked_before_first_present")=="true")render+=",\"render_warning\":\"repeated fullscreen negotiation failures with no target Present; inspect fullscreen diagnostics; native exclusive is disabled\"";
+            else if(vi_doctor::Field(d9,"render_warning")!="null")render+=",\"render_warning\":"+vi_doctor::Field(d9,"render_warning");
         }
         std::string presentationFields=clientSizeFields+render;
         // The game is running and injected: a failed hand-back is a warning, not a failure (ok:false invites a
@@ -1165,12 +1178,13 @@ static void Usage() {
         "  vinput --pid N config isolate=false --for 1000   (1..120000 ms; physical input passes until auto-revert)\n"
         "  vinput --pid N config fakefocus=true autoactivate=true isolate=true blockfocus=true keepvisible=true cursor=auto|virtual|real raw=auto|post|buffer|off msgs=auto|on|off [for_ms=1..120000 | --for N (isolate=false only)]\n"
         "  vinput --pid N json '{\"cmd\":\"status\"}'\n"
-        "  vinput --pid N ocr [--region x,y,w,h] [--lang en-US] [--scale 1] [--preprocess MODE] [--lines-only] [--out file.json]\n"
-        "  vinput --pid N click-text \"text\" [--nth N] [--exact] [--whole-word=true|false] [--fuzzy N] [--timeout ms] [--button left] [--dry-run] [--optional]\n"  //@text
+        "  vinput --pid N ocr [--region x,y,w,h] [--lang en-US] [--scale 1] [--preprocess MODE] [--retry-empty=true|false] [--text-only] [--lines-only] [--out file.json]\n"
+        "  vinput --pid N click-text \"text\" [--nth N] [--exact] [--whole-word=true|false] [--exact-line=true|false] [--fuzzy N] [--timeout ms] [--button left] [--dry-run] [--optional]\n"  //@text
         "  vinput --pid N wait-text \"text\" [--timeout ms] [--gone]        vinput --pid N assert-text \"text\" [--absent]\n"  //@text
         "  vinput --pid N wait-text --any \"a|b\" [--timeout ms] [--gone]\n"
         "  Text search: --preprocess auto|none|gray|contrast|threshold|invert; misses include actual nearest_candidates (suggestions only).\n"
         "  vinput --pid N find-image|click-image|wait-image <template.png> [--threshold 0.8] [--scales 0.9,1,1.1|--no-scale] [--region ..] [--nth N] [--timeout ms] [--gone]\n"  //@image
+        "      find-image --preserve-map retains the saved single-image cursor map and reports source capture scope.\n"
         "  vinput --pid N pixel <x> <y>       vinput --pid N scroll <N> [x y]       vinput --pid N drag x1 y1 x2 y2 [--ms 300]\n"  //@small
         "  vinput --pid N placement-drag x1 y1 x2 y2 [--steps 15 --ms 300 --dwell-ms 900 --poll-timeout-ms 1000 --async]\n"
         "      Owned polled placement; drag --placement is equivalent. config edge_margin=8 guards pointer paths (0 disables).\n"
@@ -1179,7 +1193,7 @@ static void Usage() {
         "  vinput --pid N escape-host [--timeout-ms N]  opt-in Ctrl+Alt+Shift+End host; streams receipts; no automatic start\n"
         "  vinput --pid N foreground          VERIFY/HANDOFF ONLY: really bring the game to the front\n"
         "  vinput sysinput <vk>               VERIFY ONLY: OS-level SendInput key (= the shared physical keyboard)\n";
-    if (g_jsonOutput) printf("{\"ok\":true,\"text_word_boundary_version\":1,\"help\":\"%s\"}\n", JEsc(usage).c_str()); else printf("%s", usage);
+    if (g_jsonOutput) printf("{\"ok\":true,\"text_word_boundary_version\":1,\"text_line_match_version\":1,\"ocr_empty_retry_version\":1,\"ocr_compact_version\":1,\"image_scope_version\":1,\"help\":\"%s\"}\n", JEsc(usage).c_str()); else printf("%s", usage);
 }
 
 int wmain(int argc, wchar_t** wargv) {

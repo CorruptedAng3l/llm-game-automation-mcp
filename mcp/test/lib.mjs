@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const serverJs = resolve(here, "..", "build", "index.js");
+export const serverJs = process.env.VINPUT_TEST_SERVER ? resolve(process.env.VINPUT_TEST_SERVER) : resolve(here, "..", "build", "index.js");
 export const fakeExe = resolve(here, "fake_vinput.mjs");
 
 export function makeChecker() {

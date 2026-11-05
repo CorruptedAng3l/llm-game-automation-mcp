@@ -12,7 +12,7 @@ else{
   const scenario=JSON.parse(readFileSync(process.env.VINPUT_FAKE_SCENARIO,"utf8"));
   if(process.env.VINPUT_FAKE_LOG)appendFileSync(process.env.VINPUT_FAKE_LOG,JSON.stringify({argv,t:Date.now()})+"\n");
   const say=(data)=>{process.stdout.write(JSON.stringify(data)+"\n");process.exit(data.ok===false?1:0);};
-  if(command==="help")say(scenario.replies?.help??{ok:true,text_word_boundary_version:1});
+  if(command==="help")say(scenario.replies?.help??{ok:true,text_word_boundary_version:1,text_line_match_version:1});
   const exact=rest.includes("--exact"), whole=exact||rest.includes("--whole-word=true");
   const normalize=(s)=>{const value=s.replace(/\s/g,"");return exact?value:value.toLowerCase();};
   const query=normalize(rest[1]),words=scenario.words??["Player"];

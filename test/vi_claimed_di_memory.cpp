@@ -58,6 +58,10 @@ ULONG STDMETHODCALLTYPE FakeDeviceRelease(void* self){++((Device*)self)->release
 #endif
 #include "actual_devtype.inl"
 #include "actual_policy.inl"
+bool g_pollReady=false;
+std::atomic<unsigned long long> g_diVirtualAcquires{0};
+bool DiVirtualMouseReady(void*){return g_pollReady;}
+bool DiPollEntryKnown(void*){return false;} // poll registry is exercised by the real-DI8 fixture
 #include "actual_acquire.inl"
 PFN_DIACQ o_DIAcquire=nullptr;
 #include "actual_known_wrapper.inl"
@@ -79,7 +83,7 @@ void* GetProcAddress(HMODULE module,const char* name){if(module==&modules[0]&&st
 #include "actual_hooks.inl"
 HRESULT CallAcquire(Device& d){auto i=hooks.find(d.table[7]);if(i!=hooks.end()&&i->second.enabled)return ((PFN_DIACQ)i->second.detour)(&d);return DIAcquireImpl((PFN_DIACQ)d.table[7],&d);}
 HRESULT CallCoop(Device& d,DWORD flags){auto i=hooks.find(d.table[13]);if(i!=hooks.end()&&i->second.enabled)return ((PFN_DICOOP)i->second.detour)(&d,&modules[2],flags);return ClaimedDiSetCoopImpl((PFN_DICOOP)d.table[13],&d,&modules[2],flags);}
-void Reset(Device& d){d.kind=2;d.capsFail=false;d.acquired=false;d.acquireResult=d.coopResult=DI_OK;d.caps=d.acquires=d.coops=d.unacquires=0;d.flags=0;d.hwnd=nullptr;d.onCaps=d.onAcquire=nullptr;g_faking=false;g_jobClaimExpiry=0;g_now=100;}
+void Reset(Device& d){d.kind=2;d.capsFail=false;d.acquired=false;d.acquireResult=d.coopResult=DI_OK;d.caps=d.acquires=d.coops=d.unacquires=0;d.flags=0;d.hwnd=nullptr;d.onCaps=d.onAcquire=nullptr;g_faking=false;g_pollReady=false;g_jobClaimExpiry=0;g_now=100;}
 bool callbackClaimRefused=false,callbackActive=false;
 void ClaimDuringAcquire(Device*){callbackActive=g_claimNativeFence.Snapshot().active==1;ClaimNativeAdmission claim;callbackClaimRefused=!claim;}
 HRESULT nestedInspection=DI_OK;
@@ -96,6 +100,8 @@ int main(){
  d.coopResult=NativeFailure;Check(CallCoop(d,DISCL_NONEXCLUSIVE|DISCL_BACKGROUND)==NativeFailure&&d.flags==10,"unclaimed SetCoop preserves native refusal");
  Reset(d);g_jobClaimExpiry=1000;Check(FAILED(CallAcquire(d))&&d.acquires==0&&!d.acquired,"claimed mouse Acquire refuses before native acquisition");
  g_faking=true;Check(FAILED(CallAcquire(d))&&d.acquires==0,"claimed refusal cannot be converted to fake DI_OK");
+ g_pollReady=true;const auto virtualBefore=g_diVirtualAcquires.load();Check(CallAcquire(d)==DI_OK&&d.acquires==0&&!d.acquired&&g_diVirtualAcquires==virtualBefore+1,"verified virtual polling can acknowledge acquisition without native rights");
+ g_faking=false;Check(FAILED(CallAcquire(d))&&d.acquires==0,"verified polling alone cannot bypass real-foreground/native acquisition refusal");
  for(int kind:{1,0}){Reset(d);d.kind=kind;g_jobClaimExpiry=1000;Check(CallAcquire(d)==DI_OK&&d.acquires==1,"claimed proven keyboard/joystick Acquire retains original");Check(CallCoop(d,DISCL_EXCLUSIVE|DISCL_FOREGROUND)==DI_OK&&d.flags==5,"claimed proven keyboard/joystick SetCoop retains original flags");}
  Reset(d);d.capsFail=true;g_jobClaimExpiry=1000;Check(CallAcquire(d)==DIERR_NOTINITIALIZED&&d.acquires==0&&d.caps==2,"claimed unknown caps refuse Acquire after bounded legacy-size retry");
  Check(CallCoop(d,5)==DIERR_NOTINITIALIZED&&d.coops==0,"claimed unknown caps never forward cooperative flags");

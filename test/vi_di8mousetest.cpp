@@ -1,9 +1,18 @@
 // Real pre-existing DI8 A/W mouse objects, called through their actual vtables.
-// No Acquire, focus change, OS input, or renderer/window creation.
+// Every native Acquire ends at a lower absorber; no physical device is acquired.
 #include <vinput_core.cpp>
 #include "vi_launch_terminal.h"
+#include <set>
+#undef MH_Initialize
+#undef MH_CreateHook
+#undef MH_EnableHook
+extern "C" MH_STATUS WINAPI MH_Initialize();
+extern "C" MH_STATUS WINAPI MH_CreateHook(LPVOID,LPVOID,LPVOID*);
+extern "C" MH_STATUS WINAPI MH_EnableHook(LPVOID);
 #pragma comment(lib,"dinput8.lib")
 static unsigned passed=0,failed=0;
+static std::atomic<unsigned> lowerAcquireCalls{0};
+static HRESULT STDMETHODCALLTYPE AbsorbAcquire(void*){++lowerAcquireCalls;return DIERR_OTHERAPPHASPRIO;}
 static void Check(bool ok,const char* text){printf("%s %s\n",ok?"PASS":"FAIL",text);ok?++passed:++failed;}
 int main(int argc,char** argv){
     if(argc==2&&!strcmp(argv[1],"--await-start")){char line[8]{};if(!fgets(line,sizeof(line),stdin)||strcmp(line,"RUN\n"))return 111;}
@@ -21,6 +30,9 @@ int main(int argc,char** argv){
     Check(SUCCEEDED(a->SetProperty(DIPROP_BUFFERSIZE,&property.diph))&&SUCCEEDED(w->SetProperty(DIPROP_BUFFERSIZE,&property.diph)),"native mouse buffer properties accepted without acquisition");
     BYTE scratch{};const HRESULT invalidNative[]={a->GetDeviceState(1,&scratch),w->GetDeviceState(1,&scratch)};
     printf("native DI8 A state=%p data=%p W state=%p data=%p\n",(*(void***)a)[9],(*(void***)a)[10],(*(void***)w)[9],(*(void***)w)[10]);
+    bool lower=MH_Initialize()==MH_OK;std::set<void*> entries;
+    for(void* device:{(void*)a,(void*)w}){void* entry=(*(void***)device)[7];if(entries.insert(entry).second){void* unused=nullptr;lower=lower&&MH_CreateHook(entry,(void*)&AbsorbAcquire,&unused)==MH_OK&&unused&&MH_EnableHook(entry)==MH_OK;}}
+    Check(lower,"lower native Acquire absorber installed before production hooks");if(!lower)return 111;
     TryHookDInput();
 #ifdef VI_DI_POLL_REGISTRY
     Check(g_di8ProbeRoles==15,"all keyboard/mouse A/W implementation roles hooked");
@@ -33,6 +45,9 @@ int main(int argc,char** argv){
 #endif
     for(unsigned i=0;i<2;++i){
         void* device=i?(void*)w:(void*)a;const auto state=(PFN_DIGDS)(*(void***)device)[9];const auto buffer=(PFN_DIGDD)(*(void***)device)[10];
+        g_jobClaimExpiry=HousekeepingNow()+60000;
+        const auto acquired=((PFN_DIACQ)(*(void***)device)[7])(device);
+        Check(acquired==DI_OK&&lowerAcquireCalls==0,"claimed real DI8 mouse gets virtual Acquire success with no native acquisition");
         g_diDX=123;g_diDY=-45;g_vk[VK_LBUTTON]=1;
         const auto before=C.di_mouse.load();DIMOUSESTATE2 output{};auto hr=state(device,sizeof(output),&output);
         Check(SUCCEEDED(hr)&&output.lX==123&&output.lY==-45&&(output.rgbButtons[0]&0x80)&&C.di_mouse==before+1,"real pre-existing mouse state consumes injected axes/button");
@@ -53,7 +68,11 @@ int main(int argc,char** argv){
 #else
     Check(false,"status names actual mouse polling channels and clears warning");
 #endif
+    void* stateEntry=(*(void***)a)[9];
+    Check(VIMH_DisableHook(stateEntry)==MH_OK,"owned polling hook can be removed for the changed-entry reject control");
+    Check(FAILED(((PFN_DIACQ)(*(void***)a)[7])(a))&&lowerAcquireCalls==0,"changed polling entry refuses virtual Acquire without native acquisition");
+    Check(VIMH_EnableHook(stateEntry)==MH_OK,"owned polling hook restored after reject control");
     a->Release();w->Release();ansi->Release();wide->Release();
-    Check(vi_launch_terminal::Verify(),"terminal desktop writers remain guarded; native Acquire never called");
+    Check(vi_launch_terminal::Verify()&&lowerAcquireCalls==0,"terminal desktop writers remain guarded; native Acquire never called");
     printf("DI8 mouse: %u PASS / %u FAIL\n",passed,failed);return failed?1:0;
 }

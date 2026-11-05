@@ -17,6 +17,7 @@ struct Frame {
     double ox = 0, oy = 0, sx = 1, sy = 1;   // client = origin + image * scale
     int clientW = 0, clientH = 0;
     std::string method, hash;
+    std::string qpcFrequency,captureQpc,frameQpc,captureScope;
     double nativeFrame=0,presentBefore=0;
 };
 static vi_text::Box ToClient(const Frame& f, const vi_text::Box& b) {
@@ -48,6 +49,7 @@ static bool Grab(DWORD pid, const Args& a, Frame& f, std::string& err, bool pres
     if (HasOpt(a, "method")) PutS(cmd, "method", GetOpt(a, "method"));
     if (HasOpt(a, "after-frames")) Put(cmd, "after_frames", GetOpt(a, "after-frames"));
     if(preserveMap)Put(cmd,"preserve_capture_space","true");
+    if(GetOpt(a,"observation-only")=="true")Put(cmd,"observation_only","true");
     if(timeoutMs)Put(cmd,"timeout_ms",std::to_string(timeoutMs));
     if(outputOptions){if(HasOpt(*outputOptions,"scale"))Put(cmd,"scale",GetOpt(*outputOptions,"scale"));if(HasOpt(*outputOptions,"max-width"))Put(cmd,"max_width",GetOpt(*outputOptions,"max-width"));}
     cmd += "}";
@@ -66,6 +68,8 @@ static bool Grab(DWORD pid, const Args& a, Frame& f, std::string& err, bool pres
     f.clientW = (int)JsonNum(resp, "client_w"); f.clientH = (int)JsonNum(resp, "client_h");
     f.method = JsonText(resp, "method"); f.hash = JsonText(resp, "hash");
     f.nativeFrame=JsonNum(resp,"captured_present");f.presentBefore=JsonNum(resp,"present_before");
+    f.qpcFrequency=JsonText(resp,"qpc_frequency");f.captureQpc=JsonText(resp,"capture_qpc_ticks");f.frameQpc=JsonText(resp,"frame_qpc_ticks");
+    f.captureScope=vi_doctor::Field(resp,"capture_scope");
     return true;
 }
 
@@ -142,22 +146,39 @@ static const char* kNoConfidence = "\"ocr_confidence\":null,\"ocr_confidence_not
 static Reply CmdOcr(DWORD pid, const Args& a) {
     bool autoScale; std::string err; auto scales = ParseScales(GetOpt(a, "scale", "1"), autoScale, err);
     if (scales.empty()) return Fail(err);
+    const std::string retryOption=GetOpt(a,"retry-empty","true"),mode=GetOpt(a,"preprocess","none");
+    if(retryOption!="true"&&retryOption!="false")return Fail("--retry-empty must be true or false");
+    if(mode!="none"&&mode!="gray"&&mode!="contrast"&&mode!="threshold"&&mode!="invert"&&mode!="auto")return Fail("--preprocess must be none, gray, contrast, threshold, invert or auto");
+    const bool retry=retryOption=="true",compact=HasOpt(a,"text-only");
+    const auto plan=vi_ocr_read::Plan((std::max)(1.0,scales[0]),HasOpt(a,"scale")&&!autoScale,mode,HasOpt(a,"preprocess"),retry);
     Frame f; if (!Grab(pid, a, f, err, true)) return Fail(err);
-    std::vector<vi_text::Line> lines; std::string lang;
     DWORD t0 = GetTickCount();
-    if (!OcrOnce(f, scales[0], a, lines, lang, err)) {
-        if (!HasOpt(a, "tiles") || err.find("exceeds OcrEngine.MaxImageDimension") == std::string::npos) return Fail(err);
-        err.clear();
-    }
-    if (HasOpt(a, "tiles") && !OcrTiles(f, scales[0], a, lines, lang, err)) return Fail(err);
+    const auto result=vi_ocr_read::Read(plan,[&](const vi_ocr_read::Pass& pass,std::vector<vi_text::Line>& lines,std::string& lang,std::string& error){
+        if(!OcrOnce(f,pass.scale,a,lines,lang,error,pass.preprocessing)){
+            if(!HasOpt(a,"tiles")||error.find("exceeds OcrEngine.MaxImageDimension")==std::string::npos)return false;
+            error.clear();
+        }
+        return !HasOpt(a,"tiles")||OcrTiles(f,pass.scale,a,lines,lang,error,pass.preprocessing);
+    });
+    if(!result.ok)return Fail(result.error);
+    const auto& lines=result.lines;const auto& lang=result.language;const auto& selected=result.attempts[result.selected].pass;
+    size_t retryErrors=0;for(const auto& attempt:result.attempts)if(!attempt.ok)++retryErrors;
     const bool words = !HasOpt(a, "lines-only");
-    std::string j = "{\"ok\":true,\"capture_space_updated\":false,\"w\":" + std::to_string(f.img.w) + ",\"h\":" + std::to_string(f.img.h) + ",\"origin_x\":" + Num(f.ox) + ",\"origin_y\":" + Num(f.oy) +
-        ",\"client_w\":" + std::to_string(f.clientW) + ",\"client_h\":" + std::to_string(f.clientH) + ",\"method\":\"" + f.method + "\",\"lang\":\"" + JEsc(lang) +
-        "\",\"scale\":" + Num(scales[0]) + ",\"preprocess\":\"" + JEsc(GetOpt(a, "preprocess", "none")) + "\",\"ocr_ms\":" + std::to_string(GetTickCount() - t0) + "," + kNoConfidence + ",\"line_count\":" + std::to_string(lines.size());
+    std::string j="{\"ok\":true,\"ocr_empty_retry_version\":1,\"ocr_compact_version\":1,\"lang\":\""+JEsc(lang)+"\",\"line_count\":"+std::to_string(lines.size())+
+        ",\"ocr_scale\":"+Num(selected.scale)+",\"ocr_pass\":\""+JEsc(selected.preprocessing)+"\",\"ocr_passes\":"+std::to_string(result.attempts.size())+
+        ",\"retry_empty\":"+(retry?"true":"false")+",\"ocr_retry_errors\":"+std::to_string(retryErrors)+",\"text_only\":"+(compact?"true":"false");
+    if(!compact){
+        j+=",\"capture_space_updated\":false,\"w\":" + std::to_string(f.img.w) + ",\"h\":" + std::to_string(f.img.h) + ",\"origin_x\":" + Num(f.ox) + ",\"origin_y\":" + Num(f.oy) +
+        ",\"client_w\":" + std::to_string(f.clientW) + ",\"client_h\":" + std::to_string(f.clientH) + ",\"method\":\"" + f.method +
+        "\",\"scale\":" + Num(selected.scale) + ",\"preprocess\":\"" + JEsc(selected.preprocessing) + "\",\"ocr_ms\":" + std::to_string(GetTickCount() - t0) + "," + kNoConfidence + ",\"ocr_attempts\":[";
+        for(size_t i=0;i<result.attempts.size();++i){const auto& attempt=result.attempts[i];j+=(i?",":"")+std::string("{\"scale\":")+Num(attempt.pass.scale)+",\"preprocess\":\""+JEsc(attempt.pass.preprocessing)+"\",\"ok\":"+(attempt.ok?"true":"false")+",\"line_count\":"+std::to_string(attempt.lines);if(!attempt.error.empty())j+=",\"error\":\""+JEsc(attempt.error)+"\"";j+="}";}
+        j+="]";
+    }else j+=",\"ocr_confidence\":null";
+    j+=",\"capture_scope\":"+(f.captureScope.empty()?std::string("null"):f.captureScope)+",\"timing_clock\":\"QueryPerformanceCounter\",\"qpc_frequency\":\""+JEsc(f.qpcFrequency)+"\",\"capture_qpc_ticks\":\""+JEsc(f.captureQpc)+"\",\"frame_qpc_ticks\":"+(f.frameQpc.empty()?std::string("null"):"\""+JEsc(f.frameQpc)+"\"");
     std::wstring text; for (auto& l : lines) { if (!text.empty()) text += L"\n"; text += l.text; }
-    j += ",\"text\":\"" + JU(text) + "\",\"lines\":[";
-    for (size_t i = 0; i < lines.size(); ++i) j += (i ? "," : "") + LineJson(f, lines[i], words);
-    j += "]}";
+    j += ",\"text\":\"" + JU(text) + "\"";
+    if(!compact){j+=",\"lines\":[";for(size_t i=0;i<lines.size();++i)j+=(i?",":"")+LineJson(f,lines[i],words);j+="]";}
+    j += "}";
     if (HasOpt(a, "out")) {
         FILE* o = nullptr; _wfopen_s(&o, U2W(GetOpt(a, "out")).c_str(), L"wb");
         if (!o) return Fail("cannot write --out file");

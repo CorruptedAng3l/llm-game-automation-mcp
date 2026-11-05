@@ -83,7 +83,7 @@ cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 /I"$RepoRoot\third_party\minhook\inc
 exit /b %errorlevel%
 "@|Set-Content -LiteralPath $batch -Encoding ascii
    $entry.build=RunOwned $env:ComSpec @('/d','/c',$batch) 120000;Require ($entry.build.exit-eq0-and($entry.build.stdout+$entry.build.stderr)-notmatch'(?i)\bwarning\s+[A-Z]+\d+') 'native fixture W4/WX zero warnings';Pin $exe
-   foreach($mode in @('app','activate','api')){
+   foreach($mode in @('app','activate','api','setfocus')){
     $case=@{name="$arch.$mode.positive";completed=$false};$cases.Add($case)
     try{$current=StartFixture $exe $cli $mode $case.name;$case.ready=$current.ready;$case.before=$current.before;$case.inject=HooksOnly $dll;$null=Configure $true $true;$case.readiness=FullReady;$row=Progress;$case.actual=$row;$case.status=NStatus
      Check ($row.gate-and$row.present_calls-gt0-and$case.status.frames-gt0) "$arch $mode activation-gated actual D3D11 Present progresses in background";Background;$case.completed=$true
@@ -111,7 +111,7 @@ exit /b %errorlevel%
    $entry.completed=$true
   }catch{$entry.error=$_.Exception.Message;$instrument=$false;Check $false "$arch infrastructure: $($entry.error)"}finally{StopCurrent}
  }
- $complete=$instrument-and$arches.Count-eq2-and@($arches|Where-Object completed -eq $true).Count-eq2-and$cases.Count-eq12-and@($cases|Where-Object completed -eq $true).Count-eq12
+ $complete=$instrument-and$arches.Count-eq2-and@($arches|Where-Object completed -eq $true).Count-eq2-and$cases.Count-eq14-and@($cases|Where-Object completed -eq $true).Count-eq14
 }catch{$problem=$_.Exception.Message;Check $false "setup: $problem"}
 @{schema=1;completed=$complete;passed=@($checks|Where-Object pass -eq $true).Count;failed=@($checks|Where-Object pass -eq $false).Count;cases=$cases;arches=$arches;calls=$calls;processes=$processes;pins=$pins;error=$problem;failure_is_expected_inversion=$false;retail_cause='UNKNOWN';source_window_created_before_injection=$true;early_default_creation_visibility_tested=$false;scope='actual activation-gated synthetic D3D11 progress plus strict loaded/hooks/queue diagnostics; real foreground stays external; not UE4/retail proof'}|ConvertTo-Json -Depth 40|Set-Content -LiteralPath (Join-Path $run 'result.json') -Encoding utf8NoBOM
 Write-Host "RESULT $(@($checks|Where-Object pass -eq $true).Count) PASS $(@($checks|Where-Object pass -eq $false).Count) FAIL $run";if(-not$complete-or@($checks|Where-Object pass -eq $false).Count){exit 1};exit 0

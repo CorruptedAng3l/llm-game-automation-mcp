@@ -41,10 +41,12 @@
 #include "vi_cursor_guard.h"
 #include "vi_pad_buttons.h"
 #include "vi_key_sequence.h"
+#include "vi_qpc.h"
 #include "vi_trace.h"
 #include "vi_vision.h"
 #include "vi_image_encode.h"
 #include "vi_paths.h"
+#include "vi_capture_fence.h"
 #include "vi_user_intent.h"
 #include "vi_acguard.h"
 
@@ -88,6 +90,7 @@ DWORD   g_t0 = 0;
 std::atomic<bool> g_realFg{false};
 std::atomic<bool> g_hwndForced{false};
 std::atomic<int> g_appActive{-1},g_synthLeft{3};
+std::atomic<bool> g_startupFocusRefreshed{false};
 std::atomic<DWORD> g_lastSynthAct{0};
 std::mutex g_synthMx;
 bool    g_appContainer = false;   // UWP / Xbox app games: pipe in the container namespace, CoreWindow target
@@ -178,6 +181,7 @@ struct Counters {
     std::atomic<long> di_kbd{0}, di_mouse{0}, di_data_kbd{0}, di_data_mouse{0}, di_acq{0}, di_fake{0};
     std::atomic<long> xinput{0};
     std::atomic<long> wm_key{0}, wm_char{0}, wm_mouse{0}, wm_input{0}, wm_input_dropped{0}, wm_mouse_dropped{0};
+    std::atomic<long> wm_mouse_owned{0},wm_mouse_owned_delivered{0},wm_mouse_owned_dropped{0},wm_mouse_unrecognized_dropped{0};
     std::atomic<long> min_blocked{0}, min_restored{0}, create_visible_deferred{0};
     std::atomic<long> act_swallowed{0}, act_synth{0}, act_leaked{0}, act_refresh_posted{0}, act_refresh_delivered{0}, act_refresh_cancelled{0}, act_refresh_failed{0}, act_cbt_blocked{0}, act_cbt_installed{0}, act_cbt_failed{0}, act_cbt_unhook_failed{0}, present{0}, present_ours{0}, captures{0};
     std::atomic<long> posted{0}, raw_posted{0}, raw_queued{0}, post_target_rejected{0}, last_post_target_error{0};
@@ -432,6 +436,7 @@ std::mutex g_diMx;
 struct DiQueuedEvent { DWORD first,second;unsigned long long generation=0;DWORD timestamp=0,sequence=0; };
 std::deque<DiQueuedEvent> g_diKbdQ, g_diMouseQ;  // (ofs, data, mouse-button press generation)
 std::atomic<DWORD> g_diSeq{1};
+std::atomic<unsigned long long> g_relativeScopeRefused{0};
 std::atomic<unsigned long long> g_diMouseMovesSincePoll{0};
 int DiPush(bool kbd, DWORD ofs, DWORD data,unsigned long long generation=0) {
     if (kbd ? C.di_data_kbd == 0 : C.di_data_mouse == 0) return 0;  // nobody reads buffered data
@@ -902,7 +907,7 @@ bool CanRefreshAdoptedWindow(HWND h) {
 void MaybeSynthActivate() {
     std::lock_guard<std::mutex> lock(g_synthMx);
     HWND h=g_hwnd;
-    if(!g_origWndProc || !g_adoptionActivationMessage || !CanRefreshAdoptedWindow(h) || IsIconic(h) || g_appActive==1 || g_synthLeft<=0)return;
+    if(!g_origWndProc || !g_adoptionActivationMessage || !CanRefreshAdoptedWindow(h) || IsIconic(h) || (g_appActive==1&&g_startupFocusRefreshed) || g_synthLeft<=0)return;
     DWORD now=GetTickCount(),last=g_lastSynthAct.load();
     if(last && now-last<2000)return;
     g_lastSynthAct=now?now:1;--g_synthLeft;++C.act_synth;
@@ -942,7 +947,18 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if(current()) {
             ++C.act_refresh_delivered;
             if(unicode)CallWindowProcW(original,h,WM_ACTIVATE,WA_ACTIVE,0);else CallWindowProcA(original,h,WM_ACTIVATE,WA_ACTIVE,0);
-        } else ++C.act_refresh_cancelled;
+        } else {++C.act_refresh_cancelled;g_synthLeft=0;}
+        // Some startup consumers wait for WM_SETFOCUS even after APP/ACTIVATE.
+        // Deliver it once for this adoption on the UI thread, under the same CBT
+        // barrier. Never call SetFocus or change the real foreground. Later
+        // inactive refreshes retain the existing APP/ACTIVATE-only behavior.
+        if(!g_startupFocusRefreshed){
+            if(current()){
+                ++C.act_refresh_delivered;
+                if(unicode)CallWindowProcW(original,h,WM_SETFOCUS,0,0);else CallWindowProcA(original,h,WM_SETFOCUS,0,0);
+                if(current())g_startupFocusRefreshed=true;else {++C.act_refresh_cancelled;g_synthLeft=0;}
+            }else {++C.act_refresh_cancelled;g_synthLeft=0;}
+        }
         Log("virtual activation adoption refresh dispatched hwnd=%p actual_fg=%d",h,(int)ComputeRealFg());return 0;
     }
     if (m == g_hoverBarrierMessage && g_hoverBarrierMessage && h == g_hwnd && WndBindingLive(callback.binding) && (ULONG_PTR)l == g_hoverBarrierCookie && w == g_hoverBarrierExpected.load()) {
@@ -982,8 +998,10 @@ LRESULT CALLBACK h_WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) {
         C.wm_mouse++;
         bool ours = RingConsume(h, m, w, l);
-        if(!WndBindingLive(callback.binding)){WndBindingRecordInputRefusal();C.wm_mouse_dropped++;return 0;}
-        if (!ours && MouseKeyboardIsolating()) { C.wm_mouse_dropped++; return 0; }
+        if(ours)++C.wm_mouse_owned;
+        if(!WndBindingLive(callback.binding)){WndBindingRecordInputRefusal();C.wm_mouse_dropped++;if(ours)++C.wm_mouse_owned_dropped;else ++C.wm_mouse_unrecognized_dropped;return 0;}
+        if (!ours && MouseKeyboardIsolating()) { C.wm_mouse_dropped++;++C.wm_mouse_unrecognized_dropped;return 0; }
+        if(ours)++C.wm_mouse_owned_delivered;
         if (!ours && fg) NoteOwnerInput(m != WM_MOUSEMOVE);
         if (ours && m == WM_MOUSEMOVE) g_mouseMovesDelivered++;
         bool down = false; int vk = MessageKey(m, w, down);
@@ -1036,6 +1054,8 @@ int DevType(void* self) {
     return t;
 }
 #include "vi_claimed_di.inl"
+bool DiVirtualMouseReady(void* self);
+std::atomic<unsigned long long> g_diVirtualAcquires{0};
 HRESULT DIAcquireImpl(PFN_DIACQ orig, void* self) {
     C.di_acq++;
     ClaimNativeOperation operation;
@@ -1044,8 +1064,14 @@ HRESULT DIAcquireImpl(PFN_DIACQ orig, void* self) {
         if(type==-2)return DIERR_OTHERAPPHASPRIO;
         if(type<0){++g_claimDiUnknownRefused;return DIERR_NOTINITIALIZED;}
         // No cooperative-mode getter/lifetime-owned registry exists. Even a
-        // recently normalized mouse cannot safely authorize a later Acquire.
-        if(type==2){++g_claimDiAcquireBlocked;return DIERR_OTHERAPPHASPRIO;}
+        // recently normalized mouse cannot safely authorize a later native Acquire.
+        if(type==2){++g_claimDiAcquireBlocked;
+            // A virtual acquisition grants no native device rights. Only report
+            // it when both current polling entries still reach our typed hooks;
+            // unrecognized or changed implementations retain the refusal. Data
+            // formats remain limited to the existing virtual synthesis paths.
+            if(Faking()&&DiVirtualMouseReady(self)){++g_diVirtualAcquires;++C.di_fake;return DI_OK;}
+            return DIERR_OTHERAPPHASPRIO;}
     }
     HRESULT hr = orig(self);
     if (FAILED(hr) && Faking()) { C.di_fake++; return DI_OK; }
@@ -1285,22 +1311,25 @@ bool SwapchainIsOurs(IDXGISwapChain* sc) {
 }
 // ---- shared native-capture plumbing (DXGI 11/12, OpenGL, Vulkan) ----
 // API codes: 11 d3d11, 12 d3d12, 1 opengl, 2 vulkan, 0 none/unknown, -1 foreign (DXGI swapchain owned by a GL/VK driver)
-enum { API_NONE = 0, API_GL = 1, API_VK = 2, API_PRINTWINDOW = 3, API_DDRAW = 4, API_D3D11 = 11, API_D3D12 = 12, API_FOREIGN = -1 };
+enum { API_NONE = 0, API_GL = 1, API_VK = 2, API_PRINTWINDOW = 3, API_DDRAW = 4, API_D3D9 = 9, API_D3D11 = 11, API_D3D12 = 12, API_FOREIGN = -1 };
 const char* ApiName(int a) {
-    switch (a) { case API_D3D11: return "d3d11"; case API_D3D12: return "d3d12"; case API_DDRAW: return "ddraw"; case API_GL: return "gl"; case API_VK: return "vk"; case API_PRINTWINDOW: return "printwindow"; case API_FOREIGN: return "foreign"; default: return "none"; }
+    switch (a) { case API_D3D9: return "d3d9"; case API_D3D11: return "d3d11"; case API_D3D12: return "d3d12"; case API_DDRAW: return "ddraw"; case API_GL: return "gl"; case API_VK: return "vk"; case API_PRINTWINDOW: return "printwindow"; case API_FOREIGN: return "foreign"; default: return "none"; }
 }
 std::atomic<int> g_frameApi{0};        // API of the frames counted in present_ours (last one seen)
 std::atomic<int> g_capApi{0};          // API that served the last capture request (set with g_capReq -> done)
 std::atomic<int> g_lastCaptureApi{0};  // last successful request, including PrintWindow; failed attempts do not change it
+std::atomic<std::uint64_t> g_lastFrameQpc{0},g_capturedFrameQpc{0};
+thread_local std::uint64_t t_frameQpc=0;
 std::atomic<int> g_capPending{0};      // API whose GPU readback the requester must finish (12 / vk), 0 = pixels ready
 std::atomic<bool> g_capRetryable{false}; // the hook failed for a transient reason (queue hook still installing)
-std::atomic<long> g_frameDd{0}, g_frameGl{0}, g_frameVk{0}, g_frame11{0}, g_frame12{0}, g_frameForeign{0};
+std::atomic<long> g_frameDd{0}, g_frameGl{0}, g_frameVk{0}, g_frame9{0}, g_frame11{0}, g_frame12{0}, g_frameForeign{0};
 bool HookAddr(const char* name, void* target, void* det, void** orig);
 void OnFrame(int api) {
+    t_frameQpc=vi_qpc::Now();g_lastFrameQpc=t_frameQpc;
     C.present_ours++;
     g_frameApi = api;
     JobsFrame();
-    switch (api) { case API_DDRAW: g_frameDd++; break; case API_GL: g_frameGl++; break; case API_VK: g_frameVk++; break; case API_D3D11: g_frame11++; break; case API_D3D12: g_frame12++; break; }
+    switch (api) { case API_DDRAW: g_frameDd++; break; case API_GL: g_frameGl++; break; case API_VK: g_frameVk++; break; case API_D3D9: g_frame9++; break; case API_D3D11: g_frame11++; break; case API_D3D12: g_frame12++; break; }
 }
 // Claims a pending capture request for this frame. Caller must then fill g_capPix/g_capErr (or set g_capPending)
 // and call EndCapture().
@@ -1313,6 +1342,7 @@ bool BeginCaptureClaim() {
 void EndCapture(int api) {
     g_capApi = api;
     g_capturedPresent = C.present_ours.load();
+    g_capturedFrameQpc=t_frameQpc;
     g_capReq = 0;
     SetEvent(g_capEvent);
 }
@@ -1713,7 +1743,7 @@ bool RetargetLocked(HWND h,std::string* failure,std::shared_ptr<WndProcBinding>&
     {std::lock_guard<std::recursive_mutex> inputLock(g_inputMx);
      g_hwndUnicode=binding->unicode;g_origWndProc=binding->original;
      if(!g_vcurTouched){g_vcurX=rc.right/2;g_vcurY=rc.bottom/2;++g_pointerIssued;}g_hwnd=h;}
-    {std::lock_guard<std::mutex> lock(g_synthMx);g_appActive=-1;g_lastSynthAct=0;g_synthLeft=3;}
+    {std::lock_guard<std::mutex> lock(g_synthMx);g_appActive=-1;g_lastSynthAct=0;g_synthLeft=3;g_startupFocusRefreshed=false;}
     notification=binding;return true;
 }
 bool Retarget(HWND h,std::string* failure=nullptr) {
@@ -1925,7 +1955,7 @@ void ClaimFields(JOut& o) {
 // Commands that neither drive input nor change state: always allowed, and they bypass the exec mutex so an
 // agent can read status while a long hover / --after-frames / hold is running on the same target.
 bool IsOpenCommand(const std::string& cmd) {
-    return cmd == "ping" || cmd == "readiness" || cmd == "status" || cmd == "log" || cmd == "trace" || cmd == "claim" || cmd == "unclaim" || cmd == "restore-foreground" || cmd == "jobs" || cmd == "job-status";
+    return cmd == "ping" || cmd == "readiness" || cmd == "status" || cmd == "log" || cmd == "trace" || cmd == "claim" || cmd == "unclaim" || cmd == "restore-foreground" || cmd == "jobs" || cmd == "job-status" || cmd == "sequence-observe";
 }
 std::string ClaimRefusal(const char* why) {
     // caller holds g_claimMx
@@ -1964,6 +1994,7 @@ std::string ClaimGate(const std::string& cmd, const JObj& j) {
     }
     if (IsOpenCommand(cmd) || !active) return std::string();
     if (g_claimOwner == owner) {
+        if((cmd=="capture"||cmd=="frame-hash")&&JBool(j,"observation_only",false))return std::string();
         ClaimNativeAdmission nativeAdmission;
         if(!nativeAdmission){
             // Safety cleanup stays available, but cannot revive an expired claim over an in-flight native call.
@@ -1991,7 +2022,8 @@ bool ResolveXY(const JObj&,LONG&,LONG&);
 
 std::string StatusJson() {
     JOut o; o.bol("ok", true); o.str("version", VI_VERSION); o.num("pid", g_pid);
-    o.num("key_sequence_version",1);
+    o.num("key_sequence_version",1);o.num("sequence_timing_version",1);o.num("sequence_guard_version",1);o.num("input_scope_version",1);o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("sample_qpc_ticks",std::to_string(vi_qpc::Now()));
+    o.num("relative_scope_version",1);o.num("relative_scope_refused",(double)g_relativeScopeRefused.load());
     o.num("pad_api_census_version",1);o.raw("pad_api_census",PadApiCensusJson());
     o.num("claimed_di_guard_version",1);o.raw("claimed_di_guard",ClaimedDiStatusJson());
     o.num("cursor_guard_version",1);o.num("keybd_event_guard_version",1);o.bol("keybd_event_hooks_ready",CursorApiReady(vi_cursor_guard::KeybdEvent));o.raw("cursor_guard",CursorGuardStatus());
@@ -2028,7 +2060,7 @@ std::string StatusJson() {
         char h[32];sprintf_s(h,"0x%llX",(unsigned long long)(ULONG_PTR)g_fgRestoreWindow.load());guard.str("restore_hwnd",h);
         o.raw("foreground_guard",guard.done());
     }
-    o.raw("posted_input",PostedInputStatusJson());bool isolationSnapshot=true;o.raw("physical_input",PhysicalInputStatusJson(&isolationSnapshot));o.bol("fakefocus", g_cfg.fakefocus); o.bol("autoactivate",g_cfg.autoactivate);o.num("app_active",g_appActive);o.num("autoactivate_attempts_left",g_synthLeft); o.bol("isolate", isolationSnapshot); o.bol("blockfocus", g_cfg.blockfocus); o.bol("nofullscreen", g_cfg.nofullscreen); o.bol("keepvisible", g_cfg.keepvisible); if (g_hwnd) o.bol("minimized", IsIconic(g_hwnd) != FALSE);
+    o.raw("posted_input",PostedInputStatusJson());bool isolationSnapshot=true;o.raw("physical_input",PhysicalInputStatusJson(&isolationSnapshot));o.bol("fakefocus", g_cfg.fakefocus); o.bol("autoactivate",g_cfg.autoactivate);o.num("app_active",g_appActive);o.num("autoactivate_attempts_left",g_synthLeft); o.bol("startup_focus_refresh_delivered",g_startupFocusRefreshed); o.bol("isolate", isolationSnapshot); o.bol("blockfocus", g_cfg.blockfocus); o.bol("nofullscreen", g_cfg.nofullscreen); o.bol("keepvisible", g_cfg.keepvisible); if (g_hwnd) o.bol("minimized", IsIconic(g_hwnd) != FALSE);
     { JOut fs;fs.str("policy",g_cfg.nofullscreen?(g_fullscreenPolicy==1?"refuse":"borderless"):"native");fs.num("requests",g_fsRequests);fs.num("emulated",g_fsEmulated);fs.num("refused",g_fsRefused);fs.num("failures",g_fsFailed);fs.num("passthrough",g_fsPassthrough);fs.num("states_live",g_fsStates);fs.num("output_refs",g_fsOutputs);fs.num("last_hresult",(double)(unsigned long)g_fsLastResult.load());fs.bol("blocked_before_first_present",FullscreenBlockedBeforePresent());o.raw("fullscreen",fs.done()); }
     o.num("cursor_mode", g_cfg.cursor);o.str("cursor_mode_name",g_cfg.cursor==1?"virtual":g_cfg.cursor==2?"real":"auto");o.str("effective_cursor",UseVirtualCursor()?"virtual":"real");o.str("cursor_effective",UseVirtualCursor()?"virtual":"real");o.bol("owner_active",OwnerCursorActive());o.bol("owner_holding",g_ownerHolding);o.num("owner_input_count",g_ownerInputCount);o.num("owner_guard_standdowns",g_ownerStanddowns);if(TestHooksEnabled())o.num("test_realfg",g_testRealFg);o.bol("user_took_foreground",g_userIntent.Active()); o.num("rawmode", g_cfg.rawmode); o.num("msgmode", g_cfg.msgmode);
     o.num("vcur_x", g_vcurX); o.num("vcur_y", g_vcurY);
@@ -2039,6 +2071,7 @@ std::string StatusJson() {
     mouse.str("poll_channel",state?(buffer?"state_and_buffer":"GetDeviceState"):(buffer?"GetDeviceData":"none"));
     mouse.num("state_polls",C.di_mouse);mouse.num("buffer_polls",C.di_data_mouse);mouse.num("di8_probe_roles",g_di8ProbeRoles);
     mouse.num("poll_hook_failures",(double)g_diPollHookFailures.load());mouse.num("moves_since_poll",(double)g_diMouseMovesSincePoll.load());
+    mouse.num("virtual_acquire_version",1);mouse.num("virtual_acquires",(double)g_diVirtualAcquires.load());
     mouse.bol("mouse_poll_unobserved",g_diMouseMovesSincePoll>=3);
     if(g_diMouseMovesSincePoll>=3)mouse.str("warning","mouse has not polled DirectInput since at least three moves; queued input does not establish game consumption");
     o.raw("directinput_mouse",mouse.done());}
@@ -2058,14 +2091,18 @@ std::string StatusJson() {
         o.str("frame_api", ApiName(g_frameApi)); o.num("frames", (double)C.present_ours.load());
         o.str("capture_path", ApiName(g_lastCaptureApi));
         o.num("capture_output_version",1);o.num("capture_scope_version",1);
-        JOut fa; fa.num("d3d11", (double)g_frame11.load()); fa.num("d3d12", (double)g_frame12.load());
+        JOut fa; fa.num("d3d9", (double)g_frame9.load());fa.num("d3d11", (double)g_frame11.load()); fa.num("d3d12", (double)g_frame12.load());
         fa.num("ddraw",(double)g_frameDd.load()); fa.num("gl", (double)g_frameGl.load()); fa.num("vk", (double)g_frameVk.load()); fa.num("foreign_dxgi", (double)g_frameForeign.load());
         o.raw("frames_by_api", fa.done());
         JOut d12; d12.num("queue_source", g_c12QueueSource); d12.bol("ecl_hook", o_ExecuteCommandLists != nullptr);
         d12.num("submits", (double)g_c12.submits); d12.num("releases", (double)g_c12.releases); d12.num("leaks", (double)g_c12.leaks); d12.num("resizes", (double)g_resizes.load());
         o.raw("d3d12", d12.done());
         o.bol("gl_hooked", o_wglSwapBuffers != nullptr);
-        {JOut d;d.bol("hooked",o_D9Factory||o_D9FactoryEx);d.num("requests",g_d9Requests);d.num("emulated",g_d9Emulated);d.num("refused",g_d9Refused);d.num("failed",g_d9Failed);d.bol("blocked_before_first_present",D9BlockedBeforePresent());d.num("last_hresult",(double)(unsigned long)g_d9LastResult.load());d.raw("diagnostics",D9DiagnosticsJson());o.raw("d3d9",d.done());}
+        {JOut d;d.bol("hooked",o_D9Factory||o_D9FactoryEx);d.num("requests",g_d9Requests);d.num("emulated",g_d9Emulated);d.num("refused",g_d9Refused);d.num("failed",g_d9Failed);d.bol("blocked_before_first_present",D9BlockedBeforePresent());d.num("last_hresult",(double)(unsigned long)g_d9LastResult.load());d.raw("diagnostics",D9DiagnosticsJson());
+        d.bol("present_hooked",g_d9PresentHooked);d.num("present_attempts",(double)g_d9PresentAttempts.load());d.num("presented",(double)g_d9PresentOk.load());d.num("last_present_hresult",(double)(unsigned long)g_d9PresentLast.load());d.num("device_lost_returns",(double)g_d9Lost.load());d.num("capture_failures",(double)g_d9CaptureFailures.load());
+        d.bol("late_probe_attempted",g_d9LateAttempted);d.num("late_probe_9_hresult",(double)(unsigned long)g_d9LateResult[0].load());d.num("late_probe_ex_hresult",(double)(unsigned long)g_d9LateResult[1].load());d.num("module_lifetime_failures",(double)g_d9LifetimeFailures.load());
+        if((g_d9Requests>0||g_d9ObservedOperations[0].nativeOk>0||g_d9ObservedOperations[1].nativeOk>0)&&!g_d9PresentOk&&GetTickCount()-g_t0>=5000)d.str("render_warning","D3D9 initialization observed but no successful target Present after at least 5 s; inspect device_lost_returns, last_present_hresult and late_probe HRESULTs; pass launch args such as -windowed if supported");
+        o.raw("d3d9",d.done());}
         {JOut d;d.bol("hooked",o_DdCreate||o_DdCreateEx);d.num("cooperative_requests",g_ddCoop);d.num("mode_requests",g_ddModes);d.num("emulated",g_ddEmulated);d.num("refused",g_ddRefused);d.num("failed",g_ddFailed);d.num("presented",g_ddPresented);d.num("deferred_for_palette",g_ddDeferredPalette);d.num("objects",g_ddRecordCount);d.num("versions",g_ddVersionMask);d.bol("blocked",g_ddBlocked);d.bol("blocked_before_first_present",DdBlockedBeforePresent());d.num("last_hresult",(double)(unsigned long)g_ddLastResult.load());
          std::shared_ptr<DdDevice> device;{std::lock_guard<std::mutex> lock(g_ddLastMx);device=g_ddLastDevice.lock();}auto mode=DdSnapshot(device);d.bol("mode_active",mode.active);d.num("width",mode.width);d.num("height",mode.height);d.num("bpp",mode.bpp);d.num("refresh",mode.refresh);o.raw("ddraw",d.done());}
         {
@@ -2084,7 +2121,7 @@ std::string StatusJson() {
 #define CN(x) c.num(#x, (double)C.x.load())
     CN(gaks); CN(gks); CN(gkbs); CN(gcur); CN(scur); CN(clip); CN(gfg); CN(setfg); CN(setfg_blocked);
     CN(rid); CN(rid_magic); CN(rib); CN(rib_injected); CN(reg_raw); CN(reg_raw_ok); CN(reg_raw_failed); CN(reg_raw_removed); CN(raw_post_failed); CN(raw_target_rejected); CN(raw_queue_dropped); CN(raw_real_denied); CN(di_kbd); CN(di_mouse); CN(di_data_kbd); CN(di_data_mouse); CN(di_acq); CN(di_fake); CN(xinput);
-    CN(wm_key); CN(wm_char); CN(wm_mouse); CN(wm_input); CN(wm_input_dropped); CN(wm_mouse_dropped); CN(act_swallowed); CN(act_synth); CN(act_leaked); CN(act_refresh_posted); CN(act_refresh_delivered); CN(act_refresh_cancelled); CN(act_refresh_failed); CN(act_cbt_blocked); CN(act_cbt_installed); CN(act_cbt_failed); CN(act_cbt_unhook_failed); CN(min_blocked); CN(min_restored); CN(create_visible_deferred); CN(present); CN(present_ours); CN(captures);
+    CN(wm_key); CN(wm_char); CN(wm_mouse); CN(wm_mouse_owned); CN(wm_mouse_owned_delivered); CN(wm_mouse_owned_dropped); CN(wm_mouse_unrecognized_dropped); CN(wm_input); CN(wm_input_dropped); CN(wm_mouse_dropped); CN(act_swallowed); CN(act_synth); CN(act_leaked); CN(act_refresh_posted); CN(act_refresh_delivered); CN(act_refresh_cancelled); CN(act_refresh_failed); CN(act_cbt_blocked); CN(act_cbt_installed); CN(act_cbt_failed); CN(act_cbt_unhook_failed); CN(min_blocked); CN(min_restored); CN(create_visible_deferred); CN(present); CN(present_ours); CN(captures);
     CN(posted); CN(raw_posted); CN(raw_queued); CN(post_target_rejected); CN(last_post_target_error);
 #undef CN
     c.num("fs_refused", (double)(g_fsRefused.load() + g_fsFailed.load()));   // public alias of fullscreen.refused + fullscreen.failures
@@ -2157,7 +2194,7 @@ std::string DoCapture(const JObj& j) {
     // for auto captures until this target has actually produced a native frame.
     // Explicit native requests retain their wait/error behavior, as do after-frames.
     if (method == "swapchain" || (method == "auto" && C.present_ours > 0)) {
-        if (o_Present || o_wglSwapBuffers || o_vkQueuePresentKHR || g_ddHooked) {
+        if (o_Present || o_wglSwapBuffers || o_vkQueuePresentKHR || g_ddHooked || g_d9PresentHooked) {
             got = native();
             // the D3D12 queue fallback hook is installed asynchronously: give it one retry
             // transient: the D3D12 queue hook is installed by the monitor thread (<= 1 s) and the queue is only known
@@ -2172,6 +2209,7 @@ std::string DoCapture(const JObj& j) {
         if (CaptureViaPrintWindow(e2)) { got = true; used = "printwindow"; path_ = g_capViaOverlay?"printwindow_overlay":"printwindow"; } else err += (err.empty() ? "" : "; ") + e2;
     }
     if (!got) return ErrJ(err);
+    const auto captureQpc=vi_qpc::Now();
     if (used=="swapchain" && g_capApi==API_DDRAW && DdGeometryMismatch()) return ErrJ("ddraw: client dimensions no longer match virtual display mode");
     const char* scopeReason=nullptr;if(!CaptureScopeCurrent(captureScope,&scopeReason))return CaptureScopeFailure(scopeReason,&captureScope);
     RECT rc{0,0,captureScope.width,captureScope.height};
@@ -2215,6 +2253,8 @@ std::string DoCapture(const JObj& j) {
     g_lastCaptureApi = used == "printwindow" ? API_PRINTWINDOW : g_capApi.load();
     C.captures++;
     JOut o; o.bol("ok", true); o.str("path", path); o.str("method", used); o.str("capture_path", path_); o.num("w", outputW); o.num("h", outputH);
+    o.str("timing_clock","QueryPerformanceCounter");o.str("qpc_frequency",std::to_string(vi_qpc::Frequency()));o.str("capture_qpc_ticks",std::to_string(captureQpc));
+    if(used!="printwindow")o.str("frame_qpc_ticks",std::to_string(g_capturedFrameQpc.load()));else o.raw("frame_qpc_ticks","null");
     o.num("source_w",g_capW);o.num("source_h",g_capH);o.str("format",format);o.str("hash_scope","source_region_bgra");o.bol("capture_space_updated",!hashOnly&&!preserveMap);o.raw("capture_scope",CaptureScopeJson(captureScope));
     if(format=="jpeg")o.num("quality",qualityValue);
     o.num("frame", used == "printwindow" ? (double)C.present_ours.load() : (double)g_capturedPresent.load());
@@ -2249,6 +2289,7 @@ std::string Exec(const std::string& line) {
     std::string cmd = JStr(j, "cmd");
     CursorCommandScope cursorCommandScope(cmd);
     if (duplicate && (cmd == "pad" || cmd == "pad-ramp" || cmd == "pad-timeline" || cmd == "pad-arm")) return ErrJ("pad request has duplicate fields; no input was injected");
+    if(duplicate&&(cmd=="sequence-observe"||cmd=="sequence"||cmd=="seq"))return ErrJ("sequence request has duplicate fields; no input was changed");
     if(JHas(j,"for_ms")&&cmd!="config")return ErrJ("for_ms applies only to config isolate=false; no input or configuration changed");
     if(JHas(j,"stagger_ms")&&cmd!="pad-timeline")return ErrJ("stagger_ms is only implemented for pad-timeline; no input was injected");
     if(line.size()>65536&&(cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="seq"||cmd=="sequence"||cmd=="pad"||cmd=="pad-ramp"||cmd=="pad-timeline"))return ErrJ("input job request exceeds64KiB; no input was injected");
@@ -2267,6 +2308,7 @@ std::string Exec(const std::string& line) {
     const bool windowInput=cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="down"||cmd=="type"||cmd=="seq"||cmd=="sequence"||cmd=="mouse"||cmd=="move"||cmd=="click"||cmd=="mousedown"||cmd=="drag"||cmd=="placement-drag"||cmd=="wheel";
     if(windowInput&&!WndBindingInputAllowed(g_hwnd)){WndBindingRecordInputRefusal();JOut out;out.bol("ok",false);out.bol("input_injected",false);out.str("error","window binding lifetime is unconfirmed; release local input, then restart the target or select a fresh safely adoptable window; same-HWND recovery is unsupported");return out.done();}
     if(cmd=="jobs"||cmd=="job-status"||cmd=="job-cancel")return JobCommand(cmd,j);
+    if(cmd=="sequence-observe")return SequenceObserve(j);
     const bool coordinateMotion=(cmd=="mouse"||cmd=="move")&&!JHas(j,"dx")&&!JHas(j,"dy");
     const bool positionedPress=(cmd=="click"||cmd=="mousedown")&&(JHas(j,"x")||JHas(j,"y"));
     if((coordinateMotion||positionedPress)&&JStr(j,"space")=="capture"&&!JBool(j,"norm",false)&&!CaptureMapCurrent())return CaptureMapRefusal();
@@ -2312,7 +2354,7 @@ std::string Exec(const std::string& line) {
         if (JHas(j, "fakefocus")) g_cfg.fakefocus = JBool(j, "fakefocus", true);
         if(JHas(j,"isolate"))SetIsolation(JBool(j,"isolate",true),isolateFor);
         if (JHas(j, "blockfocus")) g_cfg.blockfocus = JBool(j, "blockfocus", true);
-        if (JHas(j, "fullscreen")) g_fullscreenPolicy=JStr(j,"fullscreen")=="refuse"?1:0; // validated before staging
+        if (JHas(j, "fullscreen")) {const int policy=JStr(j,"fullscreen")=="refuse"?1:0;if(policy==1)g_d9ProbeAdmissions.fetch_or(1u);g_fullscreenPolicy=policy;} // validated before staging; stop probes before publishing refusal
         if (JHas(j, "nofullscreen")) g_cfg.nofullscreen = JBool(j, "nofullscreen", true);
         if (JHas(j, "keepvisible")) g_cfg.keepvisible = JBool(j, "keepvisible", true);
         if (JHas(j, "vk")) g_vkEnabled = JBool(j, "vk", true);   // vk=off: Vulkan hooks pass through (no usage change, no capture)
@@ -2378,6 +2420,18 @@ std::string Exec(const std::string& line) {
     }
     if(cmd=="type")return TypeInput(j);
     if (cmd == "mouse" || cmd == "move") {
+        std::unique_lock<std::recursive_mutex> scopeAdmission(g_inputMx,std::defer_lock);
+        bool captureScopeChecked=false;std::string expectedScope;
+        auto scopeRefusal=[&](const char* reason){++g_relativeScopeRefused;JOut out;out.bol("ok",false);out.bol("input_injected",false);out.str("error",reason);out.str("reason","relative_capture_scope_mismatch");return out.done();};
+        if(JHas(j,"expected_capture_scope")){
+            const auto& value=j.at("expected_capture_scope");
+            if(value.t!=1||cmd!="move"||!JBool(j,"raw",false)||(!JHas(j,"dx")&&!JHas(j,"dy"))||JHas(j,"x")||JHas(j,"y")||
+                JNum(j,"steps",1)!=1||JBool(j,"frame_paced",false))return scopeRefusal("scoped motion requires a raw relative single time-paced step; no input was injected");
+            expectedScope=value.s;if(expectedScope.size()>2048)return scopeRefusal("capture scope token exceeds its bound; no input was injected");
+            scopeAdmission.lock();CaptureScope current;
+            if(!CaptureScopeTake(current)||!vi_capture_fence::Matches(expectedScope,CaptureScopeJson(current)))return scopeRefusal("capture scope no longer matches target lifetime/geometry; no input was injected");
+            captureScopeChecked=true;
+        }
         if (!g_hwnd) return ErrJ("no window");
         double stepsValue=JNum(j,"steps",1);if(!(stepsValue>=1&&stepsValue<=10000&&stepsValue==std::floor(stepsValue)))return ErrJ("steps must be integer1..10000");int steps=(int)stepsValue;
         double stepms = JNum(j, "step_ms", 10);
@@ -2414,9 +2468,11 @@ std::string Exec(const std::string& line) {
             LONG ox=g_vcurX,oy=g_vcurY;
             LONG destX=(LONG)(std::max)(-2147483648LL,(std::min)(2147483647LL,(long long)ox+dx)),destY=(LONG)(std::max)(-2147483648LL,(std::min)(2147483647LL,(long long)oy+dy));
             if(!path.Init(destX,destY,unbounded))return ErrJ("pointer target is unavailable");
+            if(captureScopeChecked&&!vi_capture_fence::Matches(expectedScope,CaptureScopeJson(path.scope)))return scopeRefusal("capture scope changed before motion admission; no input was injected");
             if(unbounded)g_cfg.cursor=1;
             if(!unbounded&&g_cfg.edgeMargin>0)g_cfg.cursor=1;
             for (int s = 1; s <= steps; s++) {
+                if(captureScopeChecked&&!path.Valid())return scopeRefusal("capture scope changed before motion publication; no input was injected");
                 if(!path.Valid())return motionError("pointer target changed or resized during move");
                 LONG tx=(LONG)((long long)dx*s/steps), ty=(LONG)((long long)dy*s/steps);
                 POINT point{(LONG)(std::max)(-2147483648LL,(std::min)(2147483647LL,(long long)ox+tx)),(LONG)(std::max)(-2147483648LL,(std::min)(2147483647LL,(long long)oy+ty))};
@@ -2440,6 +2496,7 @@ std::string Exec(const std::string& line) {
             }
         }
         JOut o; o.bol("ok", true); o.num("x", g_vcurX); o.num("y", g_vcurY);
+        if(captureScopeChecked)o.bol("capture_scope_checked",true);
         o.num("applied_dx", (double)appliedX); o.num("applied_dy", (double)appliedY);
         o.num("raw_dx", rawX); o.num("raw_dy", rawY); o.bol("unbounded", unbounded);
         o.str("cursor", UseVirtualCursor() ? "virtual" : "real");
@@ -2785,6 +2842,7 @@ DWORD WINAPI MonitorThread(LPVOID) {
         if (now - lastSlow > 1000) {
             lastSlow = now;
             TryHookDInput(); TryHookDInputLegacy(); TryHookXInput(); TryHookEcl(); TryHookGL(); TryHookVk(); TryHookDDraw(); TryHookD9();
+            TryD9LateHooks();
             if (!g_hwndForced) {
                 HWND best = FindMainWindow();
                 if (!g_hwnd || !IsWindow(g_hwnd)) { if (best) Retarget(best); }

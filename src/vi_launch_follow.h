@@ -21,6 +21,15 @@ inline bool Name(const std::wstring& a,const std::wstring& b) {
     }
     return true;
 }
+// A Toolhelp row supplies parent/name but no creation identity. A handle opened
+// later can refer to a replacement PID; do not combine that birth with the old
+// parent. The cutoff is sampled BEFORE the snapshot, and image identity comes
+// from the same handle as the creation FILETIME.
+inline bool SnapshotIdentity(std::uint32_t rowPid,const std::wstring& rowName,std::uint32_t handlePid,const std::wstring& imagePath,std::uint64_t born,std::uint64_t beforeSnapshot){
+    if(!rowPid||rowPid!=handlePid||!born||!beforeSnapshot||born>beforeSnapshot||rowName.empty()||imagePath.empty())return false;
+    const auto slash=imagePath.find_last_of(L"\\/");const auto image=slash==std::wstring::npos?imagePath:imagePath.substr(slash+1);
+    return !image.empty()&&Name(image,rowName);
+}
 inline std::wstring Launcher(const std::wstring& target) {
     if(Name(target,L"SkyrimSE.exe"))return L"SkyrimSELauncher.exe";
     if(Name(target,L"Oblivion.exe"))return L"OblivionLauncher.exe";

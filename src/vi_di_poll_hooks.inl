@@ -50,3 +50,13 @@ bool DiPollInstall(void* target,bool buffered){
     {std::lock_guard<std::mutex> lock(g_claimDiEntryMx);slot->created=created;slot->enabled=ok;slot->busy=false;if(!ok)++g_diPollHookFailures;}
     return ok;
 }
+bool DiVirtualMouseReady(void* self){
+    if(!self)return false;void** table=*(void***)self;bool state=false,buffer=false;
+    std::lock_guard<std::mutex> lock(g_claimDiEntryMx);
+    for(unsigned i=0;i<kDiPollSlots;++i){
+        const auto& s=g_diStateEntries[i];const auto& b=g_diDataEntries[i];
+        if(s.enabled&&s.target==table[9]&&CursorEntryReaches(s.target,kDiStateDetours[i]))state=true;
+        if(b.enabled&&b.target==table[10]&&CursorEntryReaches(b.target,kDiDataDetours[i]))buffer=true;
+    }
+    return state&&buffer;
+}

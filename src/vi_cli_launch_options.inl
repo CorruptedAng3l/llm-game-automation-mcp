@@ -1,8 +1,10 @@
 // Optional direct-exe child cwd and one-shot, nonactivating adopted-window geometry.
+#include "vi_launch_affinity.h"
 struct LaunchOptions {
     std::wstring cwd;
     bool explicitCwd = false, clientSize = false;
     unsigned width = 0, height = 0;
+    bool affinitySpecified=false;std::uint64_t affinityMask=0;
 };
 static bool LaunchAbsolutePath(const std::wstring& path, std::wstring& absolute) {
     DWORD needed = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
@@ -23,11 +25,17 @@ static bool LaunchDimension(const std::string& text, unsigned& value) {
 }
 static bool PrepareLaunchOptions(const Args& a, std::wstring& exe, LaunchOptions& options, std::string& error) {
     options.explicitCwd = HasOpt(a, "cwd"); options.clientSize = HasOpt(a, "client-size");
-    if (!options.explicitCwd && !options.clientSize) return true;
-    if (exe.empty() || HasOpt(a, "steam") || HasOpt(a, "aumid")) { error = "--cwd/--client-size currently require direct --exe launch; Steam/AUMID launcher semantics are unsupported"; return false; }
-    for (const char* key : {"cwd", "client-size"}) {
+    options.affinitySpecified=HasOpt(a,"cpu-affinity");
+    if (!options.explicitCwd && !options.clientSize && !options.affinitySpecified) return true;
+    if (exe.empty() || HasOpt(a, "steam") || HasOpt(a, "aumid")) { error = "--cwd/--client-size/--cpu-affinity currently require direct --exe launch; Steam/AUMID launcher semantics are unsupported"; return false; }
+    for (const char* key : {"cwd", "client-size", "cpu-affinity"}) {
         unsigned count = 0; for (const auto& item : a.opt) if (item.first == key) ++count;
         if (count > 1) { error = "duplicate --" + std::string(key); return false; }
+    }
+    if(options.affinitySpecified){
+        if(!ParseLaunchAffinity(GetOpt(a,"cpu-affinity"),(std::numeric_limits<DWORD_PTR>::max)(),options.affinityMask)){error="--cpu-affinity needs a nonzero hexadecimal processor mask such as 0xF";return false;}
+        DWORD_PTR current=0,system=0;
+        if(!GetProcessAffinityMask(GetCurrentProcess(),&current,&system)||(options.affinityMask&~(std::uint64_t)system)){error="--cpu-affinity selects processors outside this process group's system mask";return false;}
     }
     if (options.explicitCwd) {
         std::string raw = GetOpt(a, "cwd");

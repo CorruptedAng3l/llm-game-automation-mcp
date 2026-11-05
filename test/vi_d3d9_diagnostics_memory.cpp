@@ -25,6 +25,8 @@ template<class F>F D9Original(void*,unsigned,unsigned kind){void* functions[5]={
 bool D9Patch(void*,unsigned,unsigned,void*,const char*){return requiredHooks;}
 template<class F>HRESULT D9Parameters(D3DPRESENT_PARAMETERS* pp,HWND,DWORD,F call){return admit?call(pp,false):D3DERR_INVALIDCALL;}
 #define IID_IDirect3DDevice9Ex fakeIID
+void D9ObserveDevice(IDirect3DDevice9*){} // optional capture observer tested by the dedicated Present fixture
+bool D9Chain(IDirect3DSwapChain9*){return true;}
 #include "actual_wrappers.inl"
 #undef IID_IDirect3DDevice9Ex
 #include "actual_json.inl"
@@ -43,7 +45,7 @@ int main(){
  originalExists=false;Check(h_D9Reset((IDirect3DDevice9*)&fixtureDevice,&pp)==D3DERR_INVALIDCALL&&nativeCalls[2]==2,"missing original never called");Check(g_d9ObservedOperations[2].returned==4&&g_d9ObservedOperations[2].nativeCalls==2,"missing-original wrapper refusal recorded");originalExists=true;
  requiredHooks=false;Check(h_D9Create(nullptr,1,D3DDEVTYPE_HAL,nullptr,0,&pp,&device)==D3DERR_INVALIDCALL&&device==nullptr&&released==1&&nativeCalls[0]==2,"required existing hook failure preserves owned output release/refusal");Check(g_d9ObservedOperations[0].nativeOk==2&&g_d9ObservedOperations[0].failed==2,"successful lower create is separate from wrapper failure");requiredHooks=true;
  reenter=true;Check(h_D9Reset((IDirect3DDevice9*)&fixtureDevice,&pp)==S_OK&&nativeCalls[2]==4,"reentrant lower callback completes without new lock");Check(g_d9ObservedOperations[2].returned==6&&g_d9ObservedOperations[2].nativeCalls==4,"reentrant wrapper and lower returns counted separately");
- Check(D9DiagnosticsJson().find("no Present interception/readback added")!=std::string::npos,"diagnostics explicitly does not claim frames or capture");
+ Check(D9DiagnosticsJson().find("negotiation counters do not establish rendered frames")!=std::string::npos,"negotiation diagnostics explicitly does not claim rendered frames");
  Check(lowerEntryCounted&&g_d9ObservedOperations[2].nativeReturns==4,"native entry is published before callback, returns counted separately");
  std::printf("{\"passed\":%u,\"failed\":%u,\"completed\":true,\"scope\":\"exact production wrappers/HRESULT storage/JSON; finite fabricated callbacks only\"}\n",passed,failed);return failed?1:0;
 }
