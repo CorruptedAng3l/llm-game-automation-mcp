@@ -20,9 +20,13 @@ original=native(undefined);delete original.input_read_observation;r=presentInput
 original=native(observation({terminal:false,started:false,frozen:false,outcome:'pending'}),{accepted:true,job_state:'queued',job_complete:false,input_injected:null});r=presentInputReads(result(original));check(r.ok&&r.json===original,'asynchronous admission is not turned into a premature reader verdict');
 original=native(observation({kind:'keys',keys:[],keys_requested:0,applicable:false,measured:false,outcome:'not_applicable'}),{input_injected:false});r=presentInputReads(result(original));check(r.ok&&r.json===original,'wait-only plan is not required to emit or observe input');
 const failed={...result(native()),ok:false};check(presentInputReads(failed)===failed,'an existing transport/scheduler failure is preserved');
+original=native();r=presentInputReads(result({ok:true,job:original}));
+check(!r.ok&&r.json.job.input_receipt===original&&r.json.job.reader_return_observed===false,'async exact-job status qualifies the nested completed hold and preserves its native receipt');
 const t=await startFake({replies:{key:native()}});
 try{
  r=await t.call('key',{pid,key:'w'});check(r.isError&&r.json.input_receipt?.job_id===`${pid}:123:4`&&t.callsOf('key').length===1,'actual MCP propagates unread result with one original action and exact receipt');
+ t.setScenario({replies:{'job-status':{ok:true,job:native()}}});t.clearCalls();
+ r=await t.call('job_status',{pid,id:`${pid}:123:4`});check(r.isError&&r.json.job.reader_return_observed===false&&t.callsOf('key').length===0,'actual MCP async hold status reports no observed reader without replaying the hold');
  t.setScenario({replies:{key:native(observation({keys:[key(87,'1')],keys_observed:1,all_requested_observed:true,outcome:'observed'}))}});t.clearCalls();
  r=await t.call('key',{pid,key:'w'});check(!r.isError&&r.json.reader_return_observed===true&&t.callsOf('key').length===1,'actual MCP accepts measured reader return without additional input or CLI polling');
 }finally{await t.close();}

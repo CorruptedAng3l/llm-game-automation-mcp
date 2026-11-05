@@ -56,7 +56,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'pointer_scope_model' 'run_pointerscopemodel.ps1'
  New-VinputSuiteCase 'pointer_widen_model' 'run_pointerwidenmodel.ps1'
  New-VinputSuiteCase 'public_safeguards' 'run_publicsafeguardstest.ps1'
- New-VinputSuiteCase 'job_reader_observation' 'run_jobreadtest.ps1'
+ New-VinputSuiteCase 'job_reader_observation' 'run_jobreadtest.ps1' @{} 'Per-key and per-channel returns distinguish W window dispatch from actual polling, including raw keyboard readers.'
  New-VinputSuiteCase 'capture_mapping' 'run_capturemappingtest.ps1'
  New-VinputSuiteCase 'pointer_capability' 'run_pointercapabilitytest.ps1'
  New-VinputSuiteCase 'launch_loaded' 'run_launchloadedtest.ps1'

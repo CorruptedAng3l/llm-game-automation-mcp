@@ -6,6 +6,12 @@ const u64=(v:unknown):v is string=>typeof v==='string'&&/^(0|[1-9][0-9]{0,19})$/
 export function presentInputReads(result:CliResult):CliResult{
  const native=object(result.json),o=object(native?.input_read_observation);
  if(!native)return result;
+ const nested=object(native.job);
+ if(result.ok&&native.ok===true&&nested){
+  const qualified=presentInputReads({...result,json:nested});
+  if(qualified.json!==nested)return {...result,ok:qualified.ok,json:{...native,ok:qualified.ok,job:qualified.json,...(!qualified.ok?{scheduler_ok:true,error:object(qualified.json)?.error}:{})}};
+  return result;
+ }
  if(!result.ok||native.ok!==true||native.job_state!=='completed'||native.job_complete!==true||native.input_injected!==true)return result;
  if(native.accepted!==false||typeof native.job_id!=='string'||!native.job_id)return result;
  const unavailable=():CliResult=>({...result,json:{...native,input_read_warning:'Native reader evidence is incomplete or inconsistent; scheduler completion does not confirm a reader or application response.'}});

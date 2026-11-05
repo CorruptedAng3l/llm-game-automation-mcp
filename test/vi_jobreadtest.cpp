@@ -14,6 +14,11 @@ int main(){
  auto result=Finish(*untouched);Check(result.find("\"outcome\":\"not_observed\"")!=std::string::npos,"historical/other-key polls and message dispatch alone do not establish requested polling return");
  g_keyTrace[VK_F6].gaks.record(0x8000);Check(JobReplyLocked(*untouched)==result,"later key polling cannot change a frozen terminal receipt");
  auto high=KeyJob({VK_F6});g_keyTrace[VK_F6].di_state.record(0x80);result=Finish(*high);Check(result.find("\"all_requested_observed\":true")!=std::string::npos,"requested DirectInput high-state return is observed");
+ Check(result.find("\"DirectInputState\":{\"measured\":true,\"reads\":\"1\",\"down_returns\":\"1\"}")!=std::string::npos&&result.find("\"GetAsyncKeyState\":{\"measured\":true,\"reads\":\"0\",\"down_returns\":\"0\"}")!=std::string::npos,"completed hold identifies the exact reader instead of attributing DI state to GAKS");
+ auto unreadW=KeyJob({'W'});g_keyTrace['W'].delivery(true);g_keyTrace[VK_SPACE].gaks.record(0x8000);result=Finish(*unreadW);
+ Check(result.find("\"vk\":87")!=std::string::npos&&result.find("\"delivery_observation\":\"messages_dispatched_without_poll_high\"")!=std::string::npos,"UE-style W dispatch with unrelated Space polling explicitly reports delivered messages without a W reader");
+ auto rawW=KeyJob({'W'});g_keyTrace['W'].raw_data.record(RI_KEY_MAKE,true);result=Finish(*rawW);
+ Check(result.find("\"GetRawInputData\":{\"measured\":true,\"reads\":\"1\",\"down_returns\":\"1\"}")!=std::string::npos,"raw keyboard high return is attributed to the requested W job");
  auto low=KeyJob({VK_F6});g_keyTrace[VK_F6].gkbs.record(0);result=Finish(*low);Check(result.find("\"outcome\":\"not_observed\"")!=std::string::npos&&result.find("\"poll_reads\":\"1\"")!=std::string::npos,"up-only polling remains distinct from reading the virtual down state");
  auto chord=KeyJob({VK_F6,VK_F7});g_keyTrace[VK_F6].raw_buffer.record(0,true);result=Finish(*chord);Check(result.find("\"outcome\":\"partial\"")!=std::string::npos,"one chord member read cannot establish the whole chord");
  auto duplicate=KeyJob({VK_F6,VK_F6});Check(duplicate->readObservation.keys.size()==1,"duplicate requested names keep one key observation");Finish(*duplicate);

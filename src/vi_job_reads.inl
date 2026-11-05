@@ -35,6 +35,9 @@ void JobReadFields(JOut& out,const InputJob& job){
   for(unsigned n=0;n<aliases.size();++n)if(key.aliases[n].vk)aliases[n]=observation.frozen?key.aliases[n].delta:vi_input_reads::Difference(key.aliases[n].before,JobReadSample(key.aliases[n].vk));
   const auto evidence=vi_input_reads::KeyEvidence(delta,aliases);valid=valid&&evidence.measured;
   if(delta.valid&&delta.down)++observed;if(keys.size()>1)keys+=",";JOut item;item.num("vk",key.vk);item.bol("measured",evidence.measured);item.str("poll_reads",std::to_string(delta.reads));item.str("down_returns",std::to_string(delta.down));item.str("message_dispatches",std::to_string(delta.messages));
+  const char* names[]={"GetAsyncKeyState","GetKeyState","GetKeyboardState","DirectInputState","DirectInputBuffer","GetRawInputData","GetRawInputBuffer"};JOut channels;
+  for(unsigned n=0;n<vi_input_reads::channels;++n){JOut channel;channel.bol("measured",delta.valid);if(delta.valid){channel.str("reads",std::to_string(delta.channelReads[n]));channel.str("down_returns",std::to_string(delta.channelDown[n]));}else{channel.raw("reads","null");channel.raw("down_returns","null");}channels.raw(names[n],channel.done());}
+  item.raw("channels",channels.done());item.str("delivery_observation",!evidence.measured?"unavailable":delta.down?"poll_high_observed":delta.messages?"messages_dispatched_without_poll_high":"no_message_or_poll_high_observed");
   if(key.aliases[0].vk){item.bol("exact_vk_measured",delta.valid);item.bol("modifier_alias_ambiguous",evidence.aliasAmbiguous);std::string related="[";
    for(unsigned n=0;n<aliases.size();++n){if(n)related+=",";JOut alias;alias.num("vk",key.aliases[n].vk);alias.bol("measured",aliases[n].valid);alias.str("poll_reads",std::to_string(aliases[n].reads));alias.str("down_returns",std::to_string(aliases[n].down));related+=alias.done();}item.raw("modifier_aliases",related+"]");}
   keys+=item.done();}
