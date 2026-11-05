@@ -1,4 +1,4 @@
-const { observeSettle, lookCalibrate, lookAt } = await import(process.env.CAMERA_HELPER_MODULE ?? '../build/camerahelpers.js');
+const { observeSettle, lookCalibrate, lookAt, lookTurn } = await import(process.env.CAMERA_HELPER_MODULE ?? '../build/camerahelpers.js');
 import {makeChecker} from './lib.mjs';
 const {check,state}=makeChecker(),pid=4242,owner='unit-camera';
 const scope={hwnd:'0x1234',thread:17,adoption_generation:'2',geometry_epoch:'0',lifetime_cookie:'3',client_w:800,client_h:600};
@@ -20,7 +20,7 @@ function fixture(options={}) {
     reads++;const changing=options.animate||options.smooth&&reads<5;
     const value=changing?reads:Math.round(point[0]*1000+point[1]);
     json={ok:true,hash:value.toString(16).padStart(16,'0'),capture_scope:options.scopeAfterMove&&moves?{...scope,geometry_epoch:'1'}:scope,
-     timing_clock:'QueryPerformanceCounter',qpc_frequency:'10000000',capture_qpc_ticks:String(reads*10000),frame_qpc_ticks:String(reads*10000-100)};
+     timing_clock:'QueryPerformanceCounter',qpc_frequency:'10000000',capture_qpc_ticks:String(reads*10000),frame_qpc_ticks:String(reads*10000-100),...(body.motion_sample?{motion_sample_version:1,motion_sample_w:16,motion_sample_h:1,motion_sample_rgb:(options.largeNoise&&reads%2?'FFFFFF':reads%2?'010101':'000000').repeat(16)}:{})};
    }else if(body.cmd==='move'){
     moves++;
     if(options.motionThrows)throw new Error('transport fault');
@@ -74,6 +74,13 @@ f=fixture({refuse:true});r=read(await lookAt(f.ctx,{...args,calibration}));
 check(!r.ok&&f.moves===1&&r.motion_may_have_been_applied===false&&r.unconfirmed_motion.input_injected===false,'typed native no-input refusal remains distinguishable from uncertain motion');
 f=fixture({animate:true});r=read(await lookAt(f.ctx,{...args,calibration,settle_timeout_ms:15}));
 check(!r.ok&&!f.moves,'unsettled initial region refuses before camera correction');
+f=fixture({animate:true});r=read(await observeSettle(f.ctx,{...args,max_change_pct:5,pixel_tolerance:8}));
+check(r.ok&&r.observation.stability_metric==='area_averaged_rgb_grid'&&r.observation.max_change_pct===5,'small ambient RGB noise can settle under an explicit motion tolerance despite different exact hashes');
+f=fixture({animate:true,largeNoise:true});r=read(await observeSettle(f.ctx,{...args,timeout_ms:20,max_change_pct:5}));
+check(!r.ok&&!r.settled,'large changing regions cannot borrow a small motion tolerance');
+f=fixture({animate:true});r=read(await lookTurn(f.ctx,{pid,yaw_deg:90,counts_per_degree:12.5}));
+check(r.ok&&f.moves===1&&r.submitted_dx===1125&&r.actual_yaw_deg===null&&r.calibration_source==='caller_supplied','plain yaw submits supplied counts once without demanding a stable landmark or claiming angle measurement');
+f=fixture();r=read(await lookTurn(f.ctx,{pid,yaw_deg:90,counts_per_degree:0}));check(!r.ok&&!f.moves,'plain yaw rejects zero gain before motion');
 f=fixture();r=read(await lookAt(f.ctx,{...args,calibration,max_steps:1,max_counts_per_step:10}));
 check(!r.ok&&f.moves===1&&r.steps.length===1,'correction stops at its explicit step bound');
 f=fixture({badMotionAck:true});r=read(await lookAt(f.ctx,{...args,calibration,capture_after:0,max_width:160,format:'jpeg',quality:75}));

@@ -36,6 +36,7 @@ try{
   check(!r.isError&&JSON.stringify(r.json)===JSON.stringify(payload),name+" is not rewritten",r.text);
  }
  const nested={ok:true,job:done};t.setScenario({replies:{"job-status":nested}});const status=await t.call("job_status",{pid,id:"done-1"});
- check(!status.isError&&JSON.stringify(status.json)===JSON.stringify(nested),"nested raw job-status records unchanged in this scoped MCP fix",status.text);
+ const nestedView={...status.json.job};delete nestedView.input_read_warning;
+ check(!status.isError&&typeof status.json.job.input_read_warning==='string'&&JSON.stringify(nestedView)===JSON.stringify(done),"nested job-status keeps every raw job field and adds only the advisory reader warning",status.text);
 }finally{await t.close();}
 console.log(`completed job ACK: ${state.passes} PASS / ${state.failures} FAIL`);process.exit(state.failures?1:0);

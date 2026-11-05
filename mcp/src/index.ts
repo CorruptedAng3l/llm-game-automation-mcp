@@ -30,6 +30,7 @@ import { registerCameraHelpers } from "./camerahelpers.js";
 import { waitTextQuery, presentWaitTextAny } from "./waittextany.js";
 import { registerAgentLoops, noteOtherInput } from "./agentloops.js";
 import { loadedLaunchFailure } from "./launchstate.js";
+import { launcherFollowAction } from "./launcherfollow.js";
 import { prepareSequenceConditions, guardSequence, type PreparedConditions } from "./sequenceconditions.js";
 
 const VERSION = "0.2.7";
@@ -234,6 +235,7 @@ tool("launch", "Launch a game",
     const candidatePid = (r.json as { pid?: unknown } | null)?.pid;
     const lp = r.ok && typeof candidatePid === "number" && Number.isSafeInteger(candidatePid) && candidatePid > 0 ? candidatePid : undefined;
     const extra: Record<string, unknown> = {};
+    const follow=launcherFollowAction(r.json,a.claim===true,a.claim_ttl_s);if(follow)extra.next_action=follow;
     if (!r.ok) Object.assign(extra, loadedLaunchFailure(r.json, a.claim === true, a.claim_ttl_s));
     let claimOk = true, compoundOk = r.ok;
     if (r.ok && a.claim && !lp) {
@@ -1102,7 +1104,14 @@ tool("type_text", "Type text",
     const cmd: Record<string, unknown> = { cmd: "type", text: a.text };
     if (a.delay_ms !== undefined) cmd.delay = a.delay_ms;
     if (a.as_keys) cmd.keys = true;
-    return reply(await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], (a.delay_ms ?? 30) * a.text.length + 60000));
+    let diReader:boolean|null=null;
+    if(!a.as_keys){
+      const status=await runVinput([...at(a.pid),'status'],1500).catch(()=>undefined);
+      const counters=(status?.json as {counters?:{di_kbd?:unknown;di_data_kbd?:unknown}}|undefined)?.counters;
+      if(status?.ok&&typeof counters?.di_kbd==='number'&&typeof counters.di_data_kbd==='number'&&Number.isSafeInteger(counters.di_kbd)&&Number.isSafeInteger(counters.di_data_kbd)&&counters.di_kbd>=0&&counters.di_data_kbd>=0)diReader=counters.di_kbd>0||counters.di_data_kbd>0;
+    }
+    const r=await runVinput([...at(a.pid), "json", JSON.stringify(cmd)], (a.delay_ms ?? 30) * a.text.length + 60000);
+    return reply(r,!a.as_keys?{text_input_observation:{backend:'WM_CHAR',directinput_keyboard_reader_observed:diReader,application_response:null,as_keys_hint:diReader?'This process has polled a DirectInput keyboard. If the field stays empty, use as_keys:true on your next deliberate text entry. WM_CHAR admission does not prove the field accepted text; no automatic fallback or replay was sent.':'WM_CHAR admission does not prove text appeared. If the field stays empty, as_keys:true is available for key-driven fields; no automatic fallback or replay was sent.'}}:undefined);
   });
 
 const padCaptureArgs = actionCaptureArgs;

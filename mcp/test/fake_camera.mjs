@@ -22,15 +22,15 @@ else if(cmd==='json'){
   const body=JSON.parse(rest[1]);
   if(body.cmd==='key'){
     if(body.expected_capture_scope!==JSON.stringify(scope))result={ok:false,input_injected:false,error:'capture scope mismatch'};
-    else {state.duration=body.ms;result=job(true);}
+    else {state.duration=body.ms;state.holdAdmitted=true;result=job(true);}
   }
   if(body.cmd==='move'){
     if(body.expected_capture_scope!==JSON.stringify(scope))result={ok:false,input_injected:false,error:'capture scope mismatch'};
     else {if(!scen.camera?.noProgress)state.target=[state.target[0]-.5*body.dx,state.target[1]-.5*body.dy];state.moves=(state.moves??0)+1;result={ok:true,capture_scope_checked:true,raw_dx:body.dx,raw_dy:body.dy,unbounded:true};}
   }
   if(body.cmd==='frame-hash'){
-    state.hashReads++;const hash=scen.camera?.look?Math.round(state.target[0]*1000+state.target[1]).toString(16).padStart(16,'0'):scen.camera?.stable||state.hashReads===1?'1111111111111111':'2222222222222222';
-    result={ok:true,hash,capture_scope:scope,w:800,h:600,frame:state.hashReads,timing_clock:'QueryPerformanceCounter',qpc_frequency:'10000000',capture_qpc_ticks:String(state.hashReads*10000),frame_qpc_ticks:String(state.hashReads*10000-100)};
+    state.hashReads++;const hash=scen.camera?.look?Math.round(state.target[0]*1000+state.target[1]).toString(16).padStart(16,'0'):scen.camera?.stable||!state.holdAdmitted?'1111111111111111':'2222222222222222';
+    result={ok:true,hash,capture_scope:scope,w:800,h:600,frame:state.hashReads,timing_clock:'QueryPerformanceCounter',qpc_frequency:'10000000',capture_qpc_ticks:String(state.hashReads*10000),frame_qpc_ticks:String(state.hashReads*10000-100),...(body.motion_sample?{motion_sample_version:1,motion_sample_w:16,motion_sample_h:1,motion_sample_rgb:'000000'.repeat(16)}:{})};
   }
 }
 if(result){if(process.env.VINPUT_FAKE_LOG)appendFileSync(process.env.VINPUT_FAKE_LOG,JSON.stringify({argv,t:Date.now()})+'\n');writeFileSync(stateFile,JSON.stringify(state));process.stdout.write(JSON.stringify(result)+'\n');process.exit(result.ok===true?0:1);}

@@ -25,6 +25,8 @@ foreach($arch in @('','32')){
   if(-not $ExpectRed){
    $rawHash=& $v --json --pid $gamePid json '{"cmd":"frame-hash"}'|ConvertFrom-Json
    Check ($rawHash.ok -and $rawHash.hash -eq $plain.hash) "capture$arch default PNG and untransformed frame-hash retain source hash semantics"
+   $motionHash=& $v --json --pid $gamePid json '{"cmd":"frame-hash","motion_sample":true}'|ConvertFrom-Json;$proofs.Add($motionHash)
+   Check ($motionHash.ok-and$motionHash.motion_sample_version-eq1-and$motionHash.motion_sample_w-eq16-and$motionHash.motion_sample_h-eq16-and$motionHash.motion_sample_rgb-match'^[0-9A-F]{1536}$'-and$motionHash.capture_space_updated-eq$false-and$motionHash.hash-eq$rawHash.hash) "capture$arch optional native motion grid preserves original hash and coordinate map semantics"
    $print=& $v --json --pid $gamePid capture "$dir\printwindow.png" --method printwindow --scale 0.5|ConvertFrom-Json
    Check ($print.ok -and $print.method -eq 'printwindow' -and $print.w -eq 400 -and (ImageInfo "$dir\printwindow.png").h -eq 225) "capture$arch optional transform also works after PrintWindow readback"
   }
@@ -64,6 +66,7 @@ foreach($arch in @('','32')){
    Check ($sheet.ok -and $sheet.frames.Count -eq 4 -and $sheet.w -eq 320 -and $sheet.h -eq 180 -and $sheet.coordinate_space -eq 'temporal_contact_sheet' -and -not $sheet.capture_space_updated) "capture$arch bounded sheet returns four temporal tiles without single-frame map"
    $times=@($sheet.frames|ForEach-Object{$_.actual_start_ms});$hashes=@($sheet.frames|ForEach-Object{$_.hash}|Select-Object -Unique)
    Check ($times[0] -lt $times[1] -and $times[1] -lt $times[2] -and $times[2] -lt $times[3] -and $hashes.Count -gt 1) "capture$arch burst reports real ordered times and scene change across tiles"
+   Check ($null-eq$sheet.frames[0].changed_pixel_pct_previous-and@($sheet.frames|Where-Object {$_.changed_pixel_pct_previous-gt0}).Count-gt0-and@($sheet.frames|Where-Object {$_.black_pixel_pct-lt0-or$_.black_pixel_pct-gt100}).Count-eq0) "capture$arch burst reports pixel differences for the actual scene change and bounded black coverage"
    $afterBurst=& $v --json --pid $gamePid click left 60 25 --capture-space|ConvertFrom-Json
    $text=Get-Content "$dir\target.log" -Raw
    Check ($afterBurst.ok -and $afterBurst.x -eq 160 -and $afterBurst.y -eq 140 -and ([regex]::Matches($text,'CLICK 160 140 PLAY')).Count -eq 2) "capture$arch burst preserves saved ROI map and actual button hit"

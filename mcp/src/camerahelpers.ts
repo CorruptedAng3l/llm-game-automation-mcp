@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { resolve } from "node:path";
 import { type CliResult } from "./vinput.js";
+import {motionSample,motionDifference} from './motion.js';
 
 type Obj = Record<string, unknown>;
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -31,12 +32,14 @@ function scopeKey(value: unknown): string | undefined {
   return JSON.stringify([s.hwnd.toLowerCase(), s.thread, s.adoption_generation, s.geometry_epoch, s.lifetime_cookie, s.client_w, s.client_h]);
 }
 export type HashSample = { hash: string; scope: string; receipt: Obj };
-async function hashFrame(ctx: CameraContext, pid: number, region: Rect | undefined, budget: number): Promise<HashSample> {
-  const request = { cmd: "frame-hash", ...(region ? { region: `${region.x},${region.y},${region.w},${region.h}` } : {}), timeout: Math.max(1, Math.min(750, Math.ceil(budget))), preserve_map: true };
-  const r = await ctx.run([...ctx.at(pid), "json", JSON.stringify(request)], Math.max(1, Math.min(1500, Math.ceil(budget))));
+async function hashFrame(ctx: CameraContext, pid: number, region: Rect | undefined, budget: number, motion=false): Promise<HashSample> {
+  if(budget<=0)throw new Error('observation deadline expired before capture');
+  const request = { cmd: "frame-hash", ...(region ? { region: `${region.x},${region.y},${region.w},${region.h}` } : {}), timeout_ms: Math.max(100, Math.min(750, Math.ceil(budget))), preserve_map: true,...(motion?{motion_sample:true}:{}) };
+  const r = await ctx.run([...ctx.at(pid), "json", JSON.stringify(request)], Math.max(500, Math.min(1500, Math.ceil(budget))));
   const j = object(r.json), scope = scopeKey(j?.capture_scope);
   if (!r.ok || typeof j?.hash !== "string" || !/^[0-9a-f]{16}$/i.test(j.hash) || !scope)
     throw new Error(`scoped frame observation unavailable: ${String(j?.error ?? "missing typed hash/capture scope")}`);
+  if(motion&&!motionSample(j))throw new Error('matching DLL motion samples are unavailable; choose exact hashes or update the owned target');
   return { hash: j.hash.toUpperCase(), scope, receipt: j };
 }
 function sameScope(ctx: CameraContext, pid: number, epoch: number, baseline: HashSample, sample?: HashSample) {
@@ -54,7 +57,7 @@ function holdJob(value: unknown, ctx: CameraContext, pid: number, duration: numb
   if (!j || !jobId(j.job_id, pid) || (id !== undefined && id !== j.job_id) || j.owner !== ctx.owner || j.accepted !== accepted || j.capture_scope_checked !== true ||
       typeof j.job_state !== "string" || !["queued", "running", ...terminalStates].includes(j.job_state) ||
       typeof j.job_complete !== "boolean" || j.job_complete !== terminalStates.has(j.job_state) || typeof j.hold_ready !== "boolean" ||
-      (j.job_complete && j.hold_ready) || typeof j.requested_ms !== "number" || j.requested_ms < duration || j.requested_ms > duration + 450) return;
+      (j.hold_ready&&j.job_state!=='running') || (j.job_complete && j.hold_ready) || typeof j.requested_ms !== "number" || j.requested_ms < duration || j.requested_ms > duration + 450) return;
   return j as HoldJob;
 }
 async function preflight(ctx: CameraContext, pid: number, epoch: number, mode: "hold" | "observe" | "motion" = "hold") {
@@ -68,7 +71,7 @@ async function preflight(ctx: CameraContext, pid: number, epoch: number, mode: "
     throw new Error("the user currently controls this target; no helper input was sent");
   return s;
 }
-export type HoldUntilChangeOptions = CaptureOptions & { key: string; timeout_ms?: number; poll_ms?: number };
+export type HoldUntilChangeOptions = CaptureOptions & { key: string; timeout_ms?: number; poll_ms?: number;baseline_ms?:number;min_change_pct?:number;pixel_tolerance?:number };
 export async function holdUntilChange(ctx: CameraContext, a: HoldUntilChangeOptions): Promise<Reply> {
   const validation = ctx.captureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region });
   if (validation) return response({ ok: false, error: validation, input_injected: false });
@@ -76,10 +79,19 @@ export async function holdUntilChange(ctx: CameraContext, a: HoldUntilChangeOpti
   let baseline: HashSample | undefined, admitted: HoldJob | undefined, last: HoldJob | undefined, initial: CliResult | undefined;
   let changed = false, error: string | undefined, reason = "observation_timeout", samples = 0, finalHash: string | undefined, finalReceipt: Obj | undefined;
   let cleanup: Obj = { attempted: false }, releaseConfirmed = false, admissionAttempted = false, explicitlyRefused = false;
-  const started = performance.now(); let deadline = started + duration;
+  const started = performance.now(); let deadline = started + duration;let holdStarted=false,baselineSamples=0,baselineNoise=0,changeScore:unknown=null,finalJob:HoldJob|undefined;
+  const motion=(a.min_change_pct??0)>0;
   try {
     await preflight(ctx, a.pid, epoch);
-    baseline = await hashFrame(ctx, a.pid, a.region, 1500); sameScope(ctx, a.pid, epoch, baseline);
+    baseline = await hashFrame(ctx, a.pid, a.region, 1500,motion); sameScope(ctx, a.pid, epoch, baseline);
+    const noiseEnd=performance.now()+(a.baseline_ms??250);
+    while(performance.now()<noiseEnd){
+      await sleep(Math.min(poll,noiseEnd-performance.now()));const seen=await hashFrame(ctx,a.pid,a.region,1500,motion);sameScope(ctx,a.pid,epoch,baseline,seen);baselineSamples++;
+      const diff=motionDifference(motionSample(baseline.receipt),motionSample(seen.receipt),a.pixel_tolerance??8);
+      const changed=motion?diff!.changed_pct>=(a.min_change_pct??0):seen.hash!==baseline.hash;
+      if(changed)baselineNoise++;baseline=seen;
+    }
+    if(baselineNoise)throw new Error('selected region changed during the baseline noise window; choose a quieter region or increase min_change_pct; no hold was sent');
     const jobs = await ctx.run([...ctx.at(a.pid), "jobs"], 1500);
     if (!jobs.ok || !Array.isArray(object(jobs.json)?.jobs)) throw new Error("native job observation unavailable; no hold was sent");
     sameScope(ctx, a.pid, epoch, baseline);
@@ -101,11 +113,13 @@ export async function holdUntilChange(ctx: CameraContext, a: HoldUntilChangeOpti
       if (last.job_complete) { releaseConfirmed = true; reason = `native_${last.job_state}`; break; }
       sameScope(ctx, a.pid, epoch, baseline);
       if (performance.now() >= deadline) break;
-      if (last.hold_ready) {
-        const sample = await hashFrame(ctx, a.pid, a.region, deadline - performance.now());
+      if (last.job_state==='running'&&last.hold_ready) {
+        holdStarted=true;
+        const sample = await hashFrame(ctx, a.pid, a.region, deadline - performance.now(),motion);
         sameScope(ctx, a.pid, epoch, baseline, sample);if (performance.now() > deadline) break;
         ++samples; finalHash = sample.hash; finalReceipt = sample.receipt;
-        if (sample.hash !== baseline.hash) { changed = true; reason = "region_pixels_changed"; break; }
+        const diff=motionDifference(motionSample(baseline.receipt),motionSample(sample.receipt),a.pixel_tolerance??8);changeScore=diff??null;
+        if (motion?diff!.changed_pct>=(a.min_change_pct??0):sample.hash !== baseline.hash) { changed = true; reason = "region_pixels_changed"; break; }
       }
       await sleep(Math.max(0, Math.min(poll, deadline - performance.now())));
     }
@@ -115,12 +129,14 @@ export async function holdUntilChange(ctx: CameraContext, a: HoldUntilChangeOpti
       const cancelled = await ctx.run([...ctx.at(a.pid), "job-cancel", admitted.job_id], 2000).catch(() => undefined);
       const cancelledJob = holdJob(object(cancelled?.json)?.job, ctx, a.pid, duration, false, admitted.job_id);
       releaseConfirmed = cancelled?.ok === true && cancelledJob?.job_complete === true;
+      finalJob=cancelledJob;
       cleanup = { attempted: true, job_id: admitted.job_id, confirmed: releaseConfirmed, receipt: cancelled?.json ?? null };
     } else if (admitted && !last?.job_complete) cleanup = { attempted: false, reason: "attachment_changed; native timeout remains the hold bound" };
   }
   const ok = changed && releaseConfirmed && !error;
   const out = response({ ok, pid: a.pid, changed, reason, ...(error ? { error } : !changed ? { error: "selected pixels did not change during the observed hold" } : !releaseConfirmed ? { error: "pixels changed, but exact-job cancellation was not confirmed" } : {}),
-    hold_input: initial?.json ?? null, job_id: admitted?.job_id ?? null, native_timeout_ms_requested: duration, release_confirmed: releaseConfirmed,
+    hold_input: initial?.json ?? null, job_id: admitted?.job_id ?? null, native_timeout_ms_requested: duration, release_confirmed: releaseConfirmed,hold_started:holdStarted,final_job:finalJob??last??null,input_read_observation:(finalJob??last)?.input_read_observation??null,
+    baseline_samples:baselineSamples,baseline_changed_samples:baselineNoise,baseline_ms:a.baseline_ms??250,motion_score:changeScore,min_change_pct:a.min_change_pct??0,pixel_tolerance:a.pixel_tolerance??8,
     admission_attempted: admissionAttempted, admission_explicitly_refused: explicitlyRefused,
     hold_may_still_be_active: admissionAttempted && !explicitlyRefused && !releaseConfirmed, cleanup, samples, elapsed_ms: Math.round(performance.now() - started),
     before_hash: baseline?.hash ?? null, after_hash: finalHash ?? null,
@@ -129,32 +145,34 @@ export async function holdUntilChange(ctx: CameraContext, a: HoldUntilChangeOpti
   return ctx.finish(a.pid, out, a, epoch);
 }
 
-type SettleOptions = CaptureOptions & { timeout_ms?: number; poll_ms?: number; stable_samples?: number; settle_timeout_ms?: number };
-type SettleResult = { stable: boolean; samples: number; changes: number; elapsed_ms: number; last_change_ms: number; stable_window_ms: number; sample: HashSample };
+type SettleOptions = CaptureOptions & { timeout_ms?: number; poll_ms?: number; stable_samples?: number; settle_timeout_ms?: number;max_change_pct?:number;pixel_tolerance?:number };
+type SettleResult = { stable: boolean; samples: number; changes: number; elapsed_ms: number; last_change_ms: number; stable_window_ms: number; sample: HashSample;stability_metric:string;max_change_pct:number;pixel_tolerance:number };
 const smoothingHint = "A settled pixel region is not a raw-input drain measurement or a camera-angle measurement. Game camera smoothing, animated overlays, a paused scene, pitch clamps and input rejection can affect observations; inspect the game's camera smoothing settings.";
 async function settle(ctx: CameraContext, a: SettleOptions, epoch: number, baseline: HashSample, deadline: number): Promise<SettleResult> {
   const started = performance.now(), stableSamples = a.stable_samples ?? 3, poll = a.poll_ms ?? 100;
-  let last = baseline, consecutive = 0, samples = 0, changes = 0, changedAt = started;
+  let last = baseline, anchor=baseline, consecutive = 0, samples = 0, changes = 0, changedAt = started;
   while (performance.now() < deadline) {
     sameScope(ctx, a.pid, epoch, baseline);
     await sleep(Math.max(0, Math.min(poll, deadline - performance.now())));
     if (performance.now() >= deadline) break;
-    const sample = await hashFrame(ctx, a.pid, a.region, deadline - performance.now());sameScope(ctx, a.pid, epoch, baseline, sample);
+    const sample = await hashFrame(ctx, a.pid, a.region, deadline - performance.now(),(a.max_change_pct??0)>0);sameScope(ctx, a.pid, epoch, baseline, sample);
     if (performance.now() > deadline) break;
     samples++;
-    if (sample.hash === last.hash) consecutive++;else { changes++;consecutive = 0;changedAt = performance.now(); }
+    const diff=motionDifference(motionSample(anchor.receipt),motionSample(sample.receipt),a.pixel_tolerance??8);
+    const stable=(a.max_change_pct??0)>0?!!diff&&diff.changed_pct<=a.max_change_pct!:sample.hash===last.hash;
+    if (stable) consecutive++;else { changes++;consecutive = 0;changedAt = performance.now();anchor=sample; }
     last = sample;
-    if (consecutive >= stableSamples) return { stable: true, samples, changes, elapsed_ms: Math.round(performance.now() - started), last_change_ms: Math.round(changedAt - started), stable_window_ms: Math.round(performance.now() - changedAt), sample: last };
+    if (consecutive >= stableSamples) return { stable: true, samples, changes, elapsed_ms: Math.round(performance.now() - started), last_change_ms: Math.round(changedAt - started), stable_window_ms: Math.round(performance.now() - changedAt), sample: last,stability_metric:(a.max_change_pct??0)>0?'area_averaged_rgb_grid':'exact_region_hash',max_change_pct:a.max_change_pct??0,pixel_tolerance:a.pixel_tolerance??8 };
   }
-  return { stable: false, samples, changes, elapsed_ms: Math.round(performance.now() - started), last_change_ms: Math.round(changedAt - started), stable_window_ms: Math.round(performance.now() - changedAt), sample: last };
+  return { stable: false, samples, changes, elapsed_ms: Math.round(performance.now() - started), last_change_ms: Math.round(changedAt - started), stable_window_ms: Math.round(performance.now() - changedAt), sample: last,stability_metric:(a.max_change_pct??0)>0?'area_averaged_rgb_grid':'exact_region_hash',max_change_pct:a.max_change_pct??0,pixel_tolerance:a.pixel_tolerance??8 };
 }
-const settleView = (r: SettleResult) => ({ ...r, sample: r.sample.receipt, queue_drain_measured: false, camera_angle_measured: false, raw_queue_remaining_counts: null, scope: "exact selected-region hash stability; no causal camera/gameplay claim" });
+const settleView = (r: SettleResult) => ({ ...r, sample: r.sample.receipt, queue_drain_measured: false, camera_angle_measured: false, raw_queue_remaining_counts: null, scope: "selected-region pixel stability at the stated metric/tolerance; no causal camera/gameplay claim" });
 function captureValidation(ctx: CameraContext, a: CaptureOptions) { return ctx.captureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region }); }
 export async function observeSettle(ctx: CameraContext, a: SettleOptions): Promise<Reply> {
   const invalid = captureValidation(ctx, a);if (invalid) return response({ ok: false, error: invalid });
   const epoch = ctx.epoch(a.pid), started = performance.now();
   try {
-    await preflight(ctx, a.pid, epoch, "observe");const baseline = await hashFrame(ctx, a.pid, a.region, 1500);
+    await preflight(ctx, a.pid, epoch, "observe");const baseline = await hashFrame(ctx, a.pid, a.region, 1500,(a.max_change_pct??0)>0);
     const observed = await settle(ctx, a, epoch, baseline, performance.now() + (a.timeout_ms ?? 5000));
     return ctx.finish(a.pid, response({ ok: observed.stable, pid: a.pid, settled: observed.stable, observation: settleView(observed),
       ...(!observed.stable ? { error: "region did not remain hash-stable within the observation deadline" } : {}),
@@ -207,7 +225,7 @@ export async function lookCalibrate(ctx: CameraContext, a: LookCalibrateOptions)
   const epoch = ctx.epoch(a.pid), started = performance.now(), observations: Obj[] = [], motions: Obj[] = [];
   const deadline = started + (a.timeout_ms ?? 15000), count = a.counts ?? 80;
   try {
-    await preflight(ctx, a.pid, epoch, "motion");const baseline = await hashFrame(ctx, a.pid, a.region, 1500);
+    await preflight(ctx, a.pid, epoch, "motion");const baseline = await hashFrame(ctx, a.pid, a.region, 1500,(a.max_change_pct??0)>0);
     const initial = await settle(ctx, a, epoch, baseline, Math.min(deadline, performance.now() + (a.settle_timeout_ms ?? 1500)));observations.push(settleView(initial));
     if (!initial.stable) throw new Error("region was not stable before calibration; no calibration motion was sent");
     let last = await target(ctx, a, epoch, baseline, deadline);const origin = { x: last.x, y: last.y }, responses: { x: number; y: number }[] = [];
@@ -227,11 +245,23 @@ export async function lookCalibrate(ctx: CameraContext, a: LookCalibrateOptions)
     error: e instanceof Error ? e.message : String(e), elapsed_ms: Math.round(performance.now() - started), hint: smoothingHint }), a, epoch); }
 }
 export type LookAtOptions = TargetOptions & { calibration: Calibration; center_x?: number; center_y?: number; tolerance_px?: number; max_steps?: number; max_counts_per_step?: number };
+export type LookTurnOptions=CaptureOptions&{yaw_deg:number;counts_per_degree:number;timeout_ms?:number};
+export async function lookTurn(ctx:CameraContext,a:LookTurnOptions):Promise<Reply>{
+  const invalid=captureValidation(ctx,a);if(invalid)return response({ok:false,error:invalid,input_injected:false});
+  const dx=Math.round(a.yaw_deg*a.counts_per_degree),epoch=ctx.epoch(a.pid),deadline=performance.now()+(a.timeout_ms??5000);
+  if(!Number.isFinite(a.yaw_deg)||!Number.isFinite(a.counts_per_degree)||a.counts_per_degree===0||!Number.isSafeInteger(dx)||Math.abs(dx)>1000000)return response({ok:false,error:'finite yaw and nonzero signed counts_per_degree must fit a bounded one-million-count move',input_injected:false});
+  let receipt:Obj|undefined;
+  try{
+    await preflight(ctx,a.pid,epoch,'motion');const baseline=await hashFrame(ctx,a.pid,a.region,1500);
+    if(dx)receipt=await scopedMove(ctx,{...a,template:''},epoch,baseline,dx,0,deadline);
+    return ctx.finish(a.pid,response({ok:true,pid:a.pid,requested_yaw_deg:a.yaw_deg,submitted_dx:dx,counts_per_degree:a.counts_per_degree,calibration_source:'caller_supplied',actual_yaw_deg:null,camera_angle_measured:false,input_injected:dx?null:false,input_receipt:receipt??null,scope:'one scoped raw relative move using caller-supplied counts per degree; submitted counts do not establish the resulting camera angle'}),a,epoch);
+  }catch(e){return ctx.finish(a.pid,response({ok:false,pid:a.pid,input_receipt:receipt??null,...motionFailure(e),error:e instanceof Error?e.message:String(e),camera_angle_measured:false}),a,epoch);}
+}
 export async function lookAt(ctx: CameraContext, a: LookAtOptions): Promise<Reply> {
   const invalid = captureValidation(ctx, a);if (invalid) return response({ ok: false, error: invalid });
   const epoch = ctx.epoch(a.pid), started = performance.now(), deadline = started + (a.timeout_ms ?? 15000), steps: Obj[] = [];
   try {
-    await preflight(ctx, a.pid, epoch, "motion");const baseline = await hashFrame(ctx, a.pid, a.region, 1500);
+    await preflight(ctx, a.pid, epoch, "motion");const baseline = await hashFrame(ctx, a.pid, a.region, 1500,(a.max_change_pct??0)>0);
     const m = a.calibration.matrix, determinant = m.xx * m.yy - m.xy * m.yx;
     if (scopeKey(a.calibration.capture_scope) !== baseline.scope || !Object.values(m).every(Number.isFinite) || !Number.isFinite(determinant) || Math.abs(determinant) < 0.000001)
       throw new Error("calibration is invalid or belongs to another target window/geometry; no motion was sent");
@@ -267,17 +297,19 @@ export function registerCameraHelpers(register: Register, ctx: CameraContext, ac
     "Run one bounded native key/chord hold and watch a selected region. Stops on a scoped pixel change or timeout and cancels only its exact native job. The native duration releases even if this MCP disconnects. Pick a region without animated overlays; a changed hash is an observation, not proof of gameplay progress. capture_after uses the same image options as other actions.",
     { ...actionCaptureArgs, pid: z.number().int().positive(), key: keyCombo, region: regionSchema.optional(),
       timeout_ms: z.number().int().min(100).max(118000).optional().describe("Native hold duration and observation bound, default 5000 ms; transport/cleanup can add a bounded delay."),
-      poll_ms: z.number().int().min(50).max(1000).optional() },
+      poll_ms: z.number().int().min(50).max(1000).optional(),baseline_ms:z.number().int().min(0).max(3000).optional().describe('Pre-input noise window, default 250 ms. A changing region refuses before holding. Zero explicitly disables this check.'),min_change_pct:z.number().min(0).max(100).optional().describe('Optional minimum changed cells in an area-averaged RGB grid; zero uses exact hashes. Requires matching native motion samples.'),pixel_tolerance:z.number().int().min(0).max(255).optional() },
     async a => holdUntilChange(ctx, a as HoldUntilChangeOptions));
   const observe = { ...actionCaptureArgs, pid: z.number().int().positive(), region: regionSchema.optional(),
     timeout_ms: z.number().int().min(100).max(60000).optional(), poll_ms: z.number().int().min(50).max(1000).optional(),
-    stable_samples: z.number().int().min(2).max(10).optional().describe("Consecutive identical scoped region hashes, default 3; excludes neither pauses nor animation outside the region.") };
+    stable_samples: z.number().int().min(2).max(10).optional().describe("Consecutive stable scoped samples, default 3; excludes neither pauses nor animation outside the region."),max_change_pct:z.number().min(0).max(100).optional().describe('Optional noise tolerance: percent of changed cells in a 16x16 area-averaged RGB grid. Default zero uses exact hashes; this is not object or camera motion.'),pixel_tolerance:z.number().int().min(0).max(255).optional() };
   register("observe_settle", "Observe region stability", "Observe until a selected region has repeated identical hashes or the deadline expires. Reports changes and stable-window timing without moving input. A quiet region does not prove the native queue drained or a camera settled; avoid animated HUD/overlays.",
     observe, async a => observeSettle(ctx, a as SettleOptions), true);
   const targetArgs = { ...observe, template: z.string().min(1).max(32768).describe("PNG template of a unique static visual landmark, reidentified after every probe; ambiguity/missing target stops motion."),
     threshold: z.number().min(0.01).max(1).optional(), settle_timeout_ms: z.number().int().min(100).max(10000).optional().describe("Per-probe pixel-stability observation budget, default 1500 ms; the overall deadline still bounds the helper.") };
   register("look_calibrate", "Calibrate visual mouse response", "Submit two small raw relative mouse probes, wait for selected-region hash stability, and reidentify one unique visual landmark. Returns a local signed 2x2 pixel-per-count matrix and settle observations for look_at. It moves the view; camera angles and raw queue drain are not measured. Requires native relative_scope_version support.",
     { ...targetArgs, counts: z.number().int().min(10).max(200).optional() }, async a => lookCalibrate(ctx, a as LookCalibrateOptions));
+  register('look_turn','Turn by supplied mouse counts','Submit one scoped raw yaw move using your supplied signed counts per degree. Works without a stable landmark or calibration image, including animated scenes. Returns submitted counts; actual camera angle and game response remain unmeasured.',
+    {...actionCaptureArgs,pid:z.number().int().positive(),yaw_deg:z.number().finite().min(-720).max(720),counts_per_degree:z.number().finite().min(-10000).max(10000),timeout_ms:z.number().int().min(1000).max(15000).optional()},async a=>lookTurn(ctx,a as LookTurnOptions));
   register("look_at", "Center a visual landmark", "Reidentify a unique template and iteratively center it using a same-window look_calibrate matrix. Every raw move is scope-fenced, bounded to max_counts_per_step, followed by settle/target checks, and stops on missing target, no visual progress, timeout or step limit. This centers an image landmark; it does not establish aim or gameplay progress.",
     { ...targetArgs, calibration: z.object({ matrix: z.object({ xx: z.number().finite(), xy: z.number().finite(), yx: z.number().finite(), yy: z.number().finite() }).strict(), capture_scope: z.unknown() }).strict(),
       center_x: z.number().min(0).max(8192).optional(), center_y: z.number().min(0).max(8192).optional(), tolerance_px: z.number().min(1).max(100).optional(),

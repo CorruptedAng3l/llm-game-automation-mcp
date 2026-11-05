@@ -52,7 +52,7 @@ call "$vc" >nul || exit /b 2
 cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /std:c++20 /I"$SourceRoot\src" /I"$RepoRoot\src" /I"$RepoRoot\third_party\minhook\include" "$source" "$RepoRoot\build\$arch\vimh_buffer.obj" "$RepoRoot\build\$arch\vimh_hook.obj" "$RepoRoot\build\$arch\vimh_trampoline.obj" "$RepoRoot\build\$arch\vimh_hde.obj" /Fo:"$folder\fixture.obj" /Fe:"$exe" /link /SUBSYSTEM:CONSOLE
 exit /b %errorlevel%
 "@|Set-Content -LiteralPath $batch -Encoding ascii
-   $entry.build=RunOwned $env:ComSpec @('/d','/c',$batch) 120000;Require ($entry.build.exit-eq0-and($entry.build.stdout+$entry.build.stderr)-notmatch'(?i)\bwarning\s+[A-Z]+\d+') 'guarded launch fixture zero warnings';Pin $exe;Copy-Item -LiteralPath $exe -Destination "$folder\javaw.exe";Copy-Item -LiteralPath $exe -Destination "$folder\SkyrimSELauncher.exe"
+   $entry.build=RunOwned $env:ComSpec @('/d','/c',$batch) 120000;Require ($entry.build.exit-eq0-and($entry.build.stdout+$entry.build.stderr)-notmatch'(?i)\bwarning\s+[A-Z]+\d+') 'guarded launch fixture zero warnings';Pin $exe;Copy-Item -LiteralPath $exe -Destination "$folder\javaw.exe";Copy-Item -LiteralPath $exe -Destination "$folder\SkyrimSELauncher.exe";Copy-Item -LiteralPath $exe -Destination "$folder\SkyrimSE.exe"
    $entry.result=RunOwned $exe @('--await-start') 55000 $true
    Require ($entry.result.stdout-match'launch follow: (\d+) PASS / (\d+) FAIL') 'complete finite callback result line';$entry.passed=[int]$Matches[1];$entry.failed=[int]$Matches[2]
    Check ($entry.result.exit-eq0-and$entry.failed-eq0) "$arch actual process-tree launch result";$entry.completed=$true

@@ -46,6 +46,7 @@
 #include "vi_qpc.h"
 #include "vi_trace.h"
 #include "vi_vision.h"
+#include "vi_motion.h"
 #include "vi_image_encode.h"
 #include "vi_paths.h"
 #include "vi_capture_fence.h"
@@ -2278,6 +2279,8 @@ std::string DoCapture(const JObj& j) {
     for (unsigned shift=0; shift<32; shift+=8) { hash ^= (g_capW >> shift) & 255; hash *= 1099511628211ULL; hash ^= (g_capH >> shift) & 255; hash *= 1099511628211ULL; }
     for (BYTE byte : g_capPix) { hash ^= byte; hash *= 1099511628211ULL; }
     char hashText[24]; sprintf_s(hashText, "%016llX", (unsigned long long)hash);
+    unsigned motionW=0,motionH=0;std::string motionSample;
+    if(hashOnly&&JBool(j,"motion_sample",false)){motionSample=vi_motion::Sample(g_capPix,g_capW,g_capH,motionW,motionH);if(motionSample.empty())return ErrJ("motion sample image unavailable");}
     std::wstring wp = U2W(path);
     std::string e3;
     UINT outputW=g_capW,outputH=g_capH;
@@ -2308,6 +2311,7 @@ std::string DoCapture(const JObj& j) {
     if(format=="jpeg")o.num("quality",qualityValue);
     o.num("frame", used == "printwindow" ? (double)C.present_ours.load() : (double)g_capturedPresent.load());
     o.str("hash", hashText); o.num("present_before", frameBefore); o.num("captured_present", g_capturedPresent);
+    if(!motionSample.empty()){o.num("motion_sample_version",1);o.num("motion_sample_w",motionW);o.num("motion_sample_h",motionH);o.str("motion_sample_rgb",motionSample);o.str("motion_sample_scope","area-averaged 16x16 RGB grid of the selected source region; coarse pixel change, not optical flow or gameplay movement");}
     o.num("after_frames", requestedFrames); o.num("origin_x", mapOx); o.num("origin_y", mapOy);
     o.num("region_client_w", mapCw); o.num("region_client_h", mapCh);
     if (!err.empty()) o.str("note", err);

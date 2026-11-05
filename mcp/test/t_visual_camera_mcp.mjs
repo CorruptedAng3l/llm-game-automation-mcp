@@ -14,7 +14,7 @@ const calls=()=>readFileSync(log,'utf8').split('\n').filter(Boolean).map(x=>JSON
 const moves=()=>calls().filter(a=>{const i=a.indexOf('json');return i>=0&&JSON.parse(a[i+1]).cmd==='move'});
 const call=async(name,args)=>{const r=await client.callTool({name,arguments:{pid:process.pid,poll_ms:50,stable_samples:2,timeout_ms:10000,...args}});let j;try{j=JSON.parse(r.content.find(c=>c.type==='text').text)}catch{}return {r,j}};
 try {
- const list=await client.listTools(),registered=['observe_settle','look_calibrate','look_at'].every(name=>list.tools.some(t=>t.name===name));
+ const list=await client.listTools(),registered=['observe_settle','look_calibrate','look_at','look_turn'].every(name=>list.tools.some(t=>t.name===name));
  check(registered,'actual MCP exposes observation, calibration and reidentified look helpers');
  if(registered){
   let {r,j}=await call('observe_settle',{region:[10,20,100,80]});
@@ -40,6 +40,8 @@ try {
   check(r.isError&&moves().length===1&&j.error.includes('progress'),'actual MCP stops a nonresponsive landmark after one correction');
   reset();({r}=await call('look_at',{template:'landmark.png',calibration,max_steps:0}));
   check(r.isError&&calls().length===0,'invalid correction bounds reject before any CLI work');
+  reset();const turn=await call('look_turn',{yaw_deg:90,counts_per_degree:12.5});
+  check(!turn.r.isError&&turn.j.submitted_dx===1125&&turn.j.actual_yaw_deg===null&&moves().length===1&&!calls().some(a=>a.includes('find-image')),'actual MCP plain yaw submits caller counts once without landmark observations');
  }
 }finally{await client.close()}
 console.log(`VISUAL_CAMERA_RESULT ${JSON.stringify({completed:true,passed:state.passes,failed:state.failures,scope:'actual MCP server with stateful simulated CLI target; no real rendering, camera angles or raw-input-consumption measurement'})}`);

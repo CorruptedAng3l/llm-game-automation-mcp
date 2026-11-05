@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {resolve} from 'node:path';
 import type {CliResult} from './vinput.js';
 import {canonicalSequenceScope} from './sequenceconditions.js';
 type Obj=Record<string,unknown>;
@@ -80,6 +81,47 @@ export async function clickMany(ctx:LoopContext,a:ClickManyOptions,runtime:Runti
  return finish(ctx,a,out,s);
 }
 export async function clickGrid(ctx:LoopContext,a:ClickGridOptions,runtime:Runtime={}):Promise<Reply>{try{return await clickMany(ctx,{...a,points:gridPoints(a)},runtime);}catch(e){return reply({ok:false,error:String(e),input_injected:false});}}
+
+export type DeltaCursorOptions=Options&{x:number;y:number;cursor_template:string;counts_per_pixel_x:number;counts_per_pixel_y:number;hotspot_dx?:number;hotspot_dy?:number;threshold?:number;tolerance_px?:number;max_steps?:number;max_counts_per_step?:number;settle_ms?:number;timeout_ms?:number;button?:keyof typeof buttons;hold_ms?:number};
+export async function clickDeltaCursor(ctx:LoopContext,a:DeltaCursorOptions,runtime:Runtime={}):Promise<Reply>{
+ const invalid=ctx.captureError(a);if(invalid)return reply({ok:false,error:invalid,input_injected:false});
+ if(![a.counts_per_pixel_x,a.counts_per_pixel_y].every(v=>Number.isFinite(v)&&v!==0&&Math.abs(v)<=100))return reply({ok:false,error:'finite nonzero signed counts_per_pixel are required',input_injected:false});
+ if(sessions.has(a.pid))return reply({ok:false,error:'another_bounded_helper_session_active',input_injected:false});sessions.add(a.pid);
+ const s:Session={pid:a.pid,epoch:ctx.epoch(a.pid),generation:inputGenerations.get(a.pid)??0,deadline:performance.now()+(a.timeout_ms??15000),signal:runtime.signal,id:`delta-cursor-${a.pid}-${++nextSession}`};
+ const observations:Obj[]=[],motions:unknown[]=[];let click:CliResult|undefined,error:string|undefined,failure:Obj={},attempted=false,aligned=false;
+ try{
+  const capabilities=await status(ctx,s,buttons[a.button??'left']);if(capabilities.relative_scope_version!==1)throw new Error('scoped_relative_motion_unavailable');
+  await idleJobs(ctx,s);await sample(ctx,s);const [desired]=await points(ctx,s,a,[{x:a.x,y:a.y}]);
+  let previous=Infinity,stable=0;
+  for(let step=0;step<=(a.max_steps??12);++step){
+   await status(ctx,s,buttons[a.button??'left']);await idleJobs(ctx,s);await sample(ctx,s);
+   const found=await ctx.run([...ctx.at(a.pid),'find-image',resolve(a.cursor_template),'--threshold',String(a.threshold??.95),'--preserve-map'],budget(ctx,s,1500));check(ctx,s);
+   const j=obj(found.json),match=Array.isArray(j?.matches)?obj(j.matches[0]):undefined,center=match?.center;
+   if(!found.ok||j?.capture_space_preserved!==true||canonicalSequenceScope(j.capture_scope)!==s.scope||j.match_count!==1||!Array.isArray(j.matches)||j.matches.length!==1||!Array.isArray(center)||center.length!==2||!center.every(v=>typeof v==='number'&&Number.isFinite(v))||typeof match?.score!=='number'||match.score<(a.threshold??.95)||match.score>1)throw new NativeFailure('cursor_sprite_missing_ambiguous_or_scope_changed',found.json);
+   const cursor={x:Number(center[0])+(a.hotspot_dx??0),y:Number(center[1])+(a.hotspot_dy??0)},scope=JSON.parse(s.scope!);
+   if(cursor.x<0||cursor.y<0||cursor.x>=scope.client_w||cursor.y>=scope.client_h)throw new Error('cursor_hotspot_outside_client');
+   const distance=Math.hypot(desired.x-cursor.x,desired.y-cursor.y);observations.push({step,cursor,target:desired,error_px:distance,receipt:j});
+   if(distance<=(a.tolerance_px??3)){
+    if(++stable>=2){aligned=true;break;}
+   }else{
+    stable=0;if(step>0&&distance>=previous-.25)throw new Error('cursor_did_not_move_toward_target');
+    if(step===(a.max_steps??12))break;
+    let dx=(desired.x-cursor.x)*a.counts_per_pixel_x,dy=(desired.y-cursor.y)*a.counts_per_pixel_y;
+    const scale=Math.max(1,Math.abs(dx)/(a.max_counts_per_step??200),Math.abs(dy)/(a.max_counts_per_step??200));dx=Math.round(dx/scale);dy=Math.round(dy/scale);
+    if(!dx&&!dy)throw new Error('cursor_target_below_count_resolution');
+    attempted=true;const move=await json(ctx,s,{cmd:'move',dx,dy,raw:true,steps:1,step_ms:0,...nativeFields(s)},1500);motions.push(move.json);check(ctx,s);
+    const m=obj(move.json);if(!move.ok||m?.capture_scope_checked!==true||m.unbounded!==true||m.raw_dx!==dx||m.raw_dy!==dy)throw new NativeFailure('cursor_motion_unconfirmed_no_retry',move.json);
+   }
+   previous=distance;await nap(Math.min(a.settle_ms??75,budget(ctx,s)));
+  }
+  if(!aligned)throw new Error('cursor_alignment_step_limit');
+  await status(ctx,s,buttons[a.button??'left']);await idleJobs(ctx,s);await sample(ctx,s);
+  const required=(a.hold_ms??140)+2500;if(s.deadline-performance.now()<required)throw new Error('insufficient_budget_for_click');
+  attempted=true;click=await json(ctx,s,{cmd:'click',button:a.button??'left',count:1,ms:a.hold_ms??140,settle_ms:0,...nativeFields(s)},required);const j=obj(click.json);
+  if(!click.ok||j?.capture_scope_checked!==true||j.input_admission_version!==1||j.admission_deadline_qpc_ticks!==s.nativeDeadline||j.button_down_count!==1||j.button_released!==true)throw new NativeFailure('cursor_click_unconfirmed_no_retry',click.json);
+ }catch(e){error=e instanceof Error?e.message:String(e);failure=failureView(e);}
+ return finish(ctx,a,reply({ok:!error,pid:a.pid,cursor_aligned:aligned,observations,motions,click_receipt:click?.json??null,input_injected:attempted?null:false,...failure,...(error?{error}:{}),game_response_measured:false,scope:'rendered cursor-template hotspot verified twice within tolerance, bounded raw relative corrections, then one click without absolute coordinates; no failed input is replayed'}),s);
+}
 type HoldJob=Obj&{job_id:string;job_state:string;job_complete:boolean;hold_ready:boolean};
 function holdJob(value:unknown,ctx:LoopContext,s:Session,duration:number,accepted:boolean,id?:string):HoldJob|undefined{
  const j=obj(value),match=typeof j?.job_id==='string'?/^([1-9][0-9]{0,9}):([1-9][0-9]{0,19}):([1-9][0-9]{0,19})$/.exec(j.job_id):null;
@@ -119,6 +161,8 @@ export function registerAgentLoops(register:Register,ctx:LoopContext,capture:z.Z
  const description='Place multiple clicks in one bounded MCP session. Each point goes through ordinary native click admission with the same observed capture scope and a shared native deadline; every original receipt is returned. Stops on uncertainty, failed receipt, user activity, scope/attachment change, cancellation or deadline; no point is replayed. Native CLI requests remain per point (native_batch:false). capture_after observes only after the whole batch; use observe_settle or wait_text for visual verification.';
  register('click_many','Click several points',description,{...common,points:z.array(z.object({x:z.number().finite(),y:z.number().finite()}).strict()).min(1).max(256)},async(a,r)=>clickMany(ctx,a as ClickManyOptions,r));
  register('click_grid','Click a grid',description+' Grid order is row-major; at most256 points.',{...common,x0:z.number().finite(),y0:z.number().finite(),dx:z.number().finite(),dy:z.number().finite(),cols:z.number().int().min(1).max(256),rows:z.number().int().min(1).max(256)},async(a,r)=>clickGrid(ctx,a as ClickGridOptions,r));
+ register('click_delta_cursor','Click with a delta-driven cursor','Locate one rendered cursor sprite and move it toward client/capture x,y with bounded raw deltas. Requires signed counts per pixel on each axis and a PNG cursor template. Verifies its hotspot twice, then clicks once without absolute cursor placement. Missing/ambiguous sprites, no progress, user activity or scope changes stop without clicking. Animation outside the cursor does not need to settle.',
+  {...common,x:z.number().finite(),y:z.number().finite(),cursor_template:z.string().min(1),counts_per_pixel_x:z.number().finite().min(-100).max(100),counts_per_pixel_y:z.number().finite().min(-100).max(100),hotspot_dx:z.number().finite().optional(),hotspot_dy:z.number().finite().optional(),threshold:z.number().min(.01).max(1).optional(),tolerance_px:z.number().min(.5).max(20).optional(),max_steps:z.number().int().min(1).max(30).optional(),max_counts_per_step:z.number().int().min(1).max(500).optional(),settle_ms:z.number().int().min(0).max(1000).optional()},async(a,r)=>clickDeltaCursor(ctx,a as DeltaCursorOptions,r));
  register('click_to_move','Hold and verify movement pixels','Move to one point, run ONE bounded native mouse-button hold, then watch a scoped region for change followed by stability. Cancels only its exact job. Native duration releases after disconnect; late queued admission is refused. Returns displacement:UNKNOWN because hash change/stability does not measure character movement or distance. Stops on manual activity, cursor/scope/attachment changes or uncertain receipts; never retries, sends indefinite down, or globally releases. Use observe_settle for read-only stability.',
   {...capture,...coord,pid:z.number().int().positive(),x:z.number().finite(),y:z.number().finite(),region,button:z.enum(['left','right']).optional(),timeout_ms:z.number().int().min(1500).max(60000).optional(),hold_ms:z.number().int().min(100).max(20000).optional(),poll_ms:z.number().int().min(50).max(1000).optional(),stable_samples:z.number().int().min(2).max(10).optional()},async(a,r)=>clickToMove(ctx,a as ClickToMoveOptions,r));
 }

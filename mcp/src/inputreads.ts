@@ -32,7 +32,8 @@ export function presentInputReads(result:CliResult):CliResult{
  const outcome=observed?'observed':partial?'partial':'not_observed';
  if(o.all_requested_observed!==observed||o.outcome!==outcome)return unavailable();
  if(observed)return {...result,json:{...native,reader_return_observed:true,application_response:null}};
- return {...result,ok:false,json:{...native,ok:false,scheduler_ok:true,reader_return_observed:false,application_response:null,input_receipt:native,
-  error:partial?'Input was sent, but some requested keys had no polling high-state return during the bounded native job. Window-message dispatch alone does not confirm a polling reader. Inspect input_read_observation; do not replay automatically.':
-   'Input was sent, but no requested polling high-state return was observed during the bounded native job. Window-message dispatch alone does not confirm a polling reader. The game may use an uncovered API; inspect trace/status and do not replay automatically.'}};
+ const messages=o.kind==='keys'&&Array.isArray(o.keys)&&o.keys.every(k=>BigInt(object(k)!.message_dispatches as string)>0n);
+ return {...result,json:{...native,reader_return_observed:false,application_response:null,...(o.kind==='keys'?{window_messages_dispatched:messages}:{}),
+  input_read_warning:(messages?'The requested key messages were dispatched. ':'The native input job completed. ')+(partial?'Some requested keys had no observed polling high-state return. ':'No requested polling high-state return was observed. ')+
+   'The game may consume window messages or use an uncovered API. Reader uncertainty does not mean delivery failed or the game ignored the input; inspect input_read_observation and do not replay automatically.'}};
 }

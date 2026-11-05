@@ -61,6 +61,12 @@ int main(int argc,char** argv){
         Check(SUCCEEDED(hr)&&count==2&&events[0].dwOfs==DIMOFS_X&&events[0].dwData==17&&g_diMouseQ.size()==2,"buffered PEEK returns exact motion/button without consuming");
         count=8;hr=buffer(device,sizeof(events[0]),events,&count,0);
         Check(SUCCEEDED(hr)&&count==2&&g_diMouseQ.empty()&&C.di_data_mouse>=beforeBuffer+2,"buffered mouse data drains and reports polling");
+        g_cfg.rawmode=3;MouseWheel(-240,false);output={};hr=state(device,sizeof(output),&output);
+        Check(SUCCEEDED(hr)&&output.lZ==-240,"production vertical wheel reaches real DI8 mouse state lZ with its sign");
+        output={};hr=state(device,sizeof(output),&output);Check(SUCCEEDED(hr)&&output.lZ==0,"DI8 state wheel delta drains exactly once");
+        count=8;hr=buffer(device,sizeof(events[0]),events,&count,DIGDD_PEEK);
+        Check(SUCCEEDED(hr)&&count==1&&events[0].dwOfs==DIMOFS_Z&&(LONG)events[0].dwData==-240&&g_diMouseQ.size()==1,"production wheel reaches DI8 buffered Z and PEEK preserves it");
+        count=8;hr=buffer(device,sizeof(events[0]),events,&count,0);Check(SUCCEEDED(hr)&&count==1&&g_diMouseQ.empty(),"DI8 buffered wheel drains exactly once");
         g_vk[VK_LBUTTON]=0;
     }
 #ifdef VI_DI_POLL_REGISTRY

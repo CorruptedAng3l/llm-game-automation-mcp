@@ -28,6 +28,7 @@
 #include "vi_ocr.h"
 #include "vi_ocr_read.h"
 #include "vi_image_encode.h"
+#include "vi_motion.h"
 #include "vi_paths.h"
 #include "vi_user_intent.h"
 #define VI_ACGUARD_SCANNER

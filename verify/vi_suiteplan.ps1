@@ -49,6 +49,8 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'capture_timing' 'run_capturetimingtest.ps1'
  New-VinputSuiteCase 'capture_diagnostics' 'run_capturediagnosticssurrogatetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}
  New-VinputSuiteCase 'launch_follow' 'run_launchfollowtest.ps1'
+ New-VinputSuiteCase 'launcher_follow_action' 'run_mcpcontracttest.ps1' @{Test='launcher_follow_action'}
+ New-VinputSuiteCase 'text_reader_hint' 'run_mcpcontracttest.ps1' @{Test='text_reader_hint'}
  New-VinputSuiteCase 'launch_affinity' 'run_launchaffinitytest.ps1'
  New-VinputSuiteCase 'launch_snapshot_model' 'run_launchsnapshotmodel.ps1'
  New-VinputSuiteCase 'sequence_deadline_model' 'run_sequencedeadlinemodel.ps1'
@@ -57,6 +59,7 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'pointer_widen_model' 'run_pointerwidenmodel.ps1'
  New-VinputSuiteCase 'public_safeguards' 'run_publicsafeguardstest.ps1'
  New-VinputSuiteCase 'job_reader_observation' 'run_jobreadtest.ps1' @{} 'Per-key and per-channel returns distinguish W window dispatch from actual polling, including raw keyboard readers.'
+ New-VinputSuiteCase 'key_reader_warning' 'run_mcpcontracttest.ps1' @{Test='input_reads'} 'Delivered key messages keep success and capture_after; polling uncertainty is a warning.'
  New-VinputSuiteCase 'capture_mapping' 'run_capturemappingtest.ps1'
  New-VinputSuiteCase 'pointer_capability' 'run_pointercapabilitytest.ps1'
  New-VinputSuiteCase 'launch_loaded' 'run_launchloadedtest.ps1'
@@ -64,6 +67,9 @@ function Get-VinputBackgroundCases {
  New-VinputSuiteCase 'hold_until_change' 'run_holduntilchangetest.ps1'
  New-VinputSuiteCase 'relative_scope' 'run_relativescopetest.ps1'
  New-VinputSuiteCase 'visual_camera' 'run_visualcameratest.ps1'
+ New-VinputSuiteCase 'motion_metrics' 'run_motionmetricstest.ps1'
+ New-VinputSuiteCase 'motion_helpers' 'run_mcpcontracttest.ps1' @{Test='motion_helpers'}
+ New-VinputSuiteCase 'delta_cursor' 'run_deltacursortest.ps1'
  New-VinputSuiteCase 'visual_capture_build' 'run_visualcapturebuildtest.ps1'
  New-VinputSuiteCase 'sequence_guard_memory' 'run_sequenceguardmemory.ps1'
  New-VinputSuiteCase 'startup_activation' 'run_startupactivationtest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')}

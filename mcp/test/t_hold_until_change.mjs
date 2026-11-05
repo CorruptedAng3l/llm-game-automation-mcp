@@ -32,7 +32,7 @@ function fixture(options={}) {
     }};
   return {ctx,calls,duration,get finishOptions(){return finishOptions;},get finishEpoch(){return finishEpoch;}};
 }
-const read=r=>JSON.parse(r.content[0].text), args=f=>({pid,key:'space',timeout_ms:f.duration,poll_ms:50});
+const read=r=>JSON.parse(r.content[0].text), args=f=>({pid,key:'space',timeout_ms:f.duration,poll_ms:50,baseline_ms:0});
 const keyCalls=f=>f.calls.filter(c=>c.argv[4]==='json'&&JSON.parse(c.argv[5]).cmd==='key');
 const hashCalls=f=>f.calls.filter(c=>c.argv[4]==='json'&&JSON.parse(c.argv[5]).cmd==='frame-hash');
 let f=fixture(),r=read(await holdUntilChange(f.ctx,args(f)));

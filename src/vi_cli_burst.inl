@@ -38,7 +38,7 @@ static Reply CmdCaptureBurst(DWORD pid,const Args& a) {
     if(!HasOpt(a,"scale")&&!HasOpt(a,"max-width"))captureArgs.opt.push_back({"max-width","320"});
     const ULONGLONG started=commandStarted,deadline=started+(ULONGLONG)timeoutValue;
     ULONGLONG next=started;unsigned missed=0;
-    vi_vision::Image sheet;std::string frames="[",error;
+    vi_vision::Image sheet,firstImage,previousImage;std::string frames="[",error;
     auto fail=[&](const std::string& why,unsigned completed){return Fail(why,"\"completed_frames\":"+std::to_string(completed)+",\"capture_space_updated\":false,\"coordinate_space\":\"temporal_contact_sheet\",\"frames\":"+frames+"]");};
     for(unsigned index=0;index<count;++index){
         while(GetTickCount64()<next&&GetTickCount64()<deadline){ULONGLONG now=GetTickCount64();if(now>=next)break;Sleep((DWORD)(std::min)(10ULL,next-now));}
@@ -56,6 +56,10 @@ static Reply CmdCaptureBurst(DWORD pid,const Args& a) {
         if(index)frames+=",";
         frames+="{\"index\":"+std::to_string(index)+",\"scheduled_ms\":"+std::to_string(next-started)+",\"actual_start_ms\":"+std::to_string(before)+",\"actual_end_ms\":"+std::to_string(after)+",\"lateness_ms\":"+std::to_string(before>next?before-next:0)+",\"missed_intervals_before\":"+std::to_string(missed)+",\"tile_rect\":["+std::to_string(x)+","+std::to_string(y)+","+std::to_string(frame.img.w)+","+std::to_string(frame.img.h)+"],\"hash\":\""+frame.hash+"\",\"method\":\""+JEsc(frame.method)+"\",\"captured_present\":"+(frame.method=="printwindow"?"null":Num(frame.nativeFrame))+",\"client_origin_x\":"+Num(frame.ox)+",\"client_origin_y\":"+Num(frame.oy)+",\"client_per_pixel_x\":"+Num(frame.sx)+",\"client_per_pixel_y\":"+Num(frame.sy)+"}";
         frames.pop_back();frames+=",\"timing_clock\":\"QueryPerformanceCounter\",\"qpc_frequency\":"+(frame.qpcFrequency.empty()?std::string("null"):"\""+JEsc(frame.qpcFrequency)+"\"")+",\"capture_qpc_ticks\":"+(frame.captureQpc.empty()?std::string("null"):"\""+JEsc(frame.captureQpc)+"\"")+",\"frame_qpc_ticks\":"+(frame.frameQpc.empty()?std::string("null"):"\""+JEsc(frame.frameQpc)+"\"")+"}";
+        const auto prior=vi_motion::Compare(previousImage.pixels,frame.img.pixels,frame.img.w,frame.img.h),first=vi_motion::Compare(firstImage.pixels,frame.img.pixels,frame.img.w,frame.img.h);
+        const double black=vi_motion::BlackPct(frame.img.pixels,frame.img.w,frame.img.h);
+        frames.pop_back();frames+=",\"changed_pixel_pct_previous\":"+(prior.valid?Num(prior.changedPct):"null")+",\"mean_abs_rgb_diff_pct_previous\":"+(prior.valid?Num(prior.meanPct):"null")+",\"changed_pixel_pct_first\":"+(first.valid?Num(first.changedPct):"null")+",\"black_pixel_pct\":"+Num(black)+",\"pixel_diff_tolerance\":8,\"diff_scope\":\"decoded scaled RGB tiles; alpha ignored; pixel change is not avatar movement\"}";
+        if(!index)firstImage=frame.img;previousImage=std::move(frame.img);
         if(!quiet){fprintf(stderr,"[vinput] burst frame %u/%u captured at %llu ms\n",index+1,count,after-started);fflush(stderr);}
         if(after>=deadline)return fail("burst cooperative deadline reached after capture",index+1);
         next+=(ULONGLONG)intervalValue;missed=0;
