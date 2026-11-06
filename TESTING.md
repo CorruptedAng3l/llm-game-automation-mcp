@@ -202,6 +202,14 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   instead of old warning text. Gate: `build.bat` x64 + x86, `npm test`, full background plan (170 cases) in five
   runs; every case passed except 2 not_measured (cursor_guard, legacy_focus: passive desktop changed) and
   capture_diagnostics not_measured.
+- Batch 0.3.1..0.3.2 (2026-11-05, vinput through ad4b2c1): heading-up radar navigation (`steer_to_blip`, `goto_marker`,
+  `turn_keys`), keyboard driving with signed steering duty (`key_drive`), adopted-window TOPMOST policy (`config
+  {topmost}`), independent input-read receipts (named polling channels plus window-message dispatch), sequence
+  `capture_mode:"last"` and `abort_on.after_step`. Public fix on top: the UE4 keyboard test expects the renamed
+  `message_dispatch_observed` value. Gate: `build.bat` x64 + x86, `npm test` (103 files), full background plan (192
+  cases): 156 passed in the first run; `ue4_keyboard_reader` (test rename) and `launch_follow` (owned-cleanup race, passed
+  alone) failed and stopped two lanes; the fixed/rerun pair and all 31 queued cases then passed, so 189 passed and 3
+  not_measured (capture_diagnostics, cursor_guard, legacy_focus).
 - Batch 0.2.9..0.3.0 (2026-11-05, vinput through c2a3ec9): navigation (`move_until_stuck` with image-motion stop,
   `look_calibrate`/`turn`/`look` with a persisted angular reference, bounded `unstick`), opt-in `compact` replies on
   every tool (`VINPUT_MCP_COMPACT=1`), key `retap` to refresh a modifier while a move stays held, `key_sequence`

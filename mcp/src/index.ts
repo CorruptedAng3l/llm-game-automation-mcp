@@ -45,7 +45,7 @@ import { prepareSequenceConditions, guardSequence,canonicalSequenceScope, type P
 import { compactEnabled, compactReply } from "./compactreply.js";
 import {prepareCapturePlan,sequenceFollowAction} from './sequencecaptures.js';
 
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
