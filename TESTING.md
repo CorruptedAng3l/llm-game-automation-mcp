@@ -210,6 +210,15 @@ it (not reproduced or fixed in a real game); Fallout-style resize / freeze after
   cases): 156 passed in the first run; `ue4_keyboard_reader` (test rename) and `launch_follow` (owned-cleanup race, passed
   alone) failed and stopped two lanes; the fixed/rerun pair and all 31 queued cases then passed, so 189 passed and 3
   not_measured (capture_diagnostics, cursor_guard, legacy_focus).
+- Batch 0.3.2..0.3.3 (2026-11-05, vinput through 5251c97): BREAKING `capture_after:0` now disables the action image
+  (same as `false`); use `capture_after:"immediate"` for an image without a Present wait. `turn`/`look`/`look_turn` attach
+  an advisory onset-then-quiet `camera_observation` (`observe_motion:false` skips it); status/doctor name a specific raw-route
+  conflict and suggest a deliberate `raw:auto`/`raw:buffer` test. Codex versions of the public launch-guard, DI8 and
+  early-cleanup fixes replace ours (same behaviour, plus an early-cleanup helper). Gate: `build.bat` x64 + x86, `npm test`
+  (107 files), full background plan (198 cases) with one game running: 152 passed in the first run; `nativecapture`,
+  `launch_follow`, `sequence_condition_observer` passed alone; the 41 queued cases then ran with 4 load failures
+  (`inject_exit`, `claimed_keybd_native`, `launch_duplicate_guard`, `launch_failed_loader_follow`) that passed on a 2-shard
+  rerun with the 11 still-queued cases, so 196 passed and 2 not_measured (cursor_guard, legacy_focus).
 - Batch 0.2.9..0.3.0 (2026-11-05, vinput through c2a3ec9): navigation (`move_until_stuck` with image-motion stop,
   `look_calibrate`/`turn`/`look` with a persisted angular reference, bounded `unstick`), opt-in `compact` replies on
   every tool (`VINPUT_MCP_COMPACT=1`), key `retap` to refresh a modifier while a move stays held, `key_sequence`

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import {captureEnabled} from './actioncapturepolicy.js';
 import type { CameraContext } from './camerahelpers.js';
 import type { CliResult } from './vinput.js';
 import { canonicalSequenceScope } from './sequenceconditions.js';
@@ -37,7 +38,7 @@ export async function moveUntilStuck(ctx: CameraContext, a: NavigationMotionOpti
       !integer(duration, 100, 15000) || !integer(poll, 20, 1000) || !integer(grace, 0, 5000) || !integer(still, 100, 5000) ||
       !Number.isFinite(maxChange) || maxChange < 0 || maxChange > 100 || !integer(tolerance, 0, 255))
     return reply({ ok: false, input_injected: false, error: 'move_until_stuck needs a bounded key hold, a client region, and valid motion timing/tolerance options' });
-  const invalid = ctx.captureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region });
+  const invalid = ctx.captureError({ ...a, region: captureEnabled(a.capture_after) ? a.region : undefined });
   if (invalid) return reply({ ok: false, input_injected: false, error: invalid });
   const epoch = ctx.epoch(a.pid), started = performance.now();
   let baseline: Sample | undefined, first: Sample | undefined, lastSample: Sample | undefined, quiet: Sample | undefined;

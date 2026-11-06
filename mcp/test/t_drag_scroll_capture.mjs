@@ -2,7 +2,7 @@ import {makeChecker,startFake,fullStatus,cmdOf} from './lib.mjs';
 import {decodePng} from '../build/png.js';
 const {check,state}=makeChecker(),pid=process.pid;
 const scene={png:{w:1280,h:720,core_capture:true},replies:{status:fullStatus(),mousedown:{ok:true,receipt:'down'},mouse:{ok:true,receipt:'move'},mouseup:{ok:true,receipt:'up'},scroll:{ok:true,receipt:'wheel'},'placement-drag':{ok:true,receipt:'placement'}}};
-const t=await startFake(scene),image={capture_after:0,region:{x:100,y:40,w:320,h:180},max_width:160};
+const t=await startFake(scene),image={capture_after:'immediate',region:{x:100,y:40,w:320,h:180},max_width:160};
 const drag={pid,x1:20,y1:30,x2:40,y2:50,ms:1,steps:1,hold_start_ms:0,hold_end_ms:0};
 const flag=(a,k)=>{const i=a.indexOf(k);return i<0?undefined:a[i+1];};
 try{

@@ -39,7 +39,7 @@ try{
  check(!r.isError&&r.json?.skipped&&r.json?.clicked===false,"optional whole-word miss skips rather than clicking Player");
  set(["PLAY"]);r=await t.call("click_text",{pid,text:"PLAY",whole_word:"false"});
  check(r.isError&&t.callsOf("click-text").length===0&&t.callsOf("help").length===0,"invalid word flag refused before CLI work");
- set(["PLAY"]);r=await t.call("click_text",{pid,text:"PLAY",capture_after:0,format:"png",quality:20});
+ set(["PLAY"]);r=await t.call("click_text",{pid,text:"PLAY",capture_after:'immediate',format:"png",quality:20});
  check(r.isError&&t.callsOf("help").length===0&&t.callsOf("click-text").length===0,"existing capture validation still precedes capability/input");
 }finally{await t.close();}
 console.log(`text word: ${state.failures?`FAIL (${state.failures}), PASS (${state.passes})`:`PASS (${state.passes})`}`);

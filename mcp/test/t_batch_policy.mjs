@@ -39,7 +39,11 @@ try{
  set({});r=await t.call('hover_many',{pid,points:points.slice(0,1),probe_region:{x:1,y:2,w:30,h:40},ocr:true,hover_ms:0,timeout_ms:30000});
  check(!r.isError&&r.json.points[0].probe_region?.x===1&&cmdOf(t.callsOf('ocr')[0]).includes('1,2,30,40'),'explicit shared probe_region keeps its existing absolute-client meaning');
  set({});const controller=new AbortController(),pending=t.client.callTool({name:'click_many',arguments:{...tooltip,tooltip_hover_ms:300}},undefined,{signal:controller.signal,timeout:10000}).catch(e=>e),until=Date.now()+3000;
- while(!actions().length&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,10));controller.abort();await pending;await new Promise(resolve=>setTimeout(resolve,500));
+ while(!actions().length&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,10));const abortCalledAt=Date.now();controller.abort();const cancellationResult=await pending;await new Promise(resolve=>setTimeout(resolve,500));
+ if(!(actions().filter(a=>a.cmd==='mouse').length===1&&!clicks().length&&!t.callsOf('release').length)){
+  const diagnostic=JSON.stringify({abort_called_at:abortCalledAt,wait_for_first_action_deadline:until,mouse_count:actions().filter(a=>a.cmd==='mouse').length,click_count:clicks().length,release_count:t.callsOf('release').length,calls:t.timedCalls(),result:cancellationResult instanceof Error?{name:cancellationResult.name,message:cancellationResult.message}:cancellationResult});
+  console.error('CANCELLATION_DIAGNOSTIC '+(diagnostic.length<=65536?diagnostic:JSON.stringify({truncated:true,original_characters:diagnostic.length,prefix:diagnostic.slice(0,8000)})));
+ }
  check(actions().filter(a=>a.cmd==='mouse').length===1&&!clicks().length&&!t.callsOf('release').length,'MCP cancellation during the tooltip dwell prevents all clicks without broad cleanup');
 }finally{await t.close();}
 console.log(`batch policy: ${state.passes} PASS / ${state.failures} FAIL`);if(state.failures)process.exitCode=1;

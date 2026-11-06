@@ -22,7 +22,7 @@ try {
   const before=calls().length;({r}=await call({key:'space',timeout_ms:0}));
   check(r.isError&&calls().length===before,'invalid timeout refuses before CLI work');
   writeFileSync(scenario+'.state',JSON.stringify({hashReads:0,duration:5000,target:[300,250]}));
-  ({r,j}=await call({key:'space',timeout_ms:5000,capture_after:0,max_width:160}));
+  ({r,j}=await call({key:'space',timeout_ms:5000,capture_after:'immediate',max_width:160}));
   check(!r.isError&&r.content.some(c=>c.type==='image')&&calls().some(a=>a.includes('capture')&&a.includes('--max-width')&&a.includes('160')),'standard post-action image options reach the shared capture path');
   writeFileSync(scenario,JSON.stringify({camera:{manualOwner:true}}));const beforeOwned=calls().length;({r,j}=await call({key:'space',timeout_ms:5000}));
   check(r.isError&&!j.admission_attempted&&!j.hold_may_still_be_active&&calls().slice(beforeOwned).every(a=>a.includes('status')),'current nested native user ownership refuses before hold admission');

@@ -5,10 +5,14 @@ static BOOL WINAPI TrackedCreate(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,LPSECURITY
 static HANDLE WINAPI TrackedOpen(DWORD,BOOL,DWORD);
 static HANDLE WINAPI RefuseLoader(HANDLE,LPSECURITY_ATTRIBUTES,SIZE_T,LPTHREAD_START_ROUTINE,LPVOID,DWORD,LPDWORD);
 static HANDLE WINAPI TrackedFile(LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE);
+static BOOL WINAPI TrackedQueryImage(HANDLE,DWORD,LPWSTR,PDWORD);
+static DWORD WINAPI TrackedWait(HANDLE,DWORD);
 #define CreateProcessW TrackedCreate
 #define OpenProcess TrackedOpen
 #define CreateRemoteThread RefuseLoader
 #define CreateFileW TrackedFile
+#define QueryFullProcessImageNameW TrackedQueryImage
+#define WaitForSingleObject TrackedWait
 #define wmain ViDuplicateCliEntry
 #include <vinput_cli.cpp>
 #undef wmain
@@ -16,6 +20,8 @@ static HANDLE WINAPI TrackedFile(LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD
 #undef OpenProcess
 #undef CreateRemoteThread
 #undef CreateFileW
+#undef QueryFullProcessImageNameW
+#undef WaitForSingleObject
 #include "vi_launch_terminal.h"
 #include "vi_launch_ack.h"
 #include <io.h>
@@ -23,7 +29,10 @@ static HANDLE WINAPI TrackedFile(LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD
 
 static unsigned passed=0,failed=0,actorCreates=0,loaderCalls=0,pipeCalls=0;
 static DWORD deniedPid=0;
-static std::wstring selfImage,actorA,actorB;
+enum class FaultMode {None,Identity,Canonical};
+struct CandidateFault {FaultMode mode=FaultMode::None;DWORD pid=0;HANDLE trigger=nullptr;unsigned reads=0,positiveWaits=0;DWORD maximumWait=0;};
+static CandidateFault candidateFault;
+static std::wstring selfImage,actorA,actorB,missingFile,missingDirectoryFile;
 struct Owned {HANDLE handle=nullptr;DWORD pid=0;unsigned long long born=0;std::wstring image;};
 static std::vector<Owned> owned;
 static std::vector<HANDLE> stops;
@@ -34,7 +43,7 @@ static bool Identity(HANDLE handle,DWORD pid,const std::wstring& image,unsigned 
  born=LaunchStamp(created);return born!=0;
 }
 static BOOL WINAPI TrackedCreate(LPCWSTR app,LPWSTR cmd,LPSECURITY_ATTRIBUTES ps,LPSECURITY_ATTRIBUTES ts,BOOL inherit,DWORD flags,LPVOID env,LPCWSTR cwd,LPSTARTUPINFOW startup,LPPROCESS_INFORMATION result){
- if(!app||(_wcsicmp(app,selfImage.c_str())&&_wcsicmp(app,actorA.c_str())&&_wcsicmp(app,actorB.c_str()))){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
+ if(!app||(_wcsicmp(app,selfImage.c_str())&&_wcsicmp(app,actorA.c_str())&&_wcsicmp(app,actorB.c_str())&&_wcsicmp(app,missingFile.c_str())&&_wcsicmp(app,missingDirectoryFile.c_str()))){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
  if(!CreateProcessW(app,cmd,ps,ts,inherit,flags|CREATE_NO_WINDOW,env,cwd,startup,result))return FALSE;
  HANDLE retained=nullptr;unsigned long long born=0;
  if(!Identity(result->hProcess,result->dwProcessId,app,born)||!DuplicateHandle(GetCurrentProcess(),result->hProcess,GetCurrentProcess(),&retained,0,FALSE,DUPLICATE_SAME_ACCESS)){
@@ -46,7 +55,17 @@ static HANDLE WINAPI TrackedOpen(DWORD rights,BOOL inherit,DWORD pid){if(pid&&pi
 static HANDLE WINAPI RefuseLoader(HANDLE,LPSECURITY_ATTRIBUTES,SIZE_T,LPTHREAD_START_ROUTINE,LPVOID,DWORD,LPDWORD){++loaderCalls;SetLastError(ERROR_ACCESS_DENIED);return nullptr;}
 static HANDLE WINAPI TrackedFile(LPCWSTR name,DWORD rights,DWORD share,LPSECURITY_ATTRIBUTES attrs,DWORD disposition,DWORD flags,HANDLE templateFile){
  if(name&&!_wcsnicmp(name,L"\\\\.\\pipe\\",9)){++pipeCalls;SetLastError(ERROR_ACCESS_DENIED);return INVALID_HANDLE_VALUE;}
+ if(candidateFault.mode==FaultMode::Canonical&&name&&(share&FILE_SHARE_DELETE)&&!_wcsicmp(name,actorA.c_str())){++candidateFault.reads;if(candidateFault.trigger)SetEvent(candidateFault.trigger);SetLastError(ERROR_ACCESS_DENIED);return INVALID_HANDLE_VALUE;}
  return CreateFileW(name,rights,share,attrs,disposition,flags,templateFile);
+}
+static BOOL WINAPI TrackedQueryImage(HANDLE process,DWORD flags,LPWSTR path,PDWORD size){
+ if(candidateFault.mode==FaultMode::Identity&&GetProcessId(process)==candidateFault.pid){++candidateFault.reads;if(candidateFault.trigger)SetEvent(candidateFault.trigger);SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
+ return QueryFullProcessImageNameW(process,flags,path,size);
+}
+static DWORD WINAPI TrackedWait(HANDLE handle,DWORD budget){
+ const auto error=GetLastError();const auto pid=GetProcessId(handle);SetLastError(error);
+ if(candidateFault.mode!=FaultMode::None&&pid==candidateFault.pid&&budget){++candidateFault.positiveWaits;candidateFault.maximumWait=(std::max)(candidateFault.maximumWait,budget);}
+ return WaitForSingleObject(handle,budget);
 }
 static std::string Read(const std::wstring& path){FILE* in=_wfsopen(path.c_str(),L"rb",_SH_DENYNO);if(!in)return {};char text[65537]{};const auto size=fread(text,1,65536,in);const bool complete=feof(in)&&!ferror(in);fclose(in);return complete?std::string(text,size):std::string{};}
 static bool Write(const std::wstring& path,const std::string& text){FILE* out=nullptr;_wfopen_s(&out,path.c_str(),L"wb");if(!out)return false;const bool good=fwrite(text.data(),1,text.size(),out)==text.size()&&!ferror(out);return fclose(out)==0&&good;}
@@ -92,6 +111,37 @@ static DuplicateReply Call(const Args& args,const std::wstring& receipt){
 }
 static bool Refused(const DuplicateReply& reply){return reply.code==2&&Field(reply.json,"ok")=="false"&&Field(reply.json,"launched")=="false"&&Field(reply.json,"injected")=="false"&&Field(reply.json,"pid").empty()&&Field(reply.json,"automatic_attach_attempted")=="false";}
 static bool Contains(const std::string& list,DWORD pid,unsigned long long born){return list.find("\"pid\":"+std::to_string(pid)+",")!=std::string::npos&&list.find("\"process_created\":\""+std::to_string(born)+"\"")!=std::string::npos;}
+struct StopAfterRead {HANDLE trigger=nullptr,stop=nullptr;};
+static DWORD WINAPI StopOnFailedRead(void* pointer){const auto value=*(StopAfterRead*)pointer;delete (StopAfterRead*)pointer;if(WaitForSingleObject(value.trigger,4000)!=WAIT_OBJECT_0)return 111;Sleep(120);return SetEvent(value.stop)?0:111;}
+static bool CandidateExitControls(){
+ for(const auto mode:{FaultMode::Identity,FaultMode::Canonical})for(const bool dying:{false,true}){
+  const auto label=std::wstring(mode==FaultMode::Identity?L"identity":L"canonical")+(dying?L"_dying":L"_live");const auto stem=ExeDir()+L"\\"+label;
+  std::wstring oldStopName,newStopName;HANDLE oldStop=Stop(label+L"_old",oldStopName),newStop=Stop(label+L"_new",newStopName);if(!oldStop||!newStop)return false;
+  Check(Spawn(actorA,ActorArgs(oldStopName,stem+L".actor",true))&&!WaitRead(stem+L".actor").empty(),"owned unresolved-candidate control begins with a verified live actor");if(owned.empty())return false;const auto actor=owned.back();
+  HANDLE trigger=nullptr,thread=nullptr;if(dying){trigger=CreateEventW(nullptr,TRUE,FALSE,nullptr);if(!trigger)return false;thread=CreateThread(nullptr,0,StopOnFailedRead,new StopAfterRead{trigger,oldStop},0,nullptr);if(!thread){CloseHandle(trigger);return false;}}
+  candidateFault={mode,actor.pid,trigger};const auto before=actorCreates;const auto started=GetTickCount64();const auto result=Call(Options(actorA,newStopName,stem+L".replacement"),stem+L".json");const auto elapsed=GetTickCount64()-started;const auto observation=candidateFault;candidateFault={};
+  if(thread){const bool joined=WaitForSingleObject(thread,5000)==WAIT_OBJECT_0;Check(joined,"bounded owned stop worker finishes before its private handles are closed");if(!joined)return false;CloseHandle(thread);CloseHandle(trigger);}
+  if(dying){
+   Check(result.code==0&&Pid(result.json)&&Pid(result.json)!=actor.pid&&actorCreates==before+1&&WaitForSingleObject(actor.handle,0)==WAIT_OBJECT_0,"only original-handle signaled exit permits a relaunch after unresolved identity/path");
+   Check(observation.reads&&observation.positiveWaits&&observation.maximumWait<=1500&&elapsed>=80&&elapsed<3500,"terminating candidate uses a finite retained-handle wait before absence evidence");
+  }else{
+   Check(Refused(result)&&WaitForSingleObject(actor.handle,0)==WAIT_TIMEOUT&&actorCreates==before&&Field(result.json,"duplicate_check").find(mode==FaultMode::Identity?"candidate_identity_unresolved":"candidate_image_path_unresolved")!=std::string::npos,"genuinely live unresolved candidate still refuses without creating a process");
+   Check(observation.reads&&observation.positiveWaits&&observation.maximumWait<=1500&&elapsed>=1200&&elapsed<3500,"live candidate waits at most1500ms then retains the incomplete-inventory refusal");
+  }
+  Check(Finish(),"all unresolved-candidate actors finish through original handles with exact exit accounting");
+ }
+ // A short common deadline must cap the newly added wait, not gain1500ms.
+ std::wstring stopName;HANDLE stop=Stop(L"deadline",stopName);if(!stop)return false;const auto stem=ExeDir()+L"\\deadline";
+ Check(Spawn(actorA,ActorArgs(stopName,stem+L".actor",true))&&!WaitRead(stem+L".actor").empty(),"deadline control starts one verified owned live candidate");if(owned.empty())return false;const auto actor=owned.back();candidateFault={FaultMode::Identity,actor.pid};
+ const auto before=actorCreates;const auto started=GetTickCount64();bool accepted=false;std::string reason;{CliDeadlineScope budget(80);LaunchInstanceGuard guard;auto path=actorA;accepted=guard.Prepare(path,false);reason=guard.reason;}const auto elapsed=GetTickCount64()-started;const auto observation=candidateFault;candidateFault={};
+ Check(!accepted&&reason=="candidate_identity_unresolved"&&observation.positiveWaits&&observation.maximumWait<=80&&elapsed<500&&WaitForSingleObject(actor.handle,0)==WAIT_TIMEOUT&&actorCreates==before,"common80ms CLI budget caps unresolved-candidate wait without skipping a live process");
+ return Finish();
+}
+static void MissingImageControls(){
+ for(const auto& item:std::vector<std::pair<std::wstring,DWORD>>{{missingFile,ERROR_FILE_NOT_FOUND},{missingDirectoryFile,ERROR_PATH_NOT_FOUND}}){auto options=Options(item.first,L"unused",L"unused");options.opt.push_back({"cwd",W2U(ExeDir())});const auto before=actorCreates;const auto result=Call(options,ExeDir()+L"\\missing_"+std::to_wstring(item.second)+L".json");
+  Check(result.code==2&&Field(result.json,"win32_error")==std::to_string(item.second)&&Field(result.json,"error").find("CreateProcess failed")!=std::string::npos&&Field(result.json,"duplicate_check").find("requested_image_missing")!=std::string::npos&&Field(result.json,"duplicate_check").find(JEsc(W2U(item.first)))!=std::string::npos&&actorCreates==before,"missing file/directory preserves literal requested path and native error2/3 at process creation");
+ }
+}
 static int Peer(int argc,wchar_t** argv){
  if(argc!=7)return 111;HANDLE start=OpenEventW(SYNCHRONIZE,FALSE,argv[2]),stop=OpenEventW(SYNCHRONIZE,FALSE,argv[3]);if(!start||!stop){if(start)CloseHandle(start);if(stop)CloseHandle(stop);return 111;}
  if(WaitForSingleObject(start,7000)!=WAIT_OBJECT_0){CloseHandle(start);CloseHandle(stop);return 111;}
@@ -103,6 +153,7 @@ int wmain(int argc,wchar_t** argv){
  if(!vi_launch_ack::ArmDeadline()||!vi_launch_terminal::Install()||!vi_launch_terminal::Verify())return 111;
  wchar_t own[32768]{};GetModuleFileNameW(nullptr,own,32768);selfImage=own;
  actorA=ExeDir()+L"\\actor_a\\vi_launchduplicatetest.exe";actorB=ExeDir()+L"\\actor_b\\vi_launchduplicatetest.exe";
+ missingFile=ExeDir()+L"\\missing target with spaces.exe";missingDirectoryFile=ExeDir()+L"\\missing parent with spaces\\missing target.exe";
  if(argc>1&&!wcscmp(argv[1],L"--actor"))return Actor(argc,argv);
  if(argc>1&&!wcscmp(argv[1],L"--launch-peer"))return Peer(argc,argv);
  if(argc!=2||wcscmp(argv[1],L"--await-start"))return 111;char ack[8]{};if(!fgets(ack,sizeof(ack),stdin)||strcmp(ack,"RUN\n"))return 111;
@@ -132,6 +183,7 @@ int wmain(int argc,wchar_t** argv){
  stop=Stop(L"hidden",stopName);if(!stop)return 111;const auto hiddenPath=ExeDir()+L"\\hidden";
  Check(Spawn(actorA,ActorArgs(stopName,hiddenPath+L".actor",true))&&!WaitRead(hiddenPath+L".actor").empty(),"controlled hidden-window actor publishes after native window creation");
  const auto beforeHidden=actorCreates;const auto hidden=Call(Options(actorA,stopName,hiddenPath+L".extra"),hiddenPath+L".json");Check(Refused(hidden)&&actorCreates==beforeHidden,"hidden existing exact-image instance blocks without window selection");Check(Finish(),"hidden actor original-handle cleanup accounts exact exit");
+ if(!CandidateExitControls())return 111;MissingImageControls();
  // Both peer CLIs execute the real Launch entry in separate address spaces.
  // Their common actor stop event keeps the winner live through the loser's census.
  std::wstring raceStopName,startName;HANDLE raceStop=Stop(L"race_stop",raceStopName),start=Stop(L"race_start",startName);if(!raceStop||!start)return 111;

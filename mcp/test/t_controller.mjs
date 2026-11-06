@@ -53,12 +53,12 @@ try {
   }
   t.clearCalls(); r = await t.call("pad", { pid, buttons: "a", capture_settle_ms: 0 });
   check(r.isError && !t.callsOf("pad").length, "settle without requested capture is refused before the action");
-  t.clearCalls(); r = await t.call("pad", { pid, buttons: "a", capture_after: 0, capture_settle_ms: 5001 });
+  t.clearCalls(); r = await t.call("pad", { pid, buttons: "a", capture_after: 'immediate', capture_settle_ms: 5001 });
   check(r.isError && !t.callsOf("pad").length, "settle delay bound is validated before the action");
 
   // Fake records process start times; no assertion of actual rendered-frame freshness.
   t.setScenario({ replies: { pad: { ok: true, job_state: "completed", _delay_ms: 80 } } }); t.clearCalls();
-  const pending = t.call("pad", { pid, buttons: "a", ms: 150, capture_after: 0, capture_settle_ms: 240 });
+  const pending = t.call("pad", { pid, buttons: "a", ms: 150, capture_after: 'immediate', capture_settle_ms: 240 });
   for (let i = 0; i < 100 && !t.callsOf("pad").length; i++) await sleep(10);
   await sleep(110); const status = await t.call("status", { pid }); r = await pending;
   const calls = t.timedCalls(), pad = calls.find((x) => cmdOf(x.argv)[0] === "pad"), capture = calls.find((x) => cmdOf(x.argv)[0] === "capture"), stat = calls.find((x) => cmdOf(x.argv)[0] === "status");
@@ -72,29 +72,29 @@ try {
   check(!r.isError && !!r.image && r.json?.job_id === "smooth-ongoing" && r.json?.job_state === "running" && r.json.capture_after?.observation?.action_state === "async_job_may_be_running" && payload()?.async === true,
     "new helper default observation preserves the async native job identity and running state", r.text);
   t.setScenario({ replies: { pad: { ok: true, job_id: "ongoing", job_state: "running" } } }); t.clearCalls();
-  r = await t.call("pad", { pid, buttons: "a", ms: 5000, async: true, capture_after: 0, capture_settle_ms: 0 });
+  r = await t.call("pad", { pid, buttons: "a", ms: 5000, async: true, capture_after: 'immediate', capture_settle_ms: 0 });
   check(!r.isError && r.json?.job_state === "running" && r.json.capture_after?.observation?.action_state === "async_job_may_be_running", "async capture does not turn a running job into a completed action");
   await t.call("job_cancel", { pid, id: "ongoing" });
   check(cmdOf(t.callsOf("job-cancel").at(-1) ?? [])[1] === "ongoing", "async job keeps the existing cancellation route");
   t.setScenario({ replies: { pad: { ok: true } } }); t.clearCalls();
-  r = await t.call("pad", { pid, ly: 20000, hold: true, capture_after: 0, capture_settle_ms: 0 });
+  r = await t.call("pad", { pid, ly: 20000, hold: true, capture_after: 'immediate', capture_settle_ms: 0 });
   check(!r.isError && r.json?.capture_after?.observation?.action_state === "held_until_changed" && (t.callsOf("pad").at(-1) ?? []).includes("--hold") && !t.callsOf("release").length, "held capture leaves the hold active and labels it honestly");
 
   t.setScenario({ replies: { pad: { ok: true } } }); t.clearCalls();
-  const stale = t.call("pad", { pid, buttons: "a", ms: 150, capture_after: 0, capture_settle_ms: 400 });
+  const stale = t.call("pad", { pid, buttons: "a", ms: 150, capture_after: 'immediate', capture_settle_ms: 400 });
   for (let i = 0; i < 100 && !t.callsOf("pad").length; i++) await sleep(10);
   await sleep(40); await t.call("detach", { pid }); r = await stale;
   check(!r.isError && /attachment changed/.test(r.json?.capture_after_error ?? "") && !t.callsOf("capture").length && t.callsOf("pad").length === 1,
     "observed attachment change during settle suppresses the capture without retrying the action", r.text);
 
   t.setScenario({ replies: { pad: { ok: false, error: "owned modeled action refusal" } } }); t.clearCalls();
-  r = await t.call("pad", { pid, buttons: "a", capture_after: 0, capture_settle_ms: 10 });
+  r = await t.call("pad", { pid, buttons: "a", capture_after: 'immediate', capture_settle_ms: 10 });
   check(r.isError && !t.callsOf("capture").length && t.callsOf("pad").length === 1, "failed action performs no settle capture and is not retried");
   t.setScenario({ replies: { json: { ok: true, job_state: "completed" } } }); t.clearCalls();
-  r = await moveCall({ pid, direction: "right", ms: 600, smooth: true, capture_after: 0, capture_settle_ms: 0 });
+  r = await moveCall({ pid, direction: "right", ms: 600, smooth: true, capture_after: 'immediate', capture_settle_ms: 0 });
   check(!r.isError && !!r.image && t.callsOf("json").length === 1 && t.callsOf("capture").length === 1, "one smooth action can return its post-reply image");
   for (const [name, args] of [["pad_ramp", { axis: "ly", from: 0, to: 20000, ms: 300 }], ["pad_timeline", { states: [{ at_ms: 0 }, { at_ms: 100, ly: 20000 }, { at_ms: 200 }] }]]) {
-    t.clearCalls(); r = await t.call(name, { pid, ...args, capture_after: 0, capture_settle_ms: 0 });
+    t.clearCalls(); r = await t.call(name, { pid, ...args, capture_after: 'immediate', capture_settle_ms: 0 });
     check(!r.isError && !!r.image && r.json?.capture_after?.observation?.settle_ms_requested === 0, `${name} uses the same explicit post-reply capture contract`);
   }
 } finally { await t.close(); }

@@ -33,7 +33,7 @@ try{
  t.clearCalls();r=await t.call('drag',{pid,x1:10,y1:20,x2:30,y2:40,coord_space:'capture',edge_margin:0,hold_start_ms:0,hold_end_ms:0,ms:1,steps:1,compact:true});
  check(!r.isError&&r.json.compact&&r.json.mapping_used.capture_map_id==='7'&&r.json.mapped.x1===120&&r.json.mapped.y2===360&&t.callsOf('mousedown').length===1&&t.callsOf('mouse').length===1&&t.callsOf('mouseup').length===1&&!t.callsOf('json').length,'compact drag echoes the shared endpoint transform without additional input or map queries');
  t.setScenario({png:{w:100,h:50},replies:{capture:{...native,capture_map_id:'8',w:100,h:50,method:'swapchain',capture_mapping:{...native.capture_mapping,scale:1,scale_y:0.5,offset_x:10,offset_y:20}},click:{ok:true}}});t.clearCalls();
- r=await t.call('click',{pid,x:10,y:20,coord_space:'capture',edge_margin:0,hover_ms:0,hold_ms:1,capture_after:0});
+ r=await t.call('click',{pid,x:10,y:20,coord_space:'capture',edge_margin:0,hover_ms:0,hold_ms:1,capture_after:'immediate'});
  check(!r.isError&&r.image&&r.json.mapping_used.capture_map_id==='7'&&r.json.mapping_used.scale===0.5&&r.json.mapped.x===120&&t.callsOf('click').length===1&&t.callsOf('capture').length===1,'capture_after cannot replace the action receipt with the newer capture transform');
  t.clearCalls();r=await t.call('click',{pid,x:10,y:20,coord_space:'capture',edge_margin:0,hover_ms:0,hold_ms:1});
  check(r.json.mapping_used.capture_map_id==='8'&&r.json.mapping_used.scale===1&&r.json.mapped.x===20&&r.json.mapped.y===60&&!t.callsOf('json').length,'the next deliberate action separately reports the newer remembered map');

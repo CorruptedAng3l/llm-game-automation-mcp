@@ -73,7 +73,7 @@ for(const option of ['old','manual','badMotion']){
  f=fixture({[option]:true});r=read(await padMoveUntilStuck(f.ctx,args(f)));check(!r.ok&&!r.admission_attempted&&!holds(f).length,option+' refuses before input');
 }
 f=fixture({duration:100,statusDelay:130});r=read(await padMoveUntilStuck(f.ctx,args(f)));check(r.ok&&r.stopped==='timeout'&&!r.hold_started&&r.samples===0&&captures(f).length===1,'late running status cannot admit a post-deadline no-motion verdict');
-f=fixture();r=read(await padMoveUntilStuck(f.ctx,{...args(f),capture_after:0,max_width:160}));check(r.ok&&f.finishEpoch===0&&f.finishOptions.capture_after===0&&f.finishOptions.max_width===160,'shared action capture keeps the original attachment epoch and options');
+f=fixture();r=read(await padMoveUntilStuck(f.ctx,{...args(f),capture_after:'immediate',max_width:160}));check(r.ok&&f.finishEpoch===0&&f.finishOptions.capture_after==='immediate'&&f.finishOptions.max_width===160,'shared action capture keeps the original attachment epoch and options');
 for(const extra of [{region:undefined},{still_ms:0},{timeout_ms:16000},{pixel_tolerance:256},{max_change_pct:NaN},{direction:'sideways'},{speed:'fly'},{screen_rotation_deg:Infinity}]){
  f=fixture();r=read(await padMoveUntilStuck(f.ctx,{...args(f),...extra}));check(!r.ok&&r.input_injected===false&&f.calls.length===0,'invalid options refuse before any CLI command '+JSON.stringify(extra));
 }

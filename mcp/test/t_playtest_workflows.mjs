@@ -10,18 +10,18 @@ const t=await startFake(scene(),env),drag={pid,x1:20,y1:30,x2:40,y2:50,ms:1,hold
 const hashCalls=()=>t.callsOf('json').filter(a=>{try{return JSON.parse(cmdOf(a)[1]).cmd==='frame-hash'}catch{return false}});
 const witness=(good,label,r)=>{if(!good)console.error('WORKFLOW_DIAGNOSTIC '+JSON.stringify({reply:r,timed_cli_calls:t.timedCalls()}));check(good,label,r.text);};
 try{
- let r=await t.call('scroll',{pid,notches:1,settle:{region,poll_ms:50,stable_samples:2,timeout_ms:1000},capture_after:0,max_width:160});
+ let r=await t.call('scroll',{pid,notches:1,settle:{region,poll_ms:50,stable_samples:2,timeout_ms:1000},capture_after:'immediate',max_width:160});
  witness(!r.isError&&r.json.settle_ok&&r.image&&t.callsOf('scroll').length===1&&hashCalls().length>=3&&t.callsOf('capture').length===1,'one wheel settles selected pixels then returns one final image',r);
  t.setScenario(scene({animate:true}));t.clearCalls();r=await t.call('scroll',{pid,notches:1,settle:{region,poll_ms:50,stable_samples:2,timeout_ms:100},capture_after:false});
  check(!r.isError&&r.json.ok&&!r.json.settle_ok&&r.json.settle_warning&&r.json.settle_observation.timed_out&&t.callsOf('scroll').length===1,'wheel pixel timeout is advisory and never repeats the action');
- t.setScenario(scene({wheelRefused:true}));t.clearCalls();r=await t.call('scroll',{pid,notches:1,settle:true,capture_after:0});
+ t.setScenario(scene({wheelRefused:true}));t.clearCalls();r=await t.call('scroll',{pid,notches:1,settle:true,capture_after:'immediate'});
  check(r.isError&&hashCalls().length===0&&t.callsOf('capture').length===0&&t.callsOf('scroll').length===1,'refused wheel is neither replayed nor observed as successful');
- t.setScenario(scene());t.clearCalls();r=await t.call('move_relative',{pid,dx:600,dy:0,capture_after:0,capture_stable:{region,poll_ms:50,stable_samples:2,timeout_ms:1000},max_width:160});
+ t.setScenario(scene());t.clearCalls();r=await t.call('move_relative',{pid,dx:600,dy:0,capture_after:'immediate',capture_stable:{region,poll_ms:50,stable_samples:2,timeout_ms:1000},max_width:160});
  check(!r.isError&&r.image&&r.json.capture_stability?.ok&&r.json.capture_stability?.final_capture_same_scope===true&&t.callsOf('move').length===1&&t.callsOf('capture').length===1,'completed relative action observes stability before one same-scope image');
  check(/virtual-cursor/.test(r.json.relative_motion_note??'')&&/raw:true/.test(r.json.relative_motion_warning??''),'relative reply distinguishes requested/device/cursor channels and bounded-look guidance');
- t.setScenario(scene({}, {capture:{capture_scope:{...scope,lifetime_cookie:'4'}}}));t.clearCalls();r=await t.call('move_relative',{pid,dx:1,dy:0,capture_after:0,capture_stable:{region,poll_ms:50,stable_samples:2,timeout_ms:1000}});
+ t.setScenario(scene({}, {capture:{capture_scope:{...scope,lifetime_cookie:'4'}}}));t.clearCalls();r=await t.call('move_relative',{pid,dx:1,dy:0,capture_after:'immediate',capture_stable:{region,poll_ms:50,stable_samples:2,timeout_ms:1000}});
  check(!r.isError&&r.image&&r.json.capture_stability?.ok===false&&r.json.capture_stability?.final_capture_same_scope===false&&r.json.capture_stability_warning&&t.callsOf('move').length===1,'different final-image lifetime cannot inherit earlier pixel stability');
- for(const [name,args] of [['move_relative',{dx:1,dy:0,capture_after:false}],['key',{key:'w',async:true,capture_after:0}],['key_sequence',{steps:[{action:'key',key:'w',ms:100}],capture_after:0}]]){
+ for(const [name,args] of [['move_relative',{dx:1,dy:0,capture_after:false}],['key',{key:'w',async:true,capture_after:'immediate'}],['key_sequence',{steps:[{action:'key',key:'w',ms:100}],capture_after:'immediate'}]]){
    t.clearCalls();r=await t.call(name,{pid,...args,capture_stable:true});
    check(r.isError&&t.calls().length===0,`${name} refuses stability without a final image/completed action before input`);
  }
@@ -41,7 +41,7 @@ try{
  t.setScenario(scene({}, {'placement-drag':{ok:true,job_state:'completed',capture_scope_checked:true}}));t.clearCalls();r=await t.call('drag',{...drag,placement:true,coord_space:'capture',mapping:{scale:.5,offset_x:0,offset_y:0}});
  check(!r.isError&&t.callsOf('placement-drag')[0]?.includes('--scope-json')&&t.callsOf('mousedown').length===0,'mapped placement forwards its original scope to the one native job');
  t.setScenario(scene({}, {capture:{capture_scope:scope,_delay_ms:500}}));t.clearCalls();
- const pending=t.call('move_relative',{pid,dx:1,dy:0,capture_after:0});const until=Date.now()+3000;
+ const pending=t.call('move_relative',{pid,dx:1,dy:0,capture_after:'immediate'});const until=Date.now()+3000;
  while(!t.callsOf('capture').length&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,10));
  check(t.callsOf('capture').length===1,'attachment-race control reaches its one pending final capture');
  await t.call('detach',{pid});r=await pending;

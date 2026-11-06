@@ -31,7 +31,7 @@ try {
   }
   for (const [name, args, command] of families) {
     t.clearCalls();
-    const r = await t.call(name, { pid, ...args, capture_after: 0 });
+    const r = await t.call(name, { pid, ...args, capture_after: 'immediate' });
     const cap = t.callsOf("capture")[0], im = decode(r);
     check(!r.isError && actions().length === 1 && cmdOf(actions()[0])[0] === command && t.callsOf("capture").length === 1 &&
       flag(cap, "--max-width") === "960" && im?.width === 960 && im.height === 540,
@@ -40,7 +40,7 @@ try {
       `${name} preserves the action receipt and actual image mapping`, r.text);
 
     t.clearCalls();
-    const crop = await t.call(name, { pid, ...args, capture_after: 0, max_width: 160, region: rectangle });
+    const crop = await t.call(name, { pid, ...args, capture_after: 'immediate', max_width: 160, region: rectangle });
     const ci = decode(crop), cc = t.callsOf("capture")[0], map = crop.json?.capture_after?.image;
     check(!crop.isError && actions().length === 1 && t.callsOf("capture").length === 1 && flag(cc, "--max-width") === "160" &&
       flag(cc, "--region") === "100,40,320,180" && ci?.width === 160 && ci.height === 90,
@@ -54,27 +54,27 @@ try {
   check(mapped[2] === "120" && mapped[3] === "80", "successful action image maps the later capture-space click to client (120,80)", JSON.stringify(mapped));
 
   t.clearCalls();
-  let r = await t.call("move_relative", { pid, dx: -120, dy: 17, raw: true, steps: 5, capture_after: 0, scale: 0.5, region: rectangle });
+  let r = await t.call("move_relative", { pid, dx: -120, dy: 17, raw: true, steps: 5, capture_after: 'immediate', scale: 0.5, region: rectangle });
   let cap = t.callsOf("capture")[0], im = decode(r), relative = cmdOf(t.callsOf("move")[0] ?? []);
   check(!r.isError && relative[1] === "-120" && relative[2] === "17" && flag(relative, "--steps") === "5" && relative.includes("--raw") &&
     flag(cap, "--scale") === "0.5" && flag(cap, "--max-width") === undefined && im?.width === 160,
     "relative deltas stay unscaled while explicit observation scale suppresses the default cap", JSON.stringify(t.calls()));
   t.clearCalls();
-  r = await t.call("key", { pid, key: "return", capture_after: 0, scale: 2, region: { x: 100, y: 40, w: 80, h: 60 } }); im = decode(r);
+  r = await t.call("key", { pid, key: "return", capture_after: 'immediate', scale: 2, region: { x: 100, y: 40, w: 80, h: 60 } }); im = decode(r);
   check(!r.isError && im?.width === 160 && im.height === 120 && r.json?.capture_after?.image?.scale === 2 &&
     r.json.capture_after.image.scaled_by === "mcp", "key PNG enlargement reuses existing MCP transform mapping", r.text);
   t.clearCalls();
-  r = await t.call("click_text", { pid, text: "Play", capture_after: 0, max_width: 320, format: "jpeg", quality: 65 }); cap = t.callsOf("capture")[0];
+  r = await t.call("click_text", { pid, text: "Play", capture_after: 'immediate', max_width: 320, format: "jpeg", quality: 65 }); cap = t.callsOf("capture")[0];
   check(!r.isError && r.image?.mimeType === "image/jpeg" && flag(cap, "--format") === "jpeg" && flag(cap, "--quality") === "65" &&
     flag(cap, "--max-width") === "320", "click_text forwards and labels JPEG observation options (encoding is modeled)", r.text);
 
   for (const [name, args] of families) for (const options of [
-    { capture_after: 0, max_width: 160, scale: 0.5 },
-    { capture_after: 0, quality: 70 },
+    { capture_after: 'immediate', max_width: 160, scale: 0.5 },
+    { capture_after: 'immediate', quality: 70 },
     { capture_after: false, max_width: 160 },
-    { capture_after: 0, format: "jpeg", scale: 2 },
-    { capture_after: 0, max_width: 63 },
-    { capture_after: 0, region: { x: 0, y: 0, w: 0, h: 10 } },
+    { capture_after: 'immediate', format: "jpeg", scale: 2 },
+    { capture_after: 'immediate', max_width: 63 },
+    { capture_after: 'immediate', region: { x: 0, y: 0, w: 0, h: 10 } },
   ]) {
     t.clearCalls(); r = await t.call(name, { pid, ...args, ...options });
     check(r.isError && t.calls().length === 0, `${name} rejects static incompatible options before ANY CLI I/O: ${JSON.stringify(options)}`, r.text);
@@ -89,7 +89,7 @@ try {
   t.clearCalls(); r = await t.call("capture", { pid }); im = decode(r);
   check(!r.isError && im?.width === 1280 && flag(t.callsOf("capture")[0], "--max-width") === undefined, "standalone capture retains its full-size default");
 
-  t.clearCalls(); r = await t.call("key_sequence", { pid, steps: [{ action: "key", key: "w", ms: 150 }], capture_after: 0, max_width: 160 });
+  t.clearCalls(); r = await t.call("key_sequence", { pid, steps: [{ action: "key", key: "w", ms: 150 }], capture_after: 'immediate', max_width: 160 });
   check(!r.isError && r.json?.job_id === "seq-owned" && r.json.job_state === "queued" && r.json.accepted === true &&
     r.json.capture_after?.observation?.action_state === "async_job_may_be_running" && /job_status/.test(r.json.note ?? "") && t.lastSeqText() === "key w 150\n",
     "sequence observation preserves scheduling receipt and exact sequence without inventing completion", r.text);
@@ -97,25 +97,25 @@ try {
   check(cmdOf(t.callsOf("job-cancel").at(-1) ?? [])[1] === "seq-owned", "sequence cancellation route remains explicit and unchanged");
 
   t.setScenario(scenario({ replies: { ...scenario().replies, key: { ...done, job_id: "key-owned", job_state: "running", accepted: true } } }));
-  t.clearCalls(); r = await t.call("key", { pid, key: "w", hold_ms: 1000, async: true, capture_after: 0, max_width: 160 });
+  t.clearCalls(); r = await t.call("key", { pid, key: "w", hold_ms: 1000, async: true, capture_after: 'immediate', max_width: 160 });
   check(!r.isError && r.json?.job_state === "running" && r.json.capture_after?.observation?.action_state === "async_job_may_be_running" && actions().length === 1,
     "async key observation does not consume or fabricate completion", r.text);
 
   t.setScenario(scenario({ replies: { ...scenario().replies, capture: { ok: false, error: "modeled backend failure" } } }));
   for (const [name, args] of families) {
-    t.clearCalls(); r = await t.call(name, { pid, ...args, capture_after: 0, max_width: 160 });
+    t.clearCalls(); r = await t.call(name, { pid, ...args, capture_after: 'immediate', max_width: 160 });
     check(!r.isError && r.json?.operation === "modeled-action" && r.json.input_injected === true && /modeled backend failure/.test(r.json.capture_after_error ?? "") &&
       actions().length === 1 && t.callsOf("capture").length === 1 && !r.image,
       `${name} dynamic capture failure preserves the original action and never replays it`, r.text);
   }
   t.setScenario(scenario({ replies: Object.fromEntries(names.map((n) => [n, { ok: false, error: "modeled action refusal" }])) }));
   for (const [name, args] of families) {
-    t.clearCalls(); r = await t.call(name, { pid, ...args, capture_after: 0 });
+    t.clearCalls(); r = await t.call(name, { pid, ...args, capture_after: 'immediate' });
     check(r.isError && /modeled action refusal/.test(r.text) && actions().length === 1 && !t.callsOf("capture").length,
       `${name} failed action has no observation or action retry`, r.text);
   }
   t.setScenario(scenario({ replies: { ...scenario().replies, key: { ...done, _delay_ms: 350 } } })); t.clearCalls();
-  const pending = t.call("key", { pid, key: "w", capture_after: 0, max_width: 160 });
+  const pending = t.call("key", { pid, key: "w", capture_after: 'immediate', max_width: 160 });
   for (let i = 0; i < 200 && !t.callsOf("key").length; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   await t.call("detach", { pid }); r = await pending;
   check(!r.isError && /attachment changed/.test(r.json?.capture_after_error ?? "") && actions().length === 1 && !t.callsOf("capture").length,
@@ -140,7 +140,7 @@ const fault = await startFake(scenario(), { VINPUT_CAPTURE_DIR: fileURLToPath(ne
 try {
   for (const [name, args, command] of families) {
     fault.clearCalls();
-    const r = await fault.call(name, { pid, ...args, capture_after: 0, max_width: 160 });
+    const r = await fault.call(name, { pid, ...args, capture_after: 'immediate', max_width: 160 });
     check(!r.isError && r.json?.operation === "modeled-action" && r.json.input_injected === true && /post-action capture failed/.test(r.json.capture_after_error ?? "") &&
       fault.callsOf(command).length === 1 && !fault.callsOf("capture").length,
       `${name} capture setup exception retains the performed action receipt`, r.text);

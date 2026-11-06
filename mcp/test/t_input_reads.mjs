@@ -24,7 +24,7 @@ original=native();r=presentInputReads(result({ok:true,job:original}));
 check(r.ok&&r.json.job.input_read_observation===original.input_read_observation&&r.json.job.reader_return_observed===false&&r.json.job.input_read_warning,'async exact-job status keeps nested reader uncertainty as a warning');
 const t=await startFake({replies:{key:native()}});
 try{
- r=await t.call('key',{pid,key:'w',capture_after:0,max_width:160});check(!r.isError&&r.json.job_id===`${pid}:123:4`&&r.json.input_read_warning&&t.callsOf('key').length===1,'actual MCP keeps message-delivered key successful with one original action and a reader warning');
+ r=await t.call('key',{pid,key:'w',capture_after:'immediate',max_width:160});check(!r.isError&&r.json.job_id===`${pid}:123:4`&&r.json.input_read_warning&&t.callsOf('key').length===1,'actual MCP keeps message-delivered key successful with one original action and a reader warning');
  check(r.image&&t.callsOf('capture').length===1,'reader warning never skips requested capture_after');
  t.setScenario({replies:{'job-status':{ok:true,job:native()}}});t.clearCalls();
  r=await t.call('job_status',{pid,id:`${pid}:123:4`});check(!r.isError&&r.json.job.reader_return_observed===false&&r.json.job.input_read_warning&&t.callsOf('key').length===0,'actual MCP async hold status warns without replaying the hold or returning an input error');

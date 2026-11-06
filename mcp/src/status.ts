@@ -1,5 +1,6 @@
 // Views over vinput's `status` reply (vinput_core.cpp StatusJson): names instead of enum numbers.
 import {compactRenderBackends} from './backendview.js';
+import {rawRouteAdvice} from './rawrouteadvice.js';
 type Obj = Record<string, unknown>;
 
 export const CURSOR_NAMES = ["auto", "virtual", "real"] as const;
@@ -174,6 +175,8 @@ export function compactStatus(s: Obj): Obj {
   const nonzero: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(c)) if (typeof v === "number" && v !== 0) nonzero[k] = v;
   const warnings: string[] = [];
+  const rawAdvice=rawRouteAdvice(s);
+  if(rawAdvice)warnings.push(rawAdvice.message as string);
   const hidden = hiddenWindowView(s);
   const d = diagnoseFrames(s);
   if (d.warning) warnings.push(d.warning);
@@ -232,6 +235,7 @@ export function compactStatus(s: Obj): Obj {
   if (mouse) out.directinput_mouse = mouse;
   if(s.framework_input&&typeof s.framework_input==='object'&&!Array.isArray(s.framework_input)&&(s.framework_input as Obj).version===1)out.framework_input=s.framework_input;
   if (messages) out.mouse_messages = messages;
+  if(rawAdvice)out.raw_route_advice=rawAdvice;
   out.warnings = warnings;
   return out;
 }

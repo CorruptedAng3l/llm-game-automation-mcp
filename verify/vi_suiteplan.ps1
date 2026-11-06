@@ -22,6 +22,12 @@ function Get-VinputForegroundCases {
  }
 }
 function Get-VinputBackgroundCases {
+ New-VinputSuiteCase 'capture_zero_contract' 'run_mcpcontracttest.ps1' @{Test='capture_zero'} 'Explicit0 never creates a following image; immediate images and per-tool omitted defaults remain explicit.'
+ New-VinputSuiteCase 'camera_observation_policy' 'run_mcpcontracttest.ps1' @{Test='camera_observation'} 'Finite native-clock onset/quiet policy; no input, camera-angle or rendered-freshness claim.'
+ New-VinputSuiteCase 'camera_readback_protocol' 'run_mcpcontracttest.ps1' @{Test='camera_readback'} 'Actual MCP angular adapter with fake fresh-frame clocks, one raw publication and advisory-only readback.'
+ New-VinputSuiteCase 'raw_route_advice' 'run_mcpcontracttest.ps1' @{Test='rawroute_advice'} 'Read-only exact-owned-destination explicit-post conflict advice; no automatic mode mutation.'
+ New-VinputSuiteCase 'raw_route_advice_native' 'run_rawadvicetest.ps1' @{} 'Actual extracted doctor parser/advice with finite memory-only status records and bounded owned actors.'
+ New-VinputSuiteCase 'early_cleanup_identity' 'run_earlycleanuptest.ps1' @{} 'Owned inert retained-process cleanup controls; legacy early GUI/device assertions are a separate lane.'
  New-VinputSuiteCase 'input_receipt_v2' 'run_receipttest.ps1' @{} 'Actual channel counters, receipt serializer and extracted polling callback; dispatch is distinct from polling and application response.'
  New-VinputSuiteCase 'input_receipt_v2_mcp' 'run_mcpcontracttest.ps1' @{Test='receiptprojection'}
  New-VinputSuiteCase 'action_visual_feedback' 'run_mcpcontracttest.ps1' @{Test='action_feedback'} 'Promotes existing measured image differences without asserting game consumption.'

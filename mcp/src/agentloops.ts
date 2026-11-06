@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {captureEnabled,type CaptureAfter} from './actioncapturepolicy.js';
 import {resolve} from 'node:path';
 import type {CliResult} from './vinput.js';
 import {canonicalSequenceScope} from './sequenceconditions.js';
@@ -11,7 +12,7 @@ type Reply={content:({type:'text';text:string}|{type:'image';data:string;mimeTyp
 type Rect={x:number;y:number;w:number;h:number};type Point={x:number;y:number};
 type Mapping={scale:number;offset_x:number;offset_y:number};
 type Runtime={signal?:AbortSignal};
-type Options={pid:number;coord_space?:'client'|'capture';mapping?:Mapping;capture_after?:boolean|number;capture_settle_ms?:number;region?:Rect;max_width?:number;scale?:number;upscale?:boolean;save_path?:string;out_dir?:string;format?:'png'|'jpeg';quality?:number};
+type Options={pid:number;coord_space?:'client'|'capture';mapping?:Mapping;capture_after?:CaptureAfter;capture_settle_ms?:number;region?:Rect;max_width?:number;scale?:number;upscale?:boolean;save_path?:string;out_dir?:string;format?:'png'|'jpeg';quality?:number};
 export type LoopContext={owner:string;at:(pid:number)=>string[];run:(argv:string[],budget:number)=>Promise<CliResult>;epoch:(pid:number)=>number;
  map:(pid:number,options:Options,points:[number,number][],expectedScope:unknown)=>{pts:[number,number][];mapped:boolean;mapping_used?:MappingUsed}|{error:string}|Promise<{pts:[number,number][];mapped:boolean;mapping_used?:MappingUsed}|{error:string}>;
  captureError:(options:Options)=>string|undefined;finish:(pid:number,out:Reply,options:Options,epoch:number)=>Promise<Reply>;qualifyInput?:(r:CliResult)=>CliResult};
@@ -197,7 +198,7 @@ function holdJob(value:unknown,ctx:LoopContext,s:Session,duration:number,accepte
 }
 export type ClickToMoveOptions=Options&{x:number;y:number;region:Rect;button?:'left'|'right';timeout_ms?:number;hold_ms?:number;poll_ms?:number;stable_samples?:number};
 export async function clickToMove(ctx:LoopContext,a:ClickToMoveOptions,runtime:Runtime={}):Promise<Reply>{
- const invalid=ctx.captureError({...a,region:a.capture_after===undefined||a.capture_after===false?undefined:a.region});if(invalid)return reply({ok:false,error:invalid,input_injected:false});
+ const invalid=ctx.captureError({...a,region:captureEnabled(a.capture_after)?a.region:undefined});if(invalid)return reply({ok:false,error:invalid,input_injected:false});
  if(sessions.has(a.pid))return reply({ok:false,error:'another_bounded_helper_session_active',input_injected:false});sessions.add(a.pid);
  const s:Session={pid:a.pid,epoch:ctx.epoch(a.pid),generation:inputGenerations.get(a.pid)??0,deadline:performance.now()+(a.timeout_ms??10000),signal:runtime.signal,id:`loops-${a.pid}-${++nextSession}`};
  const duration=a.hold_ms??5000;let baseline:Sample|undefined,last:Sample|undefined,move:CliResult|undefined,initial:CliResult|undefined,admitted:HoldJob|undefined,job:HoldJob|undefined,error:string|undefined,changed=false,stable=false,consecutive=0,samples=0,release=false,cleanup:Obj={attempted:false},inputAttempted=false,p:Point|undefined,completedReadReceipt:unknown,failure:Obj={};

@@ -39,9 +39,10 @@ int main(int argc,char** argv){
     Check(!DiPollInstall((*(void***)a)[9],true),"state entry cannot be reinterpreted as buffered ABI");
     Check(!ClaimDiInstallEntry((*(void***)a)[9],false),"poll entry cannot be reinterpreted as Acquire ABI");
     g_diMouseMovesSincePoll=3;
-    {const auto status=StatusJson();Check(status.find("\"mouse_poll_unobserved\":true")!=std::string::npos&&(status.find("has not polled")!=std::string::npos||status.find("no DirectInput mouse consumer was observed")!=std::string::npos),"three unpolled moves produce actionable status warning");}
+    {const auto status=StatusJson();Check(status.find("\"mouse_poll_unobserved\":true")!=std::string::npos&&
+        (status.find("DirectInput mouse consumer has not polled")!=std::string::npos||status.find("no DirectInput mouse consumer was observed")!=std::string::npos),"three unpolled moves produce structured status plus the applicable consumer warning or note");}
 #else
-    Check(false,"all keyboard/mouse A/W implementation roles hooked");Check(false,"state entry cannot be reinterpreted as buffered ABI");Check(false,"poll entry cannot be reinterpreted as Acquire ABI");Check(false,"three unpolled moves produce actionable status warning");
+    Check(false,"all keyboard/mouse A/W implementation roles hooked");Check(false,"state entry cannot be reinterpreted as buffered ABI");Check(false,"poll entry cannot be reinterpreted as Acquire ABI");Check(false,"three unpolled moves produce structured status plus the applicable consumer warning or note");
 #endif
     for(unsigned i=0;i<2;++i){
         void* device=i?(void*)w:(void*)a;const auto state=(PFN_DIGDS)(*(void***)device)[9];const auto buffer=(PFN_DIGDD)(*(void***)device)[10];
@@ -70,9 +71,11 @@ int main(int argc,char** argv){
         g_vk[VK_LBUTTON]=0;
     }
 #ifdef VI_DI_POLL_REGISTRY
-    Check(StatusJson().find("state_and_buffer")!=std::string::npos&&g_diMouseMovesSincePoll==0,"status names actual mouse polling channels and clears warning");
+    {const auto status=StatusJson();Check(status.find("state_and_buffer")!=std::string::npos&&status.find("\"mouse_poll_unobserved\":false")!=std::string::npos&&g_diMouseMovesSincePoll==0,"status names actual mouse polling channels and clears warning");}
+    g_diMouseMovesSincePoll=3;{const auto status=StatusJson();Check(status.find("\"mouse_poll_unobserved\":true")!=std::string::npos&&status.find("previously observed DirectInput mouse consumer has not polled")!=std::string::npos,"known consumer gap preserves the structured flag and warning branch");}g_diMouseMovesSincePoll=0;
 #else
     Check(false,"status names actual mouse polling channels and clears warning");
+    Check(false,"known consumer gap preserves the structured flag and warning branch");
 #endif
     // Menu engines may select a compact/permuted mouse format independently of
     // their in-game standard DIMOUSESTATE reader. Prove the exact descriptor.

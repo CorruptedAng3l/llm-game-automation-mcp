@@ -37,10 +37,9 @@ struct LaunchInstanceGuard {
         // A concurrent path replacement cannot change this mutex's file identity.
         imageHandle=CreateFileW(absolute.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
         if(imageHandle==INVALID_HANDLE_VALUE){
-            const DWORD openError=GetLastError();
-            // A file that does not exist cannot already be running: admit it so CreateProcess reports the real error.
-            if(openError==ERROR_FILE_NOT_FOUND||openError==ERROR_PATH_NOT_FOUND){reason="requested_image_missing";error=openError;complete=true;return true;}
-            return Fail("requested_image_open_failed",openError);
+            const auto code=GetLastError();
+            if(code==ERROR_FILE_NOT_FOUND||code==ERROR_PATH_NOT_FOUND){requested=absolute;image=absolute;error=code;complete=true;reason="requested_image_missing";return true;}
+            return Fail("requested_image_open_failed",code);
         }
         BY_HANDLE_FILE_INFORMATION identity{};
         if(!GetFileInformationByHandle(imageHandle,&identity)||!FinalName(imageHandle,image))return Fail("requested_image_identity_unresolved",GetLastError());
@@ -74,12 +73,10 @@ struct LaunchInstanceGuard {
             FILETIME born{},ended{},kernel{},user{};std::wstring raw(32768,L'\0');DWORD size=(DWORD)raw.size();
             bool known=alive==WAIT_TIMEOUT&&GetProcessId(process)==row.th32ProcessID&&GetProcessTimes(process,&born,&ended,&kernel,&user)&&QueryFullProcessImageNameW(process,0,raw.data(),&size)&&size&&size<raw.size();
             if(known){raw.resize(size);known=vi_launch_follow::SnapshotIdentity(row.th32ProcessID,row.szExeFile,GetProcessId(process),raw,LaunchStamp(born),cutoff);}
-            // A process that is being terminated is not signaled yet but can no longer report its image
-            // (ERROR_ACCESS_DENIED). Give it a short bounded chance to finish exiting before refusing.
-            if(!known){const auto code=GetLastError();if(WaitForSingleObject(process,1500)==WAIT_OBJECT_0){CloseHandle(process);continue;}CloseHandle(process);good=Fail("candidate_identity_unresolved",code,row.th32ProcessID);break;}
+            if(!known){const auto code=GetLastError();const bool exited=WaitForSingleObject(process,CliBudget(1500))==WAIT_OBJECT_0;CloseHandle(process);if(exited)continue;good=Fail("candidate_identity_unresolved",code,row.th32ProcessID);break;}
             HANDLE file=CreateFileW(raw.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
             std::wstring canonical;known=file!=INVALID_HANDLE_VALUE&&FinalName(file,canonical);const auto code=known?0:GetLastError();if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
-            if(!known){if(WaitForSingleObject(process,1500)==WAIT_OBJECT_0){CloseHandle(process);continue;}CloseHandle(process);good=Fail("candidate_image_path_unresolved",code,row.th32ProcessID);break;}
+            if(!known){const bool exited=WaitForSingleObject(process,CliBudget(1500))==WAIT_OBJECT_0;CloseHandle(process);if(exited)continue;good=Fail("candidate_image_path_unresolved",code,row.th32ProcessID);break;}
             alive=WaitForSingleObject(process,0);
             if(alive==WAIT_OBJECT_0){CloseHandle(process);continue;}
             if(alive!=WAIT_TIMEOUT){const auto waitError=GetLastError();CloseHandle(process);good=Fail("candidate_liveness_unresolved",waitError,row.th32ProcessID);break;}

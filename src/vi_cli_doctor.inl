@@ -167,6 +167,14 @@ static Reply CmdDoctor(DWORD pid, const Args& a) {
     if(available&&Field(rawRegistration,"query_ok")=="true"&&Field(st,"raw_mouse")=="false"&&strtod(Field(counters,"reg_raw_removed").c_str(),nullptr)>0)suggestions.push_back("No mouse raw subscription is currently registered, and a successful removal was observed. Auto respects removal; raw=post is an explicit override for a controlled WM_INPUT reader. The removal's cause is unknown.");
     if(rawDelivery!="null"&&Field(rawDelivery,"buffer_supported")=="false")suggestions.push_back("This x86 build posts synthetic raw records in auto mode; synthetic raw=buffer is unsupported and rejected. Use raw=post to select WM_INPUT explicitly.");
     if(rawDelivery!="null"&&Field(rawDelivery,"last_backend")=="\"buffer\"")suggestions.push_back("Recent successful GetRawInputBuffer activity selected buffered synthetic delivery. Select raw=post for a WM_INPUT-only consumer; counters alone do not prove application consumption.");
+    // RAW_POST_BUFFER_ADVICE_BEGIN: extracted verbatim by the memory-only test.
+    {const auto route=available?Field(st,"raw_buffer_routing"):"null",thread=Field(route,"mouse_thread");
+     bool threadKnown=!thread.empty()&&thread.size()<=10&&thread[0]>='1'&&thread[0]<='9'&&std::all_of(thread.begin(),thread.end(),[](char c){return c>='0'&&c<='9';});
+     if(threadKnown){try{threadKnown=std::stoull(thread)<=4294967295ULL;}catch(...){threadKnown=false;}}
+     const bool owned=Field(rawRegistration,"mouse_target_owned")=="true"||(Field(rawRegistration,"mouse_target")=="\"0x0\""&&Field(rawRegistration,"fallback_target_owned")=="true");
+     if(available&&Field(st,"ok")=="true"&&Field(st,"rawmode")=="1"&&Field(st,"raw_mouse")=="true"&&Field(route,"version")=="1"&&Field(route,"mouse_recent_buffer_reader")=="true"&&threadKnown&&owned&&Field(rawRegistration,"query_ok")=="true"&&Field(rawDelivery,"buffer_supported")=="true")
+      suggestions.push_back("Explicit raw=post sends WM_INPUT although this owned mouse destination recently called GetRawInputBuffer. Test config raw=auto or raw=buffer deliberately on this x64 target. No mode was changed or input repeated; reader activity does not prove application consumption.");}
+    // RAW_POST_BUFFER_ADVICE_END
     std::string trace = "null", traceError;
     if (available && key) {
         std::string tr;

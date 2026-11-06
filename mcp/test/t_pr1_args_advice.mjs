@@ -38,7 +38,7 @@ try {
   await t.call("launch", { exe: "C:/Games/Test/test.exe" });
   check(nativeArgsValue(t.callsOf("launch").at(-1) ?? []) === undefined, "omitted args stay omitted");
   const instructions = t.client.getInstructions() ?? "";
-  check(!instructions.includes("returns the next frame") && instructions.includes("PrintWindow") && instructions.includes("does not prove a new rendered frame") && instructions.includes("capture_after:0"),
+  check(!instructions.includes("returns the next frame") && instructions.includes("PrintWindow") && instructions.includes("does not prove a new rendered frame") && instructions.includes("capture_after:'immediate'"),
     "shared advice distinguishes a PrintWindow observation from a rendered-frame guarantee", instructions);
   const { tools } = await t.client.listTools();
   const burst = tools.find((x) => x.name === "capture_burst")?.description ?? "";

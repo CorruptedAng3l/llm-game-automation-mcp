@@ -72,15 +72,15 @@ Look again (`capture_after`, `wait_text`, `wait_change`, `observe_settle`) befor
 - **Act and look in one call.** `capture_after:true` on `click`, `key`, `click_text`, `move`, `move_relative`, `drag`,
   `scroll`, `pad` and the helper tools returns the frame after the action (it waits 3 presented frames). A failed action
   takes no picture. `capture_after:false` disables the image.
-- **`capture_after` numbers are FRAME COUNTS.** `capture_after:0` captures immediately; `capture_after:300` asks for 300
-  future presented frames. For a timer delay use `capture_settle_ms:300` with `capture_after:0`.
-- **Wait for pixels to settle before the image.** `capture_after:0` plus
+- **`capture_after` numbers are FRAME COUNTS.** `capture_after:"immediate"` captures immediately (`0` or `false` now means no image); `capture_after:300` asks for 300
+  future presented frames. For a timer delay use `capture_settle_ms:300` with `capture_after:"immediate"`.
+- **Wait for pixels to settle before the image.** `capture_after:"immediate"` plus
   `capture_stable:{region:<area>, timeout_ms:4000, max_change_pct:1, pixel_tolerance:8}` watches that area until it is
   stable, then captures. On `scroll` the same object is `settle`. The timeout is advisory, and the final image must
   come from the same window scope as the observation. Exclude animated HUD and background pixels. Async or indefinite
   holds need their own job observation; `key_sequence` needs `wait:true`.
 - **After a click that opens something**, `observe_settle {region:<popup>, poll_ms:300, stable_samples:5,
-  timeout_ms:8000, capture_after:0, max_width:640}` observes a longer quiet window and returns one image. Use
+  timeout_ms:8000, capture_after:"immediate", max_width:640}` observes a longer quiet window and returns one image. Use
   `wait_text` for the expected next state when you can. A stale or cached image can also be quiet: do not re-click an
   item that may already be claimed just because the first capture looks old.
 - **Repeated identical PrintWindow images** may mean static UI, cached output or a stalled renderer.
@@ -169,7 +169,7 @@ Look again (`capture_after`, `wait_text`, `wait_change`, `observe_settle`) befor
   {action:"wait",ms:100},{action:"key",key:"d",ms:300}]` returns a `job_id`; `job_status` shows the current step and
   `job_cancel` releases the active chord. Pressing a key a later step uses cancels the rest.
 - **Menu steps in one call:** `key_sequence {steps:[{action:"key",key:"down",ms:80},{action:"wait",ms:100},
-  {action:"key",key:"enter",ms:80}], wait:true, capture_settle_ms:150, capture_after:0,
+  {action:"key",key:"enter",ms:80}], wait:true, capture_settle_ms:150, capture_after:"immediate",
   region:{x:100,y:40,w:320,h:180}, max_width:320}`. Adjust keys and region to the menu you see. `wait:true` waits for
   this job's completion before the settle delay and the one image; it does not prove the menu consumed the keys.
   Without `wait:true` the image can come before the keys.
@@ -207,8 +207,8 @@ Look again (`capture_after`, `wait_text`, `wait_change`, `observe_settle`) befor
   when those pixels stay quiet. `stopped:"no_motion"` does not tell a wall from a pause or ignored input. Avoid animated
   HUD or hand regions and look at the final image.
 - **On a pad:** `pad_move_until_stuck {direction:"up", region:<world area>, timeout_ms:3000, still_ms:500,
-  capture_after:0}` does the same for one finite stick hold. It measures neither yaw nor progress toward a waypoint.
-- **Stuck on geometry:** after checking that S / Space / W are your bindings, `unstick {degrees:60, capture_after:0}`
+  capture_after:"immediate"}` does the same for one finite stick hold. It measures neither yaw nor progress toward a waypoint.
+- **Stuck on geometry:** after checking that S / Space / W are your bindings, `unstick {degrees:60, capture_after:"immediate"}`
   tries one bounded back / turn / jump / forward recipe using the saved counts. Look at the image before another try.
 - **Pad movement:** `pad_move {direction:"up-left", ms:600, speed:"walk", capture_settle_ms:150}` sends one finite
   move. Directions are screen intent; a fixed camera can invert them (`screen_rotation_deg:180`). Recheck after every
@@ -319,3 +319,9 @@ is playing right now": look before you act, and do not fight them for the mouse.
 - `key_drive` phases separate held throttle from signed digital steering duty and brake. Low duty pulses may be missed by a slowly polling consumer; inspect reader receipts and images. Scheduler lateness skipping cannot flush an application's earlier accepted window messages.
 - Use sequence `capture_mode:"last"` for the last N recorded frames. Set `after_step` on an image/colour `abort_on` when the initial menu contains the condition that a first dismissing step must remove. A post-completion capture request does not establish that a delayed game has rendered the input.
 - Receipt `input_observed` includes named positive polling returns and window-message dispatch; `polling_outcome` remains separate. Neither proves game consumption. `visual_change_observed:false` names an unchanged measured comparison; absent image evidence stays unknown.
+
+## 15. Camera readback and raw-route advice
+
+- `turn` / `look` / `look_turn` default to advisory onset-then-quiet pixel readback (`camera_observation`). Select a useful client `region`; `observe_motion:false` skips it. A no-change or unavailable result keeps the original input receipt and never replays or inverts the move. Actual angles stay unknown.
+- If status/doctor names an explicit-post / recent-mouse-buffer-reader conflict, test `raw:auto` or `raw:buffer` deliberately on x64. The hint never changes config itself and does not prove the game consumed input.
+- `capture_after:0` or `false` = no image; `capture_after:"immediate"` = an image now without waiting for a frame; a positive number = that many presented frames.

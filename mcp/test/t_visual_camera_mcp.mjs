@@ -25,7 +25,7 @@ try {
   const calibration=j.calibration;
   check(!r.isError&&j.calibration.matrix.xx===-.5&&j.calibration.matrix.yy===-.5&&moves().length===2,'actual MCP calibration submits exactly two probes and computes signed local response');
   check(calls().filter(a=>a.includes('find-image')).every(a=>a.includes('--preserve-map'))&&j.observations.every(o=>o.sample.capture_scope),'map preservation and scoped observations reach the CLI protocol');
-  reset();({r,j}=await call('look_at',{template:'landmark.png',calibration,max_counts_per_step:150,capture_after:0,max_width:160}));
+  reset();({r,j}=await call('look_at',{template:'landmark.png',calibration,max_counts_per_step:150,capture_after:'immediate',max_width:160}));
   check(!r.isError&&j.centered&&moves().length===2&&r.content.some(c=>c.type==='image'),'actual MCP correction reidentifies its target and returns standard post-action image');
   check(moves().every(a=>{const i=a.indexOf('json'),q=JSON.parse(a[i+1]);return q.raw===true&&q.steps===1&&typeof q.expected_capture_scope==='string'&&Math.abs(q.dx)<=150&&Math.abs(q.dy)<=150}),'all actual MCP corrections retain native scope and count bounds');
   reset({ambiguous:true});({r,j}=await call('look_calibrate',{template:'landmark.png'}));

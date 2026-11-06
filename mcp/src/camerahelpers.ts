@@ -1,4 +1,6 @@
 import { z } from "zod";
+import {captureEnabled,type CaptureAfter} from './actioncapturepolicy.js';
+import {CameraObservation} from './cameraobservation.js';
 import { resolve } from "node:path";
 import { type CliResult } from "./vinput.js";
 import {motionSample,motionDifference} from './motion.js';
@@ -8,7 +10,9 @@ type Obj = Record<string, unknown>;
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type Reply = { content: Content[]; isError?: boolean };
 type Rect = { x: number; y: number; w: number; h: number };
-type CaptureOptions = { pid: number; capture_after?: boolean | number; capture_settle_ms?: number; region?: Rect; max_width?: number; scale?: number; format?: "png" | "jpeg"; quality?: number };
+type ReadbackOptions = {observe_motion?:boolean|{timeout_ms?:number;quiet_ms?:number;poll_ms?:number;stable_samples?:number;max_change_pct?:number;pixel_tolerance?:number}};
+const readbackRGB=(a:ReadbackOptions)=>typeof a.observe_motion==='object'&&(a.observe_motion.max_change_pct??0)>0;
+type CaptureOptions = { pid: number; capture_after?: CaptureAfter; capture_settle_ms?: number; region?: Rect; max_width?: number; scale?: number; format?: "png" | "jpeg"; quality?: number };
 type Register = <S extends z.ZodRawShape>(name: string, title: string, description: string, shape: S,
   run: (a: z.objectOutputType<S, z.ZodTypeAny>) => Promise<Reply>, readOnly?: boolean) => void;
 export type CameraContext = {
@@ -74,7 +78,7 @@ async function preflight(ctx: CameraContext, pid: number, epoch: number, mode: "
 }
 export type HoldUntilChangeOptions = CaptureOptions & { key: string; timeout_ms?: number; poll_ms?: number;baseline_ms?:number;min_change_pct?:number;pixel_tolerance?:number };
 export async function holdUntilChange(ctx: CameraContext, a: HoldUntilChangeOptions): Promise<Reply> {
-  const validation = ctx.captureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region });
+  const validation = ctx.captureError({ ...a, region: captureEnabled(a.capture_after) ? a.region : undefined });
   if (validation) return response({ ok: false, error: validation, input_injected: false });
   const duration = a.timeout_ms ?? 5000, poll = a.poll_ms ?? 100, epoch = ctx.epoch(a.pid);
   let baseline: HashSample | undefined, admitted: HoldJob | undefined, last: HoldJob | undefined, initial: CliResult | undefined;
@@ -169,7 +173,7 @@ async function settle(ctx: CameraContext, a: SettleOptions, epoch: number, basel
 }
 const settleView = (r: SettleResult) => ({ ...r, sample: r.sample.receipt, queue_drain_measured: false, camera_angle_measured: false, raw_queue_remaining_counts: null, scope: "selected-region pixel stability at the stated metric/tolerance; no causal camera/gameplay claim" });
 function captureValidation(ctx: CameraContext, a: CaptureOptions) {
-  if(a.capture_after!==undefined&&a.capture_after!==false)return ctx.captureError(a);
+  if(captureEnabled(a.capture_after))return ctx.captureError(a);
   const preview={...a} as CaptureOptions&Record<string,unknown>;
   // region still selects observation pixels; these options only affect the
   // optional image, which the caller/default declined.
@@ -184,7 +188,7 @@ export async function observeSettle(ctx: CameraContext, a: SettleOptions): Promi
     const observed = await settle(ctx, a, epoch, baseline, performance.now() + (a.timeout_ms ?? 5000));
     return ctx.finish(a.pid, response({ ok: observed.stable, pid: a.pid, settled: observed.stable, observation: settleView(observed),
       ...(!observed.stable ? { timed_out:true,stop_reason:'region_stability_timeout',error:`selected region exceeded ${observed.stability_metric} tolerance before the observation deadline; exclude animated background/HUD pixels or choose max_change_pct/pixel_tolerance` } : {}),
-      ...((a.capture_after===undefined||a.capture_after===false)&&a.max_width!==undefined?{preview_note:'max_width and other preview image options are ignored without capture_after; region still selects observed client pixels'}:{}),
+      ...(!captureEnabled(a.capture_after)&&a.max_width!==undefined?{preview_note:'max_width and other preview image options are ignored without capture_after; region still selects observed client pixels'}:{}),
       elapsed_ms: Math.round(performance.now() - started), hint: smoothingHint }), a, epoch);
   } catch (e) { return ctx.finish(a.pid, response({ ok: false, pid: a.pid, settled: false, error: e instanceof Error ? e.message : String(e), hint: smoothingHint }), a, epoch); }
 }
@@ -257,24 +261,49 @@ export async function lookCalibrate(ctx: CameraContext, a: LookCalibrateOptions)
     error: e instanceof Error ? e.message : String(e), elapsed_ms: Math.round(performance.now() - started), hint: smoothingHint }), a, epoch); }
 }
 export type LookAtOptions = TargetOptions & { calibration: Calibration; center_x?: number; center_y?: number; tolerance_px?: number; max_steps?: number; max_counts_per_step?: number };
-export type LookTurnOptions=CaptureOptions&{yaw_deg:number;counts_per_degree:number;timeout_ms?:number};
+export type LookTurnOptions=CaptureOptions&ReadbackOptions&{yaw_deg:number;counts_per_degree:number;timeout_ms?:number};
+/** Read-only advisory after a known ACK. It never retries or compensates input. */
+async function angularReadback(ctx:CameraContext,a:CaptureOptions&ReadbackOptions,epoch:number,baseline:HashSample,deadline:number):Promise<Obj|undefined>{
+ if(a.observe_motion===false)return;
+ const options=typeof a.observe_motion==='object'?a.observe_motion:{},start=performance.now();
+ const timeout=Math.max(100,Math.floor(Math.min(options.timeout_ms??4000,deadline-start))),poll=options.poll_ms??100;
+ const state=new CameraObservation(baseline.receipt,{mode:'post_input',metric:(options.max_change_pct??0)>0?'rgb_grid':'exact_hash',quiet_ms:options.quiet_ms??500,min_fresh_samples:options.stable_samples??2,timeout_ms:timeout,max_samples:60,max_change_pct:options.max_change_pct??0,pixel_tolerance:options.pixel_tolerance??8},start);
+ try{
+  if(start>=deadline)state.unavailable('overall camera-helper deadline expired before readback',performance.now());
+  while(!state.snapshot().terminal){
+   sameScope(ctx,a.pid,epoch,baseline);
+   const remaining=Math.min(deadline,start+timeout)-performance.now();
+   // hashFrame reserves at least500ms of host transport budget. Do not start a
+   // request which cannot fit; wall time alone never adds native quiet samples.
+   if(remaining<500){await sleep(Math.max(0,remaining));state.tick(performance.now());if(!state.snapshot().terminal)state.unavailable('overall deadline leaves no bounded frame-observation budget',performance.now());break;}
+   await sleep(Math.min(poll,Math.max(0,remaining-500)));
+   sameScope(ctx,a.pid,epoch,baseline);
+   const budget=Math.min(deadline,start+timeout)-performance.now();
+   if(budget<500)continue;
+   const current=await hashFrame(ctx,a.pid,a.region,budget,(options.max_change_pct??0)>0);sameScope(ctx,a.pid,epoch,baseline,current);
+   state.observe(current.receipt,performance.now());
+  }
+ }catch(e){state.unavailable(e instanceof Error?e.message:String(e),performance.now());}
+ return {...state.snapshot(),requested_region:a.region??null,region_coordinate_system:'client_pixels'};
+}
 export async function lookTurn(ctx:CameraContext,a:LookTurnOptions):Promise<Reply>{
   const invalid=captureValidation(ctx,a);if(invalid)return response({ok:false,error:invalid,input_injected:false});
   const dx=Math.round(a.yaw_deg*a.counts_per_degree),epoch=ctx.epoch(a.pid),deadline=performance.now()+(a.timeout_ms??5000);
   if(!Number.isFinite(a.yaw_deg)||!Number.isFinite(a.counts_per_degree)||a.counts_per_degree===0||!Number.isSafeInteger(dx)||Math.abs(dx)>1000000)return response({ok:false,error:'finite yaw and nonzero signed counts_per_degree must fit a bounded one-million-count move',input_injected:false});
   let receipt:Obj|undefined;
   try{
-    await preflight(ctx,a.pid,epoch,'motion');const baseline=await hashFrame(ctx,a.pid,a.region,1500);
+    await preflight(ctx,a.pid,epoch,'motion');const baseline=await hashFrame(ctx,a.pid,a.region,1500,readbackRGB(a));
     if(dx)receipt=await scopedMove(ctx,{...a,template:''},epoch,baseline,dx,0,deadline);
-    return ctx.finish(a.pid,response({ok:true,pid:a.pid,requested_yaw_deg:a.yaw_deg,submitted_dx:dx,counts_per_degree:a.counts_per_degree,calibration_source:'caller_supplied',actual_yaw_deg:null,camera_angle_measured:false,input_injected:dx?null:false,input_receipt:receipt??null,scope:'one scoped raw relative move using caller-supplied counts per degree; submitted counts do not establish the resulting camera angle'}),a,epoch);
+    const observation=dx?await angularReadback(ctx,a,epoch,baseline,deadline):undefined;
+    return ctx.finish(a.pid,response({ok:true,pid:a.pid,requested_yaw_deg:a.yaw_deg,submitted_dx:dx,counts_per_degree:a.counts_per_degree,calibration_source:'caller_supplied',actual_yaw_deg:null,camera_angle_measured:false,input_injected:dx?null:false,input_receipt:receipt??null,...(observation?{camera_observation:observation}:{}),scope:'one scoped raw relative move using caller-supplied counts per degree; submitted counts do not establish the resulting camera angle'}),a,epoch);
   }catch(e){return ctx.finish(a.pid,response({ok:false,pid:a.pid,input_receipt:receipt??null,...motionFailure(e),error:e instanceof Error?e.message:String(e),camera_angle_measured:false}),a,epoch);}
 }
-type AngleOptions=CaptureOptions&{game?:string;timeout_ms?:number};
+type AngleOptions=CaptureOptions&ReadbackOptions&{game?:string;timeout_ms?:number};
 const angleGain=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v)&&v!==0&&Math.abs(v)<=10000;
 async function angleContext(ctx:CameraContext,a:AngleOptions,epoch:number){
   const status=await preflight(ctx,a.pid,epoch,'motion'),created=cameraCreation(status);
   if(!created)throw new Error('exact native process creation identity is unavailable; no camera input was sent');
-  const baseline=await hashFrame(ctx,a.pid,a.region,1500);sameScope(ctx,a.pid,epoch,baseline);
+  const baseline=await hashFrame(ctx,a.pid,a.region,1500,readbackRGB(a));sameScope(ctx,a.pid,epoch,baseline);
   const confirm=await preflight(ctx,a.pid,epoch,'motion');
   if(cameraCreation(confirm)!==created)throw new Error('process identity changed before camera input');
   return {baseline,created};
@@ -313,9 +342,10 @@ export async function lookAngles(ctx:CameraContext,a:LookAnglesOptions):Promise<
     const dx=Math.round(a.yaw*profile.yaw),dy=Math.round((a.pitch??0)*(profile.pitch??0));
     if(![dx,dy].every(v=>Number.isSafeInteger(v)&&Math.abs(v)<=1000000))throw new Error('angular request exceeds one-million-count bound');
     if(dx||dy)receipt=await scopedMove(ctx,{...a,template:''},epoch,baseline,dx,dy,deadline);
+    const observation=dx||dy?await angularReadback(ctx,a,epoch,baseline,deadline):undefined;
     return ctx.finish(a.pid,response({ok:true,pid:a.pid,requested_yaw_deg:a.yaw,requested_pitch_deg:a.pitch??0,submitted_dx:dx,submitted_dy:dy,
       counts_per_degree:profile.yaw,calibration_source:profile.source,calibration:{mode:'counts',process_created:profile.created,game:profile.game??null},
-      actual_yaw_deg:null,actual_pitch_deg:null,camera_angle_measured:false,input_receipt:receipt??null,input_injected:dx||dy?null:false,
+      actual_yaw_deg:null,actual_pitch_deg:null,camera_angle_measured:false,input_receipt:receipt??null,input_injected:dx||dy?null:false,...(observation?{camera_observation:observation}:{}),
       scope:'one scope-fenced relative move from a saved caller angular reference; actual camera angles and gameplay response are unmeasured'}),a,epoch);
   }catch(e){return ctx.finish(a.pid,response({ok:false,pid:a.pid,input_receipt:receipt??null,...motionFailure(e),error:String(e),camera_angle_measured:false}),a,epoch);}
 }
@@ -400,15 +430,17 @@ export function registerCameraHelpers(register: Register, ctx: CameraContext, ac
   register("look_calibrate", "Calibrate mouse response", "Default visual mode submits two small raw probes and returns a landmark pixel-per-count matrix for look_at. mode:counts saves a caller-provided signed counts_per_degree (optional pitch gain), or derives it from yaw_counts/observed_yaw_deg from a compass/known turn. Counts mode sends no camera input, needs no stable image, and persists across MCP restarts for this exact native process/window/game label. It does not infer degrees from visual pixels. Recalibrate after sensitivity/FOV/input changes.",
     { ...targetArgs,template:targetArgs.template.optional(),mode:z.enum(['visual','counts']).optional(), counts: z.number().int().min(10).max(200).optional(),
       counts_per_degree:gain.optional(),pitch_counts_per_degree:gain.optional(),yaw_counts:z.number().int().min(-1000000).max(1000000).optional(),observed_yaw_deg:z.number().finite().min(-720).max(720).optional(),game }, async a => lookCalibrate(ctx, a as LookCalibrateOptions));
-  const angular={...actionCaptureArgs,pid:z.number().int().positive(),game,timeout_ms:z.number().int().min(1000).max(15000).optional()};
+  const readback=z.union([z.boolean(),z.object({timeout_ms:z.number().int().min(100).max(10000).optional(),quiet_ms:z.number().int().min(100).max(2000).optional(),poll_ms:z.number().int().min(50).max(1000).optional(),stable_samples:z.number().int().min(2).max(10).optional(),max_change_pct:z.number().min(0).max(100).optional(),pixel_tolerance:z.number().int().min(0).max(255).optional()}).strict()]).optional().describe('Default observes selected pixels for onset then500ms quiet, within4000ms and the overall deadline. Advisory only: input success is retained, actual angles/consumption stay unknown. false keeps a fast submission-only call; this option never retries input.');
+  const angularBase={...actionCaptureArgs,pid:z.number().int().positive(),game,timeout_ms:z.number().int().min(1000).max(15000).optional()};
+  const angular={...angularBase,observe_motion:readback};
   register('turn','Turn using saved mouse counts','Submit one bounded relative yaw move using look_calibrate mode:counts saved for this exact process/window. Positive degrees use the supplied signed yaw gain; actual angle remains unmeasured.',
     {...angular,degrees:z.number().finite().min(-720).max(720)},async a=>lookAngles(ctx,{...a,yaw:a.degrees} as LookAnglesOptions));
   register('look','Look using saved mouse counts','Submit yaw and optional pitch together using saved signed angular gains. Missing pitch calibration refuses before either axis moves. No stable landmark is needed; actual angle remains unmeasured.',
     {...angular,yaw:z.number().finite().min(-720).max(720).default(0),pitch:z.number().finite().min(-180).max(180).optional()},async a=>lookAngles(ctx,a as LookAnglesOptions));
   register('unstick','Try one navigation recovery','One deliberate default-key recipe: bounded S backup, saved 45..90 degree yaw, optional Space jump and bounded W retry. Stops on the first uncertain input/scope result; never automatically repeats. Inspect capture_after before another attempt. Game recovery/displacement is unverified; use only when these are your movement bindings.',
-    {...angular,degrees:z.number().finite().min(-90).max(90).optional(),backup_ms:z.number().int().min(50).max(1000).optional(),retry_ms:z.number().int().min(50).max(1000).optional(),jump:z.boolean().optional()},async a=>unstickCamera(ctx,a as UnstickOptions));
+    {...angularBase,degrees:z.number().finite().min(-90).max(90).optional(),backup_ms:z.number().int().min(50).max(1000).optional(),retry_ms:z.number().int().min(50).max(1000).optional(),jump:z.boolean().optional()},async a=>unstickCamera(ctx,a as UnstickOptions));
   register('look_turn','Turn by supplied mouse counts','Submit one scoped raw yaw move using your supplied signed counts per degree. Works without a stable landmark or calibration image, including animated scenes. Returns submitted counts; actual camera angle and game response remain unmeasured.',
-    {...actionCaptureArgs,pid:z.number().int().positive(),yaw_deg:z.number().finite().min(-720).max(720),counts_per_degree:z.number().finite().min(-10000).max(10000),timeout_ms:z.number().int().min(1000).max(15000).optional()},async a=>lookTurn(ctx,a as LookTurnOptions));
+    {...actionCaptureArgs,pid:z.number().int().positive(),yaw_deg:z.number().finite().min(-720).max(720),counts_per_degree:z.number().finite().min(-10000).max(10000),timeout_ms:z.number().int().min(1000).max(15000).optional(),observe_motion:readback},async a=>lookTurn(ctx,a as LookTurnOptions));
   register("look_at", "Center a visual landmark", "Reidentify a unique template and iteratively center it using a same-window look_calibrate matrix. Every raw move is scope-fenced, bounded to max_counts_per_step, followed by settle/target checks, and stops on missing target, no visual progress, timeout or step limit. This centers an image landmark; it does not establish aim or gameplay progress.",
     { ...targetArgs, calibration: z.object({ matrix: z.object({ xx: z.number().finite(), xy: z.number().finite(), yx: z.number().finite(), yy: z.number().finite() }).strict(), capture_scope: z.unknown() }).strict(),
       center_x: z.number().min(0).max(8192).optional(), center_y: z.number().min(0).max(8192).optional(), tolerance_px: z.number().min(1).max(100).optional(),

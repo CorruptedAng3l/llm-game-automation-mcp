@@ -19,7 +19,7 @@ try{
  check(!r.isError&&r.json.calibration.counts_per_degree===300/45&&r.json.calibration.source==='caller_observed_angle'&&r.json.camera_angle_measured===false&&!moved(t).length&&!keys(t).length,'counts calibration derives signed caller reference and persists without any input');
  const stored=r.json.calibration.path;check(readdirSync(dir).length===1&&JSON.parse(readFileSync(stored,'utf8')).pid===pid,'profile stores exact process/window identity in one file');
  await t.close();t=await startFake({},env);
- r=await t.call('turn',{pid,degrees:90,game:'compass-settings-A',capture_after:0,max_width:160});
+ r=await t.call('turn',{pid,degrees:90,game:'compass-settings-A',capture_after:'immediate',max_width:160});
  check(!r.isError&&r.json.submitted_dx===600&&r.json.actual_yaw_deg===null&&r.image&&moved(t).length===1,'new MCP server reuses exact-target profile and sends one turn plus image');
  t.clearCalls();r=await t.call('look',{pid,yaw:-45,pitch:10,game:'compass-settings-A'});
  check(!r.isError&&r.json.submitted_dx===-300&&r.json.submitted_dy===-50&&moved(t).length===1,'yaw and pitch use independent signed gains in one scoped move');
@@ -36,7 +36,7 @@ try{
  }
  t.setScenario({angles:{badAck:true}});t.clearCalls();r=await t.call('turn',{pid,degrees:60});check(r.isError&&moved(t).length===1&&r.json.motion_may_have_been_applied===true,'uncertain move acknowledgement preserves receipt and never repeats');
  t.clearCalls();r=await t.call('unstick',{pid});check(r.isError&&keys(t).length===1&&moved(t).length===1&&r.json.motion_may_have_been_applied===true&&r.json.input_injection_unknown===true,'uncertain recovery turn keeps generic input uncertainty true and sends no jump/retry');
- t.setScenario({});t.clearCalls();r=await t.call('unstick',{pid,degrees:-60,capture_after:0});
+ t.setScenario({});t.clearCalls();r=await t.call('unstick',{pid,degrees:-60,capture_after:'immediate'});
  check(!r.isError&&keys(t).map(v=>v.key).join()==='s,space,w'&&moved(t).length===1&&moved(t)[0].dx===-750&&r.json.steps.length===4&&r.image&&r.json.displacement==='UNKNOWN','one recovery call sends bounded backup/turn/jump/retry and one image without claiming recovery');
  t.clearCalls();r=await t.call('unstick',{pid,jump:false});check(!r.isError&&keys(t).map(v=>v.key).join()==='s,w','explicit no-jump recovery omits only that step');
  t.setScenario({angles:{failKey:true}});t.clearCalls();r=await t.call('unstick',{pid});check(r.isError&&keys(t).length===1&&!moved(t).length&&r.json.steps[0].input_injection_unknown,'uncertain backup stops all later steps and retains the pending-input receipt');

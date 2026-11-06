@@ -1,4 +1,4 @@
-// Fix 6: capture_after (bool | frames) on click, key, click_text, move, drag, pad: the reply carries the post-action frame.
+// capture_after (bool | positive frames | immediate) carries a post-action frame.
 import { cmdOf, makeChecker, startFake } from "./lib.mjs";
 const { state, check } = makeChecker();
 const pid = process.pid;
@@ -25,9 +25,9 @@ try {
   const cap7 = t.callsOf("capture").at(-1) ?? [];
   check(cap7[cap7.indexOf("--after-frames") + 1] === "7", "capture_after:7 = --after-frames 7", JSON.stringify(cap7));
   t.clearCalls();
-  await t.call("key", { pid, key: "a", capture_after: 0 });
+  await t.call("key", { pid, key: "a", capture_after: 'immediate' });
   const cap0 = t.callsOf("capture").at(-1);
-  check(!!cap0 && (!cap0.includes("--after-frames") || cap0[cap0.indexOf("--after-frames") + 1] === "0"), "capture_after:0 = capture right away (no frame wait)", JSON.stringify(cap0));
+  check(!!cap0 && (!cap0.includes("--after-frames") || cap0[cap0.indexOf("--after-frames") + 1] === "0"), "capture_after:'immediate' = capture right away (no frame wait)", JSON.stringify(cap0));
   t.clearCalls();
   const off = await t.call("key", { pid, key: "a", capture_after: false });
   const none = await t.call("key", { pid, key: "a" });

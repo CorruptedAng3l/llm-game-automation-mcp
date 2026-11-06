@@ -65,6 +65,12 @@ function Get-RunnerBudget([int]$count){[int][Math]::Min(300000,[Math]::Max(60000
 function Get-RunnerStop([long]$elapsed,[long]$idle,[long]$total,[long]$noProgress){
  if($elapsed-ge$total){return 'total_timeout'};if($idle-ge$noProgress){return 'no_progress_timeout'};return $null
 }
+function Read-SharedTrace([string]$path){
+ # The stubs append serially while this observer samples. A reader must permit
+ # that writer; ReadAllText's default sharing can make Add-Content fail.
+ $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+ try{$reader=[IO.StreamReader]::new($stream);try{return $reader.ReadToEnd()}finally{$reader.Dispose()}}finally{$stream.Dispose()}
+}
 function Get-TraceProgress([string[]]$expected){
  $rows=@();$argsRows=@()
  foreach($file in @($trace,$trace+'.args')){
@@ -72,8 +78,8 @@ function Get-TraceProgress([string[]]$expected){
   if((Get-Item -LiteralPath $file).Length-gt4194304){throw 'inert trace exceeds fixture byte cap'}
  }
  try{
-  if([IO.File]::Exists($trace)){$raw=[IO.File]::ReadAllText($trace);$rows=@([regex]::Matches($raw,'[^\r\n]*\r?\n')|ForEach-Object{$_.Value.TrimEnd("`r","`n")})}
-  if([IO.File]::Exists($trace+'.args')){$raw=[IO.File]::ReadAllText($trace+'.args');$argsRows=@([regex]::Matches($raw,'[^\r\n]*\r?\n')|ForEach-Object{$_.Value.TrimEnd("`r","`n")})}
+  if([IO.File]::Exists($trace)){$raw=Read-SharedTrace $trace;$rows=@([regex]::Matches($raw,'[^\r\n]*\r?\n')|ForEach-Object{$_.Value.TrimEnd("`r","`n")})}
+  if([IO.File]::Exists($trace+'.args')){$raw=Read-SharedTrace ($trace+'.args');$argsRows=@([regex]::Matches($raw,'[^\r\n]*\r?\n')|ForEach-Object{$_.Value.TrimEnd("`r","`n")})}
  }catch [IO.IOException]{return -1} # append sharing/partial writes never count as progress
  $count=[Math]::Min($rows.Count,$argsRows.Count)
  if($count-gt$expected.Count){throw 'inert trace exceeds declared plan prefix'}

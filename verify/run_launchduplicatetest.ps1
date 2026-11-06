@@ -1,15 +1,17 @@
 # Actual Launch duplicate protection, exact-image controlled actors and concurrent owned CLI peers. No loader thread or native desktop writer.
 param([string]$RepoRoot=(Split-Path $PSScriptRoot -Parent),[string]$SourceRoot='',[string]$Out="$PSScriptRoot\_out\launch_duplicate_guard")
-. "$PSScriptRoot\_vcvars.ps1";$vcDir=Get-VcVarsDir
 $ErrorActionPreference='Stop';$RepoRoot=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath $RepoRoot).Path)
 if(-not$SourceRoot){$SourceRoot=$RepoRoot};$SourceRoot=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath $SourceRoot).Path)
 if($SourceRoot-ne$RepoRoot-and-not$SourceRoot.StartsWith($RepoRoot.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'SourceRoot must stay within private RepoRoot'}
 $outRoot=[IO.Path]::GetFullPath($Out);if(-not$outRoot.StartsWith($RepoRoot.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Out must stay within private RepoRoot'}
 $run=Join-Path $outRoot ('run_'+[guid]::NewGuid().ToString('N'));[void](New-Item -ItemType Directory -Force $run,"$run\temp")
+. "$RepoRoot\verify\_vcvars.ps1"; $vcDir=Get-VcVarsDir
 . "$RepoRoot\verify\vi_r1_identity.ps1"
 . "$RepoRoot\verify\vi_exited_cli_accounting.ps1"
 . "$RepoRoot\verify\vi_r1_lifecycle.ps1"
 if(-not('ViWndProcAwTail'-as[type])){Add-Type -Path "$RepoRoot\test\vi_r1_tail.cs"}
+$jobSourcePath=Join-Path $PSScriptRoot 'run_suitecontracttest.ps1'
+if(-not('ViSuiteContractJobV1'-as[type])){$jobText=Get-Content -LiteralPath $jobSourcePath -Raw;$begin=$jobText.IndexOf('using System;');$end=$jobText.IndexOf("'@}",$begin);if($begin-lt0-or$end-le$begin){throw 'reviewed owned-job helper unavailable'};Add-Type $jobText.Substring($begin,$end-$begin)}
 $checks=[Collections.Generic.List[object]]::new();$calls=[Collections.Generic.List[object]]::new();$processes=[Collections.Generic.List[object]]::new();$pins=[Collections.Generic.List[object]]::new();$arches=[Collections.Generic.List[object]]::new()
 $instrument=$true;$serial=0;$complete=$false;$problem=$null
 function Check([bool]$Good,[string]$Name){$checks.Add(@{pass=$Good;name=$Name});Write-Host "$(if($Good){'PASS'}else{'FAIL'}) $Name"}
@@ -27,13 +29,13 @@ function Finish($T){if(-not$T-or$T.cleanup){return};try{$T.cleanup=AccountOrReap
 function RunOwned([string]$Image,[string[]]$Arguments,[int]$Budget=10000,[bool]$AwaitAck=$false){
  $Image=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath $Image).Path)
  $script:serial++;$prefix=Join-Path $run ('call_'+$serial);$si=[Diagnostics.ProcessStartInfo]::new();$si.FileName=$Image;$si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardInput=$AwaitAck;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true;$si.WorkingDirectory=$run;$si.Environment['TEMP']="$run\temp";$si.Environment['TMP']="$run\temp";foreach($arg in $Arguments){[void]$si.ArgumentList.Add($arg)}
- $p=[Diagnostics.Process]::new();$p.StartInfo=$si;$t=$null;$outTail=$null;$errTail=$null;$record=@{image=$Image;arguments=$Arguments;exit=$null;stdout='';stderr='';cleanup=$null};$calls.Add($record)
- try{Require ($p.Start()) 'owned compiler/CLI started';$t=NewTracked $p $Image;$outTail=[ViWndProcAwTail]::new($p.StandardOutput);$errTail=[ViWndProcAwTail]::new($p.StandardError);ValidateTracked $t;if($AwaitAck){$p.StandardInput.WriteLine('RUN');$p.StandardInput.Flush();$p.StandardInput.Close()};Require ($p.WaitForExit($Budget)) 'owned compiler/CLI bounded exit';$proof=Get-ViExitedCliAccounting $t.retained_handle ([uint32]$t.pid) $t.created $Image $t.cache;Require (Test-ViExitedCliAccounting $proof) 'readonly original-handle CLI exit accounting';$record.exit=[BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$proof.native_exit_code),0);$record.exit_accounting=$proof
+ $p=[Diagnostics.Process]::new();$p.StartInfo=$si;$job=[ViSuiteContractJobV1]::new();$t=$null;$outTail=$null;$errTail=$null;$record=@{image=$Image;arguments=$Arguments;exit=$null;stdout='';stderr='';cleanup=$null};$calls.Add($record)
+ try{Require ($p.Start()) 'owned compiler/CLI started';$t=NewTracked $p $Image;$job.Assign($p,$Image);$outTail=[ViWndProcAwTail]::new($p.StandardOutput);$errTail=[ViWndProcAwTail]::new($p.StandardError);ValidateTracked $t;if($AwaitAck){$p.StandardInput.WriteLine('RUN');$p.StandardInput.Flush();$p.StandardInput.Close()};Require ($p.WaitForExit($Budget)) 'owned compiler/CLI bounded exit';$proof=Get-ViExitedCliAccounting $t.retained_handle ([uint32]$t.pid) $t.created $Image $t.cache;Require (Test-ViExitedCliAccounting $proof) 'readonly original-handle CLI exit accounting';$record.exit=[BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$proof.native_exit_code),0);$record.exit_accounting=$proof
   $null=$outTail.Wait(500);$null=$errTail.Wait(500);$record.stdout=$outTail.Text();$record.stderr=$errTail.Text();$record.stdout_complete=$outTail.Complete;$record.stderr_complete=$errTail.Complete
   Require ($outTail.Complete-and$errTail.Complete-and-not$outTail.Error-and-not$errTail.Error-and$outTail.Characters-le65536-and$errTail.Characters-le65536) 'bounded complete separate stdout/stderr'
   return $record
- }finally{try{if($t){Finish $t;$record.cleanup=$t.cleanup}}finally{
-   if($outTail){$null=$outTail.Wait(500);$record.stdout=$outTail.Text()};if($errTail){$null=$errTail.Wait(500);$record.stderr=$errTail.Text()};[IO.File]::WriteAllText($prefix+'.stdout.log',$record.stdout);[IO.File]::WriteAllText($prefix+'.stderr.log',$record.stderr);if($t){$t.process.Dispose();$t.Remove('process')};$p.Dispose()
+ }finally{try{if($t){Finish $t;$record.cleanup=$t.cleanup};try{$counts=$job.Counts();if($counts[1]-gt0){$job.Terminate()};$until=[Environment]::TickCount64+5000;do{$counts=$job.Counts();if($counts[1]-eq0){break};Start-Sleep -Milliseconds 25}while([Environment]::TickCount64-lt$until);$record.job_active_final=$counts[1];Require ($counts[1]-eq0) 'owned descendants empty after finite cleanup'}catch{$record.job_cleanup_error=$_.Exception.Message;$script:instrument=$false}}finally{
+   if($outTail){$null=$outTail.Wait(500);$record.stdout=$outTail.Text()};if($errTail){$null=$errTail.Wait(500);$record.stderr=$errTail.Text()};[IO.File]::WriteAllText($prefix+'.stdout.log',$record.stdout);[IO.File]::WriteAllText($prefix+'.stderr.log',$record.stderr);if($t){$t.process.Dispose();$t.Remove('process')};$p.Dispose();$job.Dispose()
   }}
 }
 
@@ -46,11 +48,13 @@ try{
   $entry=@{arch=$arch;completed=$false;error=$null};$arches.Add($entry)
   try{
    $folder=Join-Path $run $arch;[void](New-Item -ItemType Directory -Force $folder);$exe=Join-Path $folder 'vi_launchduplicatetest.exe';$batch=Join-Path $folder 'build.cmd'
+   $private=Join-Path $folder 'vimh';[void](New-Item -ItemType Directory -Force $private)
+   foreach($name in @('vimh_buffer.obj','vimh_hook.obj','vimh_trampoline.obj','vimh_hde.obj')){$origin=Join-Path "$RepoRoot/build/$arch" $name;$copy=Join-Path $private $name;$hash=(Get-FileHash -LiteralPath $origin).Hash;Copy-Item -LiteralPath $origin -Destination $copy;Require ((Get-FileHash -LiteralPath $origin).Hash-eq$hash-and(Get-FileHash -LiteralPath $copy).Hash-eq$hash) 'hash-matched isolated vimh object';Pin $copy}
    $vc=Join-Path $vcDir $(if($arch-eq'x64'){'vcvars64.bat'}else{'vcvars32.bat'})
    @"
 @echo off
 call "$vc" >nul || exit /b 2
-cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /std:c++20 /I"$SourceRoot\src" /I"$PSScriptRoot\..\third_party\minhook\include" "$source" "$RepoRoot\build\$arch\vimh_buffer.obj" "$RepoRoot\build\$arch\vimh_hook.obj" "$RepoRoot\build\$arch\vimh_trampoline.obj" "$RepoRoot\build\$arch\vimh_hde.obj" /Fo:"$folder\fixture.obj" /Fe:"$exe" /link /SUBSYSTEM:CONSOLE
+cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /std:c++20 /FI"$RepoRoot\src\vi_mh_rename.h" /I"$SourceRoot\src" /I"$RepoRoot\src" /I"$RepoRoot\third_party\minhook\include" "$source" "$folder\vimh\vimh_buffer.obj" "$folder\vimh\vimh_hook.obj" "$folder\vimh\vimh_trampoline.obj" "$folder\vimh\vimh_hde.obj" /Fo:"$folder\fixture.obj" /Fe:"$exe" /link /SUBSYSTEM:CONSOLE
 exit /b %errorlevel%
 "@|Set-Content -LiteralPath $batch -Encoding ascii
    $entry.build=RunOwned $env:ComSpec @('/d','/c',$batch) 120000;Require ($entry.build.exit-eq0-and($entry.build.stdout+$entry.build.stderr)-notmatch'(?i)\bwarning\s+[A-Z]+\d+') 'guarded launch fixture zero warnings';Pin $exe

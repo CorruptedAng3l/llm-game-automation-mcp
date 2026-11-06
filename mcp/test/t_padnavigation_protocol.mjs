@@ -13,7 +13,7 @@ try{
  check(!r.isError&&r.json.ok&&r.json.stopped==='no_motion'&&r.json.release_confirmed&&r.json.hold_started,'actual MCP protocol stops stable pixels with one confirmed exact-job release');
  check(holds().length===1&&t.callsOf('job-cancel').length===1&&!t.callsOf('release').length&&!t.callsOf('down').length,'protocol sends one finite native hold, one cancellation and no global release/replay');
  check(JSON.parse(cmdOf(holds()[0])[1]).expected_capture_scope.includes('geometry_witness')&&captures().every(a=>JSON.parse(cmdOf(a)[1]).region==='10,20,100,80'),'tuple region normalizes and exact scope token fences the native job');
- scenario({noise:true});r=await t.call('pad_move_until_stuck',{...args,compact:true,capture_after:0,max_width:160});
+ scenario({noise:true});r=await t.call('pad_move_until_stuck',{...args,compact:true,capture_after:'immediate',max_width:160});
  check(!r.isError&&r.json.compact&&r.json.stopped==='no_motion'&&r.json.motion_score.measured&&r.json.displacement===null,'compact MCP reply retains successful no-motion and unknown displacement');
  check(!!r.image&&r.json.capture_after.path&&t.callsOf('capture').length===1&&holds().length===1,'post-action image keeps shared capture path without repeating input');
  scenario({queued:true});r=await t.call('pad_move_until_stuck',{...args,timeout_ms:500});

@@ -84,7 +84,7 @@ check(r.ok&&f.moves===1&&r.submitted_dx===1125&&r.actual_yaw_deg===null&&r.calib
 f=fixture();r=read(await lookTurn(f.ctx,{pid,yaw_deg:90,counts_per_degree:0}));check(!r.ok&&!f.moves,'plain yaw rejects zero gain before motion');
 f=fixture();r=read(await lookAt(f.ctx,{...args,calibration,max_steps:1,max_counts_per_step:10}));
 check(!r.ok&&f.moves===1&&r.steps.length===1,'correction stops at its explicit step bound');
-f=fixture({badMotionAck:true});r=read(await lookAt(f.ctx,{...args,calibration,capture_after:0,max_width:160,format:'jpeg',quality:75}));
-check(f.finishOptions.capture_after===0&&f.finishOptions.max_width===160&&f.finishOptions.quality===75&&f.finishEpoch===0,'post-action image options and original attachment epoch survive a failed motion observation');
+f=fixture({badMotionAck:true});r=read(await lookAt(f.ctx,{...args,calibration,capture_after:'immediate',max_width:160,format:'jpeg',quality:75}));
+check(f.finishOptions.capture_after==='immediate'&&f.finishOptions.max_width===160&&f.finishOptions.quality===75&&f.finishEpoch===0,'post-action image options and original attachment epoch survive a failed motion observation');
 console.log(`VISUAL_CAMERA_RESULT ${JSON.stringify({completed:true,passed:state.passes,failed:state.failures,scope:'dependency-injected visual protocol model; simulated pixel response, no camera-angle or actual raw-input-consumption measurement'})}`);
 process.exit(state.failures?1:0);

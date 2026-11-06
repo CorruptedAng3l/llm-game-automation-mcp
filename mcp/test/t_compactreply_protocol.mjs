@@ -7,7 +7,7 @@ try{
  const listing=await t.client.listTools();
  check(listing.tools.every(x=>x.inputSchema.properties.compact?.type==='boolean'),'every registered tool and alias advertises one boolean compact option');
  let r=await t.call('key',{pid,key:'w'});check(r.json.input_read_observation&&!r.json.compact,'default actual MCP reply retains native full evidence');
- t.clearCalls();r=await t.call('key',{pid,key:'w',compact:true,capture_after:0,max_width:160});
+ t.clearCalls();r=await t.call('key',{pid,key:'w',compact:true,capture_after:'immediate',max_width:160});
  check(!r.isError&&r.json.compact&&r.json.input_read.keys[0].channels[0]==='GetKeyboardState'&&r.json.application_response===null,'actual MCP input compacts only at the final boundary and names the observed reader');
  check(r.image&&r.json.capture_after.path&&t.callsOf('key').length===1&&t.callsOf('capture').length===1,'compact key keeps one original action, one capture and inline image');
  check(t.calls().every(a=>!a.includes('--compact')&&!a.some(v=>v.includes('"compact":'))),'presentation option never reaches native command arguments');

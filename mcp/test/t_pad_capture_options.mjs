@@ -29,7 +29,7 @@ try {
 
   for (const [name, args] of families) {
     t.clearCalls();
-    const r = await t.call(name, { pid, ...args, capture_after: 0, capture_settle_ms: 0 });
+    const r = await t.call(name, { pid, ...args, capture_after: 'immediate', capture_settle_ms: 0 });
     const cap = t.callsOf("capture")[0], im = decode(r);
     check(!r.isError && actionCount() === 1 && t.callsOf("capture").length === 1 && flag(cap, "--max-width") === "960",
       `${name} uses one action and a 960px default image cap`, JSON.stringify(t.calls()));
@@ -55,7 +55,7 @@ try {
   check(JSON.stringify(clickPoint(t.callsOf("click").at(-1))) === '["120","80"]', "later image-space click maps (10,20) to client (120,80)", JSON.stringify(t.calls()));
 
   t.clearCalls();
-  r = await t.call("pad", { pid, ms: 150, capture_after: 0, scale: 0.5, region: rect });
+  r = await t.call("pad", { pid, ms: 150, capture_after: 'immediate', scale: 0.5, region: rect });
   im = decode(r); cap = t.callsOf("capture").at(-1);
   check(!r.isError && im?.width === 160 && im.height === 90 && flag(cap, "--scale") === "0.5" && flag(cap, "--max-width") === undefined,
     "explicit scale suppresses the default width cap", JSON.stringify(cap));
@@ -75,8 +75,8 @@ try {
 
   // Every family must run the compatibility check BEFORE its own input call.
   for (const [name, args] of families) for (const options of [
-    { capture_after: 0, max_width: 320, scale: 0.5 },
-    { capture_after: 0, quality: 70 },
+    { capture_after: 'immediate', max_width: 320, scale: 0.5 },
+    { capture_after: 'immediate', quality: 70 },
     { capture_after: false, max_width: 320 },
   ]) {
     t.clearCalls();
@@ -88,7 +88,7 @@ try {
     { region: { x: -1, y: 0, w: 10, h: 10 } }, { region: { x: 0, y: 0, w: 0, h: 10 } },
     { format: "jpeg", quality: 0 }, { format: "jpeg", quality: 101 }, { format: "jpeg", scale: 2 },
   ]) {
-    t.clearCalls(); r = await t.call("pad", { pid, ms: 150, capture_after: 0, ...options });
+    t.clearCalls(); r = await t.call("pad", { pid, ms: 150, capture_after: 'immediate', ...options });
     check(r.isError && actionCount() === 0 && t.callsOf("capture").length === 0, `static invalid image options never act: ${JSON.stringify(options)}`, r.text);
   }
   t.clearCalls(); r = await t.call("pad", { pid, ms: 150, region: rect });
@@ -99,18 +99,18 @@ try {
   check(!r.isError && actionCount() === 1 && !t.callsOf("capture").length, "capture_after false still disables a helper's default observation");
   t.clearCalls(); r = await t.call("capture", { pid }); im = decode(r);
   check(!r.isError && im?.width === 1280 && flag(t.callsOf("capture")[0], "--max-width") === undefined, "standalone capture keeps its full-size default");
-  t.clearCalls(); r = await t.call("key", { pid, key: "return", capture_after: 0 }); im = decode(r);
+  t.clearCalls(); r = await t.call("key", { pid, key: "return", capture_after: 'immediate' }); im = decode(r);
   check(!r.isError && im?.width === 960 && flag(t.callsOf("capture")[0], "--max-width") === "960", "key action images share the bounded 960px observation default");
 
   t.setScenario(scenario({ png: { w: 1280, h: 720 }, replies: { pad: completed } }));
   t.clearCalls();
-  r = await t.call("pad", { pid, ms: 150, capture_after: 0, max_width: 160, region: rect }); im = decode(r);
+  r = await t.call("pad", { pid, ms: 150, capture_after: 'immediate', max_width: 160, region: rect }); im = decode(r);
   check(!r.isError && im?.width === 160 && im.height === 90 && actionCount() === 1 && r.json?.capture_after?.image?.scaled_by === "mcp" &&
     r.json.capture_after.image.scale === 0.5 && r.json.capture_after.w === 320,
     "old core without transform proof is resized by MCP with separate saved and returned dimensions", r.text);
 
   t.setScenario(scenario({ replies: { pad: completed, capture: { ok: false, error: "modeled capture backend failure" } } })); t.clearCalls();
-  r = await t.call("pad", { pid, ms: 150, capture_after: 0, max_width: 160 });
+  r = await t.call("pad", { pid, ms: 150, capture_after: 'immediate', max_width: 160 });
   check(!r.isError && r.json?.job_id === "observed-job" && r.json.job_state === "completed" && r.json.input_injected === true &&
     /modeled capture backend failure/.test(r.json.capture_after_error ?? "") && actionCount() === 1 && t.callsOf("capture").length === 1 && !r.image,
     "dynamic capture failure preserves the action outcome and never replays it", r.text);
@@ -118,7 +118,7 @@ try {
   check(JSON.stringify(clickPoint(t.callsOf("click").at(-1))) === '["120","80"]', "failed capture leaves the prior successful coordinate mapping intact");
 
   t.setScenario(scenario({ replies: { pad: { ok: false, error: "modeled action refusal" } } })); t.clearCalls();
-  r = await t.call("pad", { pid, ms: 150, capture_after: 0, region: rect, max_width: 160 });
+  r = await t.call("pad", { pid, ms: 150, capture_after: 'immediate', region: rect, max_width: 160 });
   check(r.isError && /modeled action refusal/.test(r.text) && actionCount() === 1 && !t.callsOf("capture").length,
     "failed action has no observation attempt or action retry", r.text);
 
@@ -129,7 +129,7 @@ try {
   await t.call("job_cancel", { pid, id: "async-pad" });
   check(cmdOf(t.callsOf("job-cancel").at(-1) ?? [])[1] === "async-pad", "existing cancellation route is unchanged");
   t.clearCalls();
-  r = await t.call("pad", { pid, ly: 20000, hold: true, capture_after: 0, max_width: 320 });
+  r = await t.call("pad", { pid, ly: 20000, hold: true, capture_after: 'immediate', max_width: 320 });
   check(!r.isError && r.json?.capture_after?.observation?.action_state === "held_until_changed" && !t.callsOf("release").length,
     "resized held observation does not silently release or claim completion", r.text);
   await t.call("pad", { pid, off: true });
@@ -161,7 +161,7 @@ try {
 const fault = await startFake({ replies: { pad: completed } },
   { VINPUT_CAPTURE_DIR: fileURLToPath(new URL("./lib.mjs", import.meta.url)) + "/blocked-child" });
 try {
-  const r = await fault.call("pad", { pid, ms: 150, capture_after: 0 });
+  const r = await fault.call("pad", { pid, ms: 150, capture_after: 'immediate' });
   check(!r.isError && r.json?.ok === true && r.json.job_id === "observed-job" && r.json.input_injected === true &&
     /post-action capture failed/.test(r.json.capture_after_error ?? "") && fault.callsOf("pad").length === 1 && !fault.callsOf("capture").length,
     "capture setup exception retains the already-performed action receipt", r.text);

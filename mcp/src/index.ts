@@ -3,6 +3,7 @@
 // through vinput. Vinput-backed tools return CLI JSON with "ok" surfaced as isError; wait uses only a host timer.
 // Offline games only: vinput injects a DLL and refuses targets with a known anti-cheat (see DISCLAIMER.md).
 import { sizeMismatchWarning } from "./launchsize.js";
+import {captureEnabled,captureFrames,type CaptureAfter} from './actioncapturepolicy.js';
 import { MOVE_DIRECTIONS, moveVector, smoothMoveStates, calibratedLook, rotateStick, driveStates,padButtonError } from "./controller.js";
 import { closeSync, fstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +46,7 @@ import { prepareSequenceConditions, guardSequence,canonicalSequenceScope, type P
 import { compactEnabled, compactReply } from "./compactreply.js";
 import {prepareCapturePlan,sequenceFollowAction} from './sequencecaptures.js';
 
-const VERSION = "0.3.2";
+const VERSION = "0.3.3";
 const OWNER = (process.env.VINPUT_OWNER ?? "").trim() || `mcp-${process.pid}`;
 const MAX_IMAGE_BYTES = Number(process.env.VINPUT_MCP_MAX_IMAGE_BYTES ?? 8 * 1024 * 1024);
 
@@ -151,7 +152,7 @@ const server = new McpServer(
       "For repeated placement use click_many/click_grid; wait_text accepts any-of banners; click_to_move checks scoped pixel change/stability with one bounded hold and unknown displacement. " +
       "Coordinates are the game's client pixels, which equal the pixels of a full capture. ok:true on an input tool only " +
       "means the input was delivered, not that the game reacted: always verify. capture_after:true requests a following " +
-      "image; a zero-Present PrintWindow fallback does not prove a new rendered frame. Use capture_after:0 to look immediately. " +
+      "image; a zero-Present PrintWindow fallback does not prove a new rendered frame. Use capture_after:'immediate' to look immediately;0 disables the following image. " +
       "Do not guess pixels from a big screenshot: capture with grid to read exact coordinates, or " +
       "max_width / zoom and then click with coord_space:\"capture\". Run games windowed or borderless; if launch / capture " +
       "warns about fullscreen, fix the game's own settings. status shows warnings; log, trace and config diagnose input problems. Never use it on online / multiplayer games " +
@@ -611,15 +612,15 @@ async function grabFrame(pid: number, o: CaptureImageOptions & { path?: string; 
   return { r, out, saved, summary };
 }
 
-const captureAfterSchema = z.union([z.boolean(), z.number().int().min(0).max(3600)]).optional().describe(
+const captureAfterSchema = z.union([z.boolean(), z.number().int().min(0).max(3600),z.literal('immediate')]).optional().describe(
   "Look right after acting: true waits for 3 presented frames, with one explicitly reported fresh PrintWindow fallback if that wait times out and status shows no target Present stream; a number is a FRAME COUNT, never milliseconds, and strictly waits for that many frames " +
-  "first (0 = capture immediately). Use observe_settle for bounded scoped stable-frame observation after the action; capture_after itself is one image. The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
+  "first.0 and false disable the image; 'immediate' captures without waiting for Present. Omitted defaults depend on the tool. Use observe_settle for bounded scoped stable-frame observation after the action; capture_after itself is one image. The reply then includes the frame as an inline image plus capture_after {path, w, h, ...}, " +
   "saving a capture round trip. Skipped when the action itself failed.");
-const DEFAULT_LOOK_FRAMES = 3;
 type PostActionObservation = { settle_ms_requested: number; attachment_epoch: number; action_state: string; image_options?: CaptureImageOptions;stable_options?:boolean|CaptureStability };
 /** Act-then-look: append the post-action frame to an action's reply. */
-async function look(pid: number, out: ToolReply, ca: boolean | number | undefined, observe?: PostActionObservation): Promise<ToolReply> {
-  if (ca === undefined || ca === false || out.isError) return out;
+async function look(pid: number, out: ToolReply, ca: CaptureAfter | undefined, observe?: PostActionObservation): Promise<ToolReply> {
+  const frames = captureFrames(ca);
+  if (frames === undefined || out.isError) return out;
   const session = observe?.attachment_epoch ?? (captureSessionEpoch.get(pid) ?? 0);
   const observation = observe ? { ...observe, settle_ms_elapsed: 0,
     scope: "after successful CLI reply; ongoing jobs/holds may still be active; no application or rendered-frame guarantee" } : undefined;
@@ -648,7 +649,7 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
     if(changed())return attachmentChanged();
   }
   try {
-  let g = await grabFrame(pid, { ...observe?.image_options, after_frames: ca === true ? DEFAULT_LOOK_FRAMES : ca });
+  let g = await grabFrame(pid, { ...observe?.image_options, after_frames: frames });
   if(changed())return attachmentChanged();
   let fallback: Record<string, unknown> | undefined;
   // A number remains a strict Present request. Only the convenience boolean may
@@ -670,7 +671,7 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
         (s.counters === undefined || counters !== undefined) &&
         (counters?.fs_refused === undefined || counters.fs_refused === 0) &&
         (counters?.present_ours === undefined || counters.present_ours === 0)) {
-      fallback = { reason: "no_target_present_stream_observed", requested_present_frames: DEFAULT_LOOK_FRAMES,
+      fallback = { reason: "no_target_present_stream_observed", requested_present_frames: frames,
         present_wait_satisfied: false, method: "printwindow", scope: "fresh PrintWindow request; no render-frame or application-acceptance guarantee" };
       g = await grabFrame(pid, { ...observe?.image_options, after_frames: 0, method: "printwindow" });
       if(changed())return attachmentChanged();
@@ -717,14 +718,14 @@ const actionCaptureArgs = {
   capture_settle_ms: z.number().int().min(0).max(5000).optional().describe(
     "Extra timer delay after a successful CLI reply, before capture_after (default 0). Requires capture_after. Async jobs may still run and hold:true remains held; this does not wait for their completion."),
 };
-function actionCaptureError(a: CaptureImageOptions & { capture_after?: boolean | number; capture_settle_ms?: number;async?:boolean;hold?:boolean }): string | undefined {
+function actionCaptureError(a: CaptureImageOptions & { capture_after?: CaptureAfter; capture_settle_ms?: number;async?:boolean;hold?:boolean }): string | undefined {
   const destination=destinationError(a);if(destination)return destination;
-  const disabled = a.capture_after === undefined || a.capture_after === false;
-  if(a.capture_stable&&disabled)return 'capture_stable requires enabled capture_after; use capture_after:0 for the final image after observation';
+  const disabled = !captureEnabled(a.capture_after);
+  if(a.capture_stable&&disabled)return "capture_stable requires enabled capture_after; use capture_after:'immediate' for the final image after observation";
   if(a.capture_stable&&(a.async||a.hold))return 'capture_stable requires a completed action; omit async/hold or observe its exact job separately';
   if (a.capture_settle_ms !== undefined && disabled) return "capture_settle_ms requires capture_after";
   if (disabled && [a.region, a.max_width, a.scale, a.format, a.quality,a.upscale,a.save_path,a.out_dir].some((v) => v !== undefined))
-    return "action image options require enabled capture_after; pass capture_after:0 for an immediate image or capture_after:true to request three presented frames";
+    return "action image options require enabled capture_after; pass capture_after:'immediate' for an immediate image or capture_after:true to request three presented frames";
   if (a.scale !== undefined && a.max_width !== undefined) return "give only one of scale, max_width";
   if (a.format === "jpeg" && a.scale !== undefined && a.scale > 1) return "JPEG action images support scale <= 1; use PNG for MCP enlargement";
   return validateFormat(a);
@@ -792,7 +793,7 @@ tool("click_text", "Click text on screen",
     optional: z.boolean().optional().describe("Succeed with skipped:true if the text never appears (for dialogs that may not show)."),
     ...actionCaptureArgs, region: captureImageArgs.region.describe("Client-pixel OCR search region; also bounds an enabled post-action image.") },
   async (a) => {
-    const captureError = actionCaptureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region });
+    const captureError = actionCaptureError({ ...a, region: captureEnabled(a.capture_after) ? a.region : undefined });
     if (captureError) return fail(captureError);
     const observation = actionObservation(a);
     const exactLine=a.exact_line??(!a.exact&&a.whole_word!==false);
@@ -1330,7 +1331,7 @@ tool("pad_move", "Move with the left stick",
     speed: z.enum(["walk", "run"]).optional().describe("walk=20000 (default); run=32767. These are stick magnitudes, not measured character speeds."),
     screen_rotation_deg: z.number().min(-360).max(360).optional().describe("Clockwise rotation from intended screen direction to stick axes (default 0). +90 maps up to stick-right; 180 compensates inversion. Calibrate per camera view; no auto-detection."),
     smooth: z.boolean().optional(), async: asyncArg, replace: replaceArg, ...padCaptureArgs,
-    capture_after: captureAfterSchema.default(0).describe("Default 0: return an image after the action reply and optional settle, without a Present wait. false disables it; true/numeric use the usual capture_after semantics."),
+    capture_after: captureAfterSchema.default('immediate').describe("Default 'immediate': return an image after the action reply and optional settle, without a Present wait.0 or false disables it; true/positive numeric use the usual capture_after semantics."),
     capture_settle_ms: padCaptureArgs.capture_settle_ms.describe("Extra nonblocking delay after the CLI reply before capture (default 100 ms for pad_move). Requires an enabled capture_after; async capture does not prove completion."), },
   async (a) => {
     const captureError = padCaptureError(a);
@@ -1367,7 +1368,7 @@ tool("pad_look", "Turn using an angular calibration",
       degrees_per_second: z.number().positive().finite().describe("Measured positive/rightward angular rate at exactly calibration.rx, in degrees per second; never pass pixels here."),
     }).strict(),
     async: asyncArg, replace: replaceArg, ...padCaptureArgs,
-    capture_after: captureAfterSchema.default(0).describe("Default 0: return a backend image after the reply/settle without a Present wait. false disables it; true/numeric keep usual semantics."),
+    capture_after: captureAfterSchema.default('immediate').describe("Default 'immediate': return a backend image after the reply/settle without a Present wait.0 or false disables it; true/positive numeric keep usual semantics."),
     capture_settle_ms: padCaptureArgs.capture_settle_ms.describe("Post-reply image delay, default 100ms for pad_look. Async image is an observation, not job completion."), },
   async (a) => {
     const captureError = padCaptureError(a);
@@ -1398,7 +1399,7 @@ tool("pad_drive", "Drive through bounded control phases",
     brake_after: z.union([z.boolean(), z.object({ amount: trigV, ms: z.number().int().min(1).max(5000) }).strict()]).optional()
       .describe("Default false. true explicitly requests LT255 for250ms after motion; or give {amount,ms}. LT may reverse instead of stopping."),
     async: asyncArg, replace: replaceArg, ...padCaptureArgs,
-    capture_after: captureAfterSchema.default(0),
+    capture_after: captureAfterSchema.default('immediate'),
     capture_settle_ms: padCaptureArgs.capture_settle_ms.describe("Post-reply observation delay, default100ms; async image does not prove job completion."), },
   async (a) => {
     const captureError = padCaptureError(a);
@@ -1425,7 +1426,7 @@ tool("pad_rotate", "Rotate a stick for a prompt",
     radius: z.number().int().min(1).max(32767).optional().describe("Stick-vector magnitude, default 32767; not separate full-strength X/Y corners."),
     end_dwell_ms: z.number().int().min(1).max(1000).optional().describe("Requested hold of the final non-neutral point, default 50 ms, then native cleanup to neutral."),
     async: asyncArg, replace: replaceArg, ...padCaptureArgs,
-    capture_after: captureAfterSchema.default(0).describe("Default 0: backend image after action reply/settle without a Present wait. false disables it; true/numeric keep normal semantics."),
+    capture_after: captureAfterSchema.default('immediate').describe("Default 'immediate': backend image after action reply/settle without a Present wait.0 or false disables it; true/positive numeric keep normal semantics."),
     capture_settle_ms: padCaptureArgs.capture_settle_ms.describe("Post-reply image delay, default 100 ms for pad_rotate. Async capture is an observation, not job completion."), },
   async (a) => {
     const captureError = padCaptureError(a);

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import {captureEnabled} from './actioncapturepolicy.js';
 import {MOVE_DIRECTIONS,moveVector} from './controller.js';
 import type { CameraContext } from './camerahelpers.js';
 import type { CliResult } from './vinput.js';
@@ -42,7 +43,7 @@ export async function padMoveUntilStuck(ctx: CameraContext, a: PadNavigationOpti
     return reply({ ok: false, input_injected: false, error: 'pad_move_until_stuck needs a bounded left-stick hold, a client region, and valid motion timing/tolerance options' });
   const speed=a.speed??'walk',vector=moveVector(a.direction,speed,a.screen_rotation_deg??0);
   const axes:Axes=Object.freeze({lt:0,rt:0,lx:vector.lx,ly:vector.ly,rx:0,ry:0});
-  const invalid = ctx.captureError({ ...a, region: a.capture_after === undefined || a.capture_after === false ? undefined : a.region });
+  const invalid = ctx.captureError({ ...a, region: captureEnabled(a.capture_after) ? a.region : undefined });
   if (invalid) return reply({ ok: false, input_injected: false, error: invalid });
   const epoch = ctx.epoch(a.pid), started = performance.now();
   let baseline: Sample | undefined, first: Sample | undefined, lastSample: Sample | undefined, quiet: Sample | undefined;

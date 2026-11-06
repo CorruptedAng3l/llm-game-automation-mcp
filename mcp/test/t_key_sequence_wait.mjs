@@ -17,7 +17,7 @@ const scene = (extra = {}, p = pid) => ({ png: { w: 1280, h: 720, core_capture: 
 const env = { VINPUT_EXE: fileURLToPath(new URL("./fake_sequence_wait.mjs", import.meta.url)) };
 const t = await startFake(scene(), env);
 const set = (s) => { t.setScenario(s); t.clearCalls(); };
-const requested = { pid, steps, wait: true, wait_timeout_ms: 2000, capture_after: 0, max_width: 160 };
+const requested = { pid, steps, wait: true, wait_timeout_ms: 2000, capture_after: 'immediate', max_width: 160 };
 const exactInitial = (r, p = pid) => JSON.stringify(r.json?.sequence_input) === JSON.stringify(initialFor(p));
 try {
   const p = (await t.client.listTools()).tools.find((x) => x.name === "key_sequence")?.inputSchema?.properties ?? {};
@@ -49,7 +49,7 @@ try {
   }
 
   set(scene()); r = await t.call("key_sequence", { pid, steps: [{action:"key",key:"down",ms:80},{action:"wait",ms:100},{action:"key",key:"enter",ms:80}],
-    wait:true,capture_settle_ms:50,capture_after:0,region:{x:100,y:40,w:320,h:180},max_width:160 });
+    wait:true,capture_settle_ms:50,capture_after:'immediate',region:{x:100,y:40,w:320,h:180},max_width:160 });
   check(!r.isError&&t.lastSeqText()==="key down 80\nwait 100\nkey enter 80\n"&&t.callsOf("seq").length===1&&t.callsOf("capture").length===1&&
     r.json.capture_after.observation.action_state==="native_sequence_completed_game_consumption_unmeasured"&&r.json.capture_after.observation.settle_ms_elapsed>=40,
     "menu recipe sends one sequence, waits for native completion, settles and returns one cropped image without replay",r.text);
