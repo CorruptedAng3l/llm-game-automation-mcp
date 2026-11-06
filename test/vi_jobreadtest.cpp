@@ -11,12 +11,12 @@ int main(){
  if(!vi_launch_terminal::Install()||!vi_launch_terminal::Verify())return 111;g_pid=GetCurrentProcessId();
  g_keyTrace[VK_F6].gaks.record(0x8000);auto untouched=KeyJob({VK_F6});
  g_keyTrace[VK_F7].gaks.record(0x8000);g_keyTrace[VK_F6].delivery(true);
- auto result=Finish(*untouched);Check(result.find("\"outcome\":\"not_observed\"")!=std::string::npos,"historical/other-key polls and message dispatch alone do not establish requested polling return");
+ auto result=Finish(*untouched);Check(result.find("\"outcome\":\"observed\"")!=std::string::npos&&result.find("\"polling_outcome\":\"not_observed\"")!=std::string::npos&&result.find("\"observed_channels\":[\"WindowMessageDispatch\"]")!=std::string::npos,"historical/other-key polls cannot establish polling; exact message dispatch is separately observed");
  g_keyTrace[VK_F6].gaks.record(0x8000);Check(JobReplyLocked(*untouched)==result,"later key polling cannot change a frozen terminal receipt");
  auto high=KeyJob({VK_F6});g_keyTrace[VK_F6].di_state.record(0x80);result=Finish(*high);Check(result.find("\"all_requested_observed\":true")!=std::string::npos,"requested DirectInput high-state return is observed");
  Check(result.find("\"DirectInputState\":{\"measured\":true,\"reads\":\"1\",\"down_returns\":\"1\"}")!=std::string::npos&&result.find("\"GetAsyncKeyState\":{\"measured\":true,\"reads\":\"0\",\"down_returns\":\"0\"}")!=std::string::npos,"completed hold identifies the exact reader instead of attributing DI state to GAKS");
  auto unreadW=KeyJob({'W'});g_keyTrace['W'].delivery(true);g_keyTrace[VK_SPACE].gaks.record(0x8000);result=Finish(*unreadW);
- Check(result.find("\"vk\":87")!=std::string::npos&&result.find("\"delivery_observation\":\"messages_dispatched_without_poll_high\"")!=std::string::npos,"UE-style W dispatch with unrelated Space polling explicitly reports delivered messages without a W reader");
+ Check(result.find("\"vk\":87")!=std::string::npos&&result.find("\"delivery_observation\":\"message_dispatch_observed\"")!=std::string::npos&&result.find("\"polling_outcome\":\"not_observed\"")!=std::string::npos,"UE-style W dispatch with unrelated Space polling names the message channel without inventing a W polling return");
  auto rawW=KeyJob({'W'});g_keyTrace['W'].raw_data.record(RI_KEY_MAKE,true);result=Finish(*rawW);
  Check(result.find("\"GetRawInputData\":{\"measured\":true,\"reads\":\"1\",\"down_returns\":\"1\"}")!=std::string::npos,"raw keyboard high return is attributed to the requested W job");
  auto low=KeyJob({VK_F6});g_keyTrace[VK_F6].gkbs.record(0);result=Finish(*low);Check(result.find("\"outcome\":\"not_observed\"")!=std::string::npos&&result.find("\"poll_reads\":\"1\"")!=std::string::npos,"up-only polling remains distinct from reading the virtual down state");
@@ -25,8 +25,8 @@ int main(){
  const int modifierPairs[][2]={{VK_SHIFT,VK_LSHIFT},{VK_CONTROL,VK_LCONTROL},{VK_MENU,VK_LMENU},{VK_LSHIFT,VK_SHIFT},{VK_LCONTROL,VK_CONTROL},{VK_LMENU,VK_MENU},{VK_RSHIFT,VK_SHIFT},{VK_RCONTROL,VK_CONTROL},{VK_RMENU,VK_MENU}};
  for(const auto& pair:modifierPairs){
   auto alias=KeyJob({pair[0]});g_keyTrace[pair[1]].gaks.record(0x8000);result=Finish(*alias);
-  const std::string exact="\"vk\":"+std::to_string(pair[0])+",\"measured\":false,\"poll_reads\":\"0\",\"down_returns\":\"0\"";
-  Check(result.find("\"outcome\":\"unavailable\"")!=std::string::npos&&result.find("\"modifier_alias_ambiguous\":true")!=std::string::npos&&result.find("\"all_requested_observed\":null")!=std::string::npos&&result.find("\"keys_observed\":0")!=std::string::npos&&result.find(exact)!=std::string::npos,"generic/side modifier alias high return is unavailable without inventing exact-key consumption");
+  const std::string exact="\"vk\":"+std::to_string(pair[0])+",\"measured\":false";
+  Check(result.find("\"outcome\":\"unavailable\"")!=std::string::npos&&result.find("\"modifier_alias_ambiguous\":true")!=std::string::npos&&result.find("\"all_requested_observed\":null")!=std::string::npos&&result.find("\"keys_observed\":0")!=std::string::npos&&result.find(exact)!=std::string::npos&&result.find("\"poll_reads\":\"0\",\"down_returns\":\"0\"")!=std::string::npos,"generic/side modifier alias high return is unavailable without inventing exact-key consumption");
   g_keyTrace[pair[0]].gaks.record(0x8000);Check(JobReplyLocked(*alias)==result,"later exact modifier poll cannot rewrite frozen alias ambiguity");
  }
  auto exactModifier=KeyJob({VK_SHIFT});g_keyTrace[VK_SHIFT].gks.record(0x8000);g_keyTrace[VK_LSHIFT].gaks.record(0x8000);result=Finish(*exactModifier);

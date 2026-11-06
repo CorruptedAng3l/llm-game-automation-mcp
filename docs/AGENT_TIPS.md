@@ -311,3 +311,11 @@ vinput keeps the user's real mouse and keyboard out of a background game. When t
 themselves, their real input passes through and the cursor the game reads is the real one until your next input
 command; `status` shows `owner_active` (with a warning) and `cursor_effective`. Treat `owner_active:true` as "the user
 is playing right now": look before you act, and do not fight them for the mouse.
+
+## 14. Radar driving, topmost, receipts and sequences
+
+- Check `presentation_window.topmost` when a background game covers the desktop. Default strip only demotes the exact adopted HWND without activation. `config {topmost:"keep"}` permits its explicit nonactivating reassertions and never automatically restores it.
+- `steer_to_blip` / `goto_marker` require an explicitly heading-up radar, client ROI and unique colour or PNG marker. Confirm bindings and steering sign first. Marker-near-centre and no-marker-progress are radar observations; they do not prove arrival in the world or traversability. `turn_keys` measures relative radar-marker rotation, not world yaw.
+- `key_drive` phases separate held throttle from signed digital steering duty and brake. Low duty pulses may be missed by a slowly polling consumer; inspect reader receipts and images. Scheduler lateness skipping cannot flush an application's earlier accepted window messages.
+- Use sequence `capture_mode:"last"` for the last N recorded frames. Set `after_step` on an image/colour `abort_on` when the initial menu contains the condition that a first dismissing step must remove. A post-completion capture request does not establish that a delayed game has rendered the input.
+- Receipt `input_observed` includes named positive polling returns and window-message dispatch; `polling_outcome` remains separate. Neither proves game consumption. `visual_change_observed:false` names an unchanged measured comparison; absent image evidence stays unknown.

@@ -20,14 +20,19 @@ static BOOL WINAPI ModelFrequency(LARGE_INTEGER* n){n->QuadPart=1000;return TRUE
 #include "../src/vi_sequence_frame.h"
 struct InputJob{
  std::vector<vi_key_sequence::Step> sequence;size_t sequenceStep=0;int index=0,phase=0;unsigned transitions=0;bool done=false;
+ size_t point=0;bool pulseDown=false;unsigned skipped=0;
  ULONGLONG next=0,maxLate=0,duration=0;std::uint64_t qpcFrequency=1000,qpcAnchor=0,qpcNext=0,qpcLast=0,qpcLastDeadline=0,qpcMaxLate=0,qpcFinished=0;
  std::uint64_t qpcNativeStart=0,qpcFirst=0;unsigned latenessLimit=0;
  std::string state,reason;
  vi_sequence_edges::Trace sequenceEdges;
 };
 static void JobSequenceRecordEdge(InputJob& job,int vk,bool down,std::uint64_t qpc){vi_sequence_edges::Record(job.sequenceEdges,(unsigned)job.sequenceStep,job.sequence[job.sequenceStep].line,(unsigned)vk,down,qpc,clockTick/16);}
-struct Edge{int key;bool down;std::uint64_t at;};static std::vector<Edge> edges;
-static void KeyEvent(int key,bool down){edges.push_back({key,down,clockTick});}
+struct Edge{int key;bool down;std::uint64_t at;};static std::vector<Edge> edges;static unsigned char g_vk[256]{};
+static bool KeyEvent(int key,bool down){g_vk[key]=down?0x80:0;edges.push_back({key,down,clockTick});return true;}
+// This fixture models timing only; real resource ownership is exercised by the
+// guarded native scheduler fixtures, not these constant-owned timing shims.
+static bool JobOwns(const InputJob&,int){return true;}
+static int JobResource(int key){return key;}
 static void JobFinish(InputJob& job,const char* state,const char* reason){job.done=true;job.state=state;job.reason=reason;job.qpcFinished=clockTick;}
 #include "actual_sequence.inl"
 #include "../src/vi_sequence_anchor.h"
@@ -35,7 +40,7 @@ static unsigned passed=0,failed=0;
 static void Check(bool b,const char* what){printf("%s %s\n",b?"PASS":"FAIL",what);b?++passed:++failed;}
 static InputJob Run(const std::string& script,unsigned quantum){
  vi_key_sequence::Plan plan;std::string error;if(!vi_key_sequence::Parse(script,plan,error)){Check(false,"model plan must parse");return {};}
- InputJob job;job.sequence=plan.steps;job.duration=plan.duration;job.next=clockTick;edges.clear();const auto limit=clockTick+20000;
+ InputJob job;job.sequence=plan.steps;job.duration=plan.duration;job.next=clockTick;edges.clear();std::fill(std::begin(g_vk),std::end(g_vk),(unsigned char)0);const auto limit=clockTick+20000;
  do{JobRunSequence(job,clockTick);if(!job.done)clockTick+=quantum;}while(!job.done&&clockTick<limit);return job;
 }
 int main(){
@@ -76,5 +81,18 @@ int main(){
  Check(job.sequenceEdges.edges.size()==12&&job.sequenceEdges.dropped==0,"every re-tap edge retains the standard finite native timing receipt");
  vi_sequence_edges::Trace limited;for(unsigned n=0;n<vi_sequence_edges::Limit+2;n++)vi_sequence_edges::Record(limited,n,1,VK_SPACE,true,n,0);
  Check(limited.edges.size()==vi_sequence_edges::Limit&&limited.dropped==2,"edge telemetry has a finite cap with exact dropped count");
+ clockTick=800000;job=Run("pwm a 800 0.25 200\n",1);
+ Check(job.done&&job.state=="completed"&&edges.size()==8&&job.transitions==8&&edges.front().at==800000&&edges.back().at==800650&&job.qpcFinished==800800,"PWM completes four anchored pulses without modifier timing padding");
+ vi_key_sequence::Plan pwm;std::string pwmError;vi_key_sequence::Parse("pwm a 1600 0.5 200\n",pwm,pwmError);
+ job={};job.sequence=pwm.steps;job.duration=pwm.duration;clockTick=900000;edges.clear();JobRunSequence(job,clockTick);clockTick=900450;JobRunSequence(job,clockTick);
+ Check(edges.size()==1&&job.skipped==3&&job.qpcNext==900500,"late PWM callback keeps only current on-state and skips three expired boundaries without a burst");
+ clockTick=900550;JobRunSequence(job,clockTick);
+ Check(edges.size()==2&&!edges.back().down&&edges.back().at==900550&&job.qpcNext==900600,"late PWM current off-state publishes just one release and retains future anchor");
+ job={};job.sequence=pwm.steps;job.duration=pwm.duration;job.qpcAnchor=1000000;job.qpcNext=1000000;clockTick=1005000;edges.clear();JobRunSequence(job,clockTick);
+ Check(job.done&&job.state=="completed"&&edges.empty(),"entire expired PWM step never replays an old press");
+ job={};job.sequence=pwm.steps;job.duration=pwm.duration;job.qpcAnchor=1000000;job.qpcNext=1000000;job.qpcFrequency=1;clockTick=9223372036854770000ull;edges.clear();JobRunSequence(job,clockTick);
+ Check(job.done&&job.state=="completed"&&edges.empty(),"finite PWM horizon clamps before a huge late tick can overflow millisecond conversion");
+ clockTick=1100000;job=Run("pwm a 200 0 200\n",1);
+ Check(job.done&&job.state=="completed"&&edges.empty()&&job.transitions==0,"zero PWM duty never publishes a synthetic edge");
  printf("sequence deadline model: %u PASS / %u FAIL\n",passed,failed);return failed?1:0;
 }

@@ -1,0 +1,11 @@
+import {actionFeedback,withActionFeedback} from '../build/actionfeedback.js';
+import {compactReply} from '../build/compactreply.js';
+import {makeChecker} from './lib.mjs';
+const {state,check}=makeChecker();
+const motion={measured:true,measurement:'region_pixels_only',pixel_change_observed:false,application_response:null};
+let extra=actionFeedback({ok:true,input_motion:motion});check(extra.visual_change_observed===false&&extra.visual_observation.application_response===null&&/unchanged/.test(extra.visual_response_note),'measured unchanged region is visible without claiming rejected input');
+extra=actionFeedback({ok:true,capture_after:{capture_observation:{version:1,measured:true,pixel_hash_changed:false}}});check(extra.visual_change_observed===false&&/need not precede/.test(extra.visual_observation.scope),'capture-history comparison does not invent a pre-action baseline');
+for(const value of [{ok:false,input_motion:motion},{ok:true,accepted:true,input_motion:motion},{ok:true,job_state:'running',input_motion:motion},{ok:true,input_motion:{...motion,measured:false}},{ok:true,capture_after:{capture_observation:{version:1,measured:true,pixel_hash_changed:null}}}])check(actionFeedback(value)===undefined,'failed/pending/unmeasured observation creates no visual verdict');
+const raw={ok:true,input_motion:{...motion,pixel_change_observed:true}},out=withActionFeedback({content:[{type:'text',text:JSON.stringify(raw)}]});check(JSON.parse(out.content[0].text).visual_change_observed===true,'observed changing pixels remain separate from application response');
+const compact=JSON.parse(compactReply(out,true,'key').content[0].text);check(compact.visual_change_observed===true&&compact.visual_observation.input_consumption_measured===false,'compact presentation retains top-level visual facts and scope');
+console.log(`action feedback: ${state.passes} PASS / ${state.failures} FAIL`);if(state.failures)process.exitCode=1;

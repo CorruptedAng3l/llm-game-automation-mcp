@@ -1,8 +1,8 @@
 # Owned offscreen geometry tests. Lower terminal spies absorb every cursor/input/
 # foreground write. PrintWindow is an owned memory-DC surrogate, never native.
 param([string]$RepoRoot='', [string]$CliDir='', [string]$Out="$PSScriptRoot\..\build\test\capture_scope", [switch]$KeepGoing)
-. "$PSScriptRoot\_vcvars.ps1";$vcDir=Get-VcVarsDir
 $ErrorActionPreference='Stop';Add-Type -AssemblyName System.Drawing
+. "$PSScriptRoot/_vcvars.ps1";$vcDir=Get-VcVarsDir
 if(-not$RepoRoot){$d=[IO.DirectoryInfo]::new((Resolve-Path "$PSScriptRoot\..").Path);for($i=0;$i-lt7-and$d;$i++){if(Test-Path (Join-Path $d.FullName 'build\x64\vimh_buffer.obj')){$RepoRoot=$d.FullName;break};$d=$d.Parent}}
 if(-not$RepoRoot){throw 'Pass -RepoRoot for tested MinHook objects'};$RepoRoot=(Resolve-Path $RepoRoot).Path;if(-not$CliDir){$CliDir=Join-Path $RepoRoot 'dist'};$V=(Resolve-Path (Join-Path $CliDir 'vinput.exe')).Path
 $run=Join-Path ([IO.Path]::GetFullPath($Out)) ('run_'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Force $run,"$run\calls","$run\tools"|Out-Null
@@ -107,13 +107,14 @@ function TestTextAndPointer($T){
  $null=LabelMode $T 0x8063 label_off;$T.evidence.Add(@{name='pointer and text controls complete';before=$before;after=(Snap $T)})
 }
 try{foreach($arch in @('x64','x86')){
- $vc=if($arch-eq'x64'){'vcvars64.bat'}else{'vcvars32.bat'};$folder="$run\tools\$arch";New-Item -ItemType Directory -Force "$folder\temp"|Out-Null;$source=(Resolve-Path "$PSScriptRoot\..\test\vi_capturescope.cpp").Path
+ $vc=Join-Path $vcDir $(if($arch-eq'x64'){'vcvars64.bat'}else{'vcvars32.bat'});$folder="$run\tools\$arch";New-Item -ItemType Directory -Force "$folder\temp"|Out-Null;$source=(Resolve-Path "$PSScriptRoot\..\test\vi_capturescope.cpp").Path
+ foreach($name in @('vimh_buffer.obj','vimh_hook.obj','vimh_trampoline.obj','vimh_hde.obj')){$origin=Join-Path "$RepoRoot/build/$arch" $name;$copy=Join-Path $folder $name;Copy-Item -LiteralPath $origin -Destination $copy;Require ((Get-FileHash -LiteralPath $origin).Hash-eq(Get-FileHash -LiteralPath $copy).Hash) "$arch isolated renamed MinHook object $name"}
  $batch=@"
 @echo off
 set "TEMP=$folder\temp"
 set "TMP=$folder\temp"
-call "$vcDir\$vc" >nul || exit /b 2
-cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 /I"$RepoRoot\src" /I"$RepoRoot\third_party\minhook\include" "$source" /Fo:"$folder\fixture.obj" /Fe:"$folder\fixture.exe" /link /SUBSYSTEM:WINDOWS "$RepoRoot\build\$arch\vimh_buffer.obj" "$RepoRoot\build\$arch\vimh_hook.obj" "$RepoRoot\build\$arch\vimh_trampoline.obj" "$RepoRoot\build\$arch\vimh_hde.obj"
+call "$vc" >nul || exit /b 2
+cl /nologo /O2 /MT /EHsc /W4 /WX /std:c++17 /FI"$RepoRoot\src\vi_mh_rename.h" /I"$RepoRoot\src" /I"$RepoRoot\third_party\minhook\include" "$source" /Fo:"$folder\fixture.obj" /Fe:"$folder\fixture.exe" /link /SUBSYSTEM:WINDOWS "$folder\vimh_buffer.obj" "$folder\vimh_hook.obj" "$folder\vimh_trampoline.obj" "$folder\vimh_hde.obj"
 exit /b %errorlevel%
 "@;[IO.File]::WriteAllText("$folder\build.cmd",$batch,[Text.Encoding]::ASCII);& cmd /d /c "$folder\build.cmd" *> "$folder\build.log";Require ($LASTEXITCODE-eq0) "$arch safe fixture builds W4 WX"
  $exe=(Resolve-Path "$folder\fixture.exe").Path;$log="$run\$arch.fixture.jsonl";$p=Start-Process $exe -ArgumentList ('"'+$log+'"') -WindowStyle Hidden -PassThru;$owned=TrackOriginal $p $exe;$owned.arch=$arch;$owned.log=$log;$owned.calls=[Collections.Generic.List[object]]::new();$owned.evidence=[Collections.Generic.List[object]]::new();$cases.Add($owned);if($owned.startup_error){throw $owned.startup_error}

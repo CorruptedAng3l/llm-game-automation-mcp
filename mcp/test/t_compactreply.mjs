@@ -48,10 +48,12 @@ j=json(compactReply(reply({ok:true,input_session:{id:'batch-1',kind:'bounded_mcp
 check(j.points[0].client.x===100&&j.points[0].requested.y===20&&j.points[0].delivery_confirmed&&j.points[0].placement_confirmed===null&&j.points[0].receipt.input_read.keys[0].channels[0]==='GetAsyncKeyState'&&j.points[0].region_diff.before.capture_qpc_ticks==='123'&&j.do_not_repeat_delivered_points&&j.input_session.id==='batch-1','batch point identity, delivered-versus-placement status, scoped diff and nested reader summaries survive');
 j=json(compactReply(reply(native({input_read_observation:observation({outcome:'not_observed',keys:[key(87,'0','3',{GetAsyncKeyState:{measured:true,reads:'4',down_returns:'0'}})]}),reader_return_observed:false,input_read_warning:'No polling return; do not replay'})),true,'key'));
 check(j.input_read.keys[0].channels.length===0&&!j.input_read.keys[0].reader_return_observed&&j.input_read.keys[0].window_messages_dispatched&&j.input_read_warning.includes('do not replay'),'messages are dispatched without inventing a polling reader or delivery failure');
-for(const changes of [{terminal:false,outcome:'pending'},{frozen:false},{measured:false},{version:2}]){
+for(const changes of [{terminal:false,outcome:'pending'},{frozen:false},{measured:false},{version:3}]){
  j=json(compactReply(reply(native({input_read_observation:observation(changes)})),true,'key'));
  check(j.input_read.keys[0].channels===undefined&&j.input_read.keys[0].reader_return_observed===undefined,'pending/unmeasured snapshot cannot name a reader '+JSON.stringify(changes));
 }
+j=json(compactReply(reply(native({input_read_observation:observation({version:2})})),true,'key'));
+check(j.input_read.outcome==='unavailable'&&j.input_read.channels===undefined&&j.input_read.reader_return_observed===undefined&&j.input_read.keys===undefined,'malformed supported v2 metadata cannot name a polling reader or dispatched channel');
 for(const channels of [{GetAsyncKeyState:{measured:false,reads:'4',down_returns:'3'}},{GetAsyncKeyState:{measured:true,reads:'4',down_returns:'5'}},{GetAsyncKeyState:{measured:true,reads:'4',down_returns:'2'}},{GetAsyncKeyState:{measured:true,reads:'4',down_returns:'18446744073709551616'}}]){
  j=json(compactReply(reply(native({input_read_observation:observation({keys:[key(87,'3','1',channels)]})})),true,'key'));
  check(j.input_read.keys[0].channels===undefined&&j.input_read.keys[0].channels_unknown===true,'invalid or inconsistent channel counters cannot name a reader');

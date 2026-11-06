@@ -12,13 +12,28 @@ void JobRunSequence(InputJob& job,ULONGLONG now) {
  auto deadline=[&](std::uint64_t offset){return job.qpcAnchor+vi_qpc::Milliseconds(step.at+offset,job.qpcFrequency);};
  auto applied=[&](std::uint64_t target,bool edge=false,int vk=0,bool down=false){job.qpcLast=vi_qpc::Now();if(edge){if(!job.qpcFirst)job.qpcFirst=job.qpcLast;JobSequenceRecordEdge(job,vk,down,job.qpcLast);}job.qpcLastDeadline=target;const auto late=job.qpcLast>target?job.qpcLast-target:0;job.qpcMaxLate=(std::max)(job.qpcMaxLate,late);job.maxLate=(ULONGLONG)std::ceil(vi_qpc::DeltaMs(job.qpcMaxLate,0,job.qpcFrequency));};
  auto overdue=[&](std::uint64_t target){const auto at=vi_qpc::Now();if(job.latenessLimit&&at>target&&at-target>vi_qpc::Milliseconds(job.latenessLimit,job.qpcFrequency)){JobFinish(job,"cancelled","sequence_max_lateness_exceeded");return true;}return false;};
- if(job.phase==0){job.index=0;job.phase=step.keys.empty()?3:1;if(step.keys.empty()){job.qpcNext=deadline(step.ms);if(sampled<job.qpcNext)return;}}
+ if(job.phase==0){job.index=0;job.phase=step.pwm?6:step.keys.empty()?3:1;if(step.pwm){job.point=0;job.pulseDown=false;}if(step.keys.empty()){job.qpcNext=deadline(step.ms);if(sampled<job.qpcNext)return;}}
+ if(job.phase==6){
+  // Evaluate just the current anchored window. Unlike an edge replay loop this
+  // cannot bunch old steering pulses after a delayed worker callback.
+  if(overdue(job.qpcNext))return;
+  if(job.qpcFrequency>(std::numeric_limits<std::uint64_t>::max)()/120001){JobFinish(job,"failed","sequence_pwm_clock_unavailable");return;}
+  const auto ticks=sampled-deadline(0),horizon=vi_qpc::Milliseconds(step.ms,job.qpcFrequency);
+  const auto ms=ticks>=horizon?(std::uint64_t)step.ms:ticks/job.qpcFrequency*1000+ticks%job.qpcFrequency*1000/job.qpcFrequency;
+  const auto pulse=vi_key_pwm::At(step.pwmSpec,(unsigned)(std::min)(ms,(std::uint64_t)step.ms),step.ms);
+  if(job.index){if(pulse.ordinal>job.point+1)job.skipped+=(unsigned)(pulse.ordinal-job.point-1);}else{job.skipped+=(unsigned)pulse.ordinal;job.index=1;}job.point=(size_t)pulse.ordinal;
+  if(step.pwmSpec.on){for(int key:step.keys)if(!JobOwns(job,JobResource(key))){JobFinish(job,"cancelled","sequence_pwm_resource_changed");return;}
+   if(pulse.down!=job.pulseDown){for(int key:step.keys){const bool before=g_vk[key]!=0,accepted=KeyEvent(key,pulse.down);if(before!=(g_vk[key]!=0)){++job.transitions;applied(deadline(pulse.boundary),true,key,pulse.down);}if(!accepted||(g_vk[key]!=0)!=pulse.down){JobFinish(job,"failed","sequence_pwm_publication_failed");return;}}job.pulseDown=pulse.down;}
+  }
+  if(!pulse.finished){job.qpcNext=deadline(pulse.next);return;}
+  applied(deadline(step.ms));
+ }
  if(job.phase==1){const auto target=deadline(15u*job.index);if(overdue(target))return;KeyEvent(step.keys[job.index],true);++job.transitions;applied(target,true,step.keys[job.index],true);if(++job.index<(int)step.keys.size())job.qpcNext=deadline(15u*job.index);else if(step.retaps){job.phase=4;job.index=1;job.qpcNext=deadline(15u*(step.keys.size()-1)+step.every);}else{job.phase=2;job.index=(int)step.keys.size()-1;job.qpcNext=deadline(15u*(step.keys.size()-1)+step.ms);}return;}
  if(job.phase==4){const auto target=deadline(15u*(step.keys.size()-1)+step.every*job.index);if(overdue(target))return;KeyEvent(step.retapKey,false);++job.transitions;applied(target,true,step.retapKey,false);job.phase=5;job.qpcNext=target+vi_qpc::Milliseconds(step.gap,job.qpcFrequency);return;}
  if(job.phase==5){const auto target=deadline(15u*(step.keys.size()-1)+step.every*job.index+step.gap);if(overdue(target))return;KeyEvent(step.retapKey,true);++job.transitions;applied(target,true,step.retapKey,true);if(++job.index<=(int)step.retaps){job.phase=4;job.qpcNext=deadline(15u*(step.keys.size()-1)+step.every*job.index);}else{job.phase=2;job.index=(int)step.keys.size()-1;job.qpcNext=deadline(15u*(step.keys.size()-1)+step.ms);}return;}
  if(job.phase==2){const auto target=deadline(15u*(2*(step.keys.size()-1)-job.index)+step.ms);if(overdue(target))return;KeyEvent(step.keys[job.index],false);++job.transitions;applied(target,true,step.keys[job.index],false);if(--job.index>=0){job.qpcNext=deadline(15u*(2*(step.keys.size()-1)-job.index)+step.ms);return;}}
  if(job.phase==3)applied(deadline(step.ms));
- ++job.sequenceStep;job.phase=0;job.qpcNext=job.sequenceStep<job.sequence.size()?job.qpcAnchor+vi_qpc::Milliseconds(job.sequence[job.sequenceStep].at,job.qpcFrequency):deadline(step.ms+30u*(step.keys.empty()?0:step.keys.size()-1));
+ ++job.sequenceStep;job.phase=0;job.qpcNext=job.sequenceStep<job.sequence.size()?job.qpcAnchor+vi_qpc::Milliseconds(job.sequence[job.sequenceStep].at,job.qpcFrequency):deadline(step.ms+30u*(step.keys.empty()||step.pwm?0:step.keys.size()-1));
  if(job.sequenceStep>=job.sequence.size()){JobFinish(job,"completed","");return;}
  if(!step.keys.empty())return;
  }
@@ -27,7 +42,7 @@ std::string ScheduleKeySequence(const JObj& request) {
  auto noInput=[](const char* error){JOut out;out.bol("ok",false);out.bol("input_injected",false);out.str("error",error);return out.done();};
  vi_key_sequence::Plan plan;std::string error;
  auto script=request.find("script");if(script==request.end()||script->second.t!=1)return ErrJ("sequence requires a string script; no input was injected");
- if(!vi_key_sequence::Parse(JStr(request,"script"),plan,error))return ErrJ(error);
+ if(!vi_key_sequence::Parse(JStr(request,"script"),plan,error))return noInput(error.c_str());
  const auto frequency=vi_qpc::Frequency();if(!frequency||!vi_qpc::Now())return ErrJ("sequence QPC clock unavailable; no input was injected");
  if(JHas(request,"async")&&(request.find("async")->second.t!=3||!JBool(request,"async",false)))return ErrJ("sequence is always asynchronous; async must be true; no input was injected");
  auto job=std::make_shared<InputJob>();job->kind=InputJob::Sequence;job->qpcFrequency=frequency;job->keys=plan.keys;job->sequence=std::move(plan.steps);job->duration=plan.duration;

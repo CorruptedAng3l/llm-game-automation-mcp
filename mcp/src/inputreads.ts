@@ -1,4 +1,5 @@
 import type { CliResult } from './vinput.js';
+import {qualifyInputReceiptV2} from './inputreceiptprojection.js';
 type Obj=Record<string,unknown>;
 const object=(v:unknown):Obj|undefined=>v&&typeof v==='object'&&!Array.isArray(v)?v as Obj:undefined;
 const u64=(v:unknown):v is string=>typeof v==='string'&&/^(0|[1-9][0-9]{0,19})$/.test(v)&&BigInt(v)<=18446744073709551615n;
@@ -14,6 +15,7 @@ export function presentInputReads(result:CliResult):CliResult{
  }
  if(!result.ok||native.ok!==true||native.job_state!=='completed'||native.job_complete!==true||native.input_injected!==true)return result;
  if(native.accepted!==false||typeof native.job_id!=='string'||!native.job_id)return result;
+ const v2=qualifyInputReceiptV2(native);if(v2)return {...result,json:v2};
  const unavailable=():CliResult=>({...result,json:{...native,input_read_warning:'Native reader evidence is incomplete or inconsistent; scheduler completion does not confirm a reader or application response.'}});
  if(!o||o.version!==1)return unavailable();
  if(o.terminal!==true||o.started!==true||o.frozen!==true||o.application_response!==null||typeof o.applicable!=='boolean'||typeof o.measured!=='boolean')return unavailable();

@@ -12,12 +12,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { drawGrid, imageOutputSize, resample, toClient, type Mapping } from "./imgtools.js";
 import { decodePng, encodePng } from "./png.js";
-import { compactStatus, configView, diagnoseFrames, tailLog } from "./status.js";
+import { compactStatus, configView, diagnoseFrames, tailLog, topmostView } from "./status.js";
 import { confirmExit, exitMessage, forgetExit, knownExit, watchTarget } from "./exit.js";
 import { CliResult, defaultCapturePath, resolveVinputExe, runVinput } from "./vinput.js";
 import { completedJobView, isCompletedJobOutcome } from "./completedjob.js";
 import { burstImage } from "./burstimage.js";
-import { requireSequenceWait, sequenceWaitError, waitSequence, sequenceJob } from "./sequencewait.js";
+import { requireSequenceWait, sequenceWaitError, waitSequence, sequenceJob,sequenceCaptureEvidence } from "./sequencewait.js";
 import { requireTextBoundary } from "./textboundary.js";
 import { keyScheduleLines } from "./keyschedule.js";
 import { withMouseModifiers } from "./mousemodifiers.js";
@@ -29,6 +29,9 @@ import { CaptureMappings, nativeMapping } from "./capturemapping.js";
 import { registerCameraHelpers,observeSettle,type CameraContext } from "./camerahelpers.js";
 import { registerNavigationMotion } from "./navigationmotion.js";
 import { registerPadNavigation } from "./padnavigation.js";
+import {registerKeyDrive,sequencePwmKeyError} from './keydrive.js';
+import {registerRadarNavigation} from './radarnavigation.js';
+import {withActionFeedback} from './actionfeedback.js';
 import { frameworkClickTiming } from "./frameworkclick.js";
 import { waitTextQuery, presentWaitTextAny } from "./waittextany.js";
 import { registerAgentLoops, noteOtherInput } from "./agentloops.js";
@@ -79,6 +82,8 @@ async function frameHealth(pid: number, launchArgs?: string): Promise<Record<str
   if (!st.ok || typeof st.json !== "object" || !st.json) return {};
   const d = diagnoseFrames(st.json as Record<string, unknown>);
   const out: Record<string, unknown> = {};
+  const topmost = topmostView(st.json as Record<string, unknown>);
+  if (topmost) out.topmost = topmost;
   if (d.nothingPresented) out.nothing_presented = true;
   if (d.refusals) out.fullscreen_refusals = d.refusals;
   const warnings: string[] = d.warning ? [d.warning] : [];
@@ -162,7 +167,7 @@ function tool<S extends z.ZodRawShape>(name: string, title: string, description:
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (async (a: any, extra: {signal?:AbortSignal}) => {
       const terse = compactEnabled(a?.compact);
-      const present = (out: ToolReply) => compactReply(out, terse, name);
+      const present = (out: ToolReply) => compactReply(withActionFeedback(out), terse, name);
       // Presentation never reaches native requests or changes handler decisions.
       const { compact: _compact, ...input } = a ?? {};
       a = input;
@@ -179,7 +184,7 @@ function tool<S extends z.ZodRawShape>(name: string, title: string, description:
         if (p !== undefined && out.isError) {
           const ex = await confirmExit(p);
           if (ex) {
-            try {const j=JSON.parse((out.content[0] as {text:string}).text);if(j.input_session||j.input_receipt||j.input_read_observation){out.content[0]={type:'text',text:JSON.stringify({...j,target_exited:true,pid:p,exit_code:ex.code})};return present(out);}}catch{/* Existing pre-input/malformed replies keep normal exit behavior. */}
+            try {const j=JSON.parse((out.content[0] as {text:string}).text);if(j.input_session||Object.hasOwn(j,'input_receipt')||Object.hasOwn(j,'native_receipt')||j.input_may_have_been_applied===true||j.input_read_observation){out.content[0]={type:'text',text:JSON.stringify({...j,target_exited:true,pid:p,exit_code:ex.code})};return present(out);}}catch{/* Existing pre-input/malformed replies keep normal exit behavior. */}
             if (name === "key_sequence" && a.wait === true) {
               try {
                 const j = JSON.parse((out.content[0] as { text: string }).text);
@@ -346,6 +351,7 @@ tool("config", "Configure vinput for a game",
     blockfocus: bool("Stop the game taking the real foreground (default on)."),
     nofullscreen: bool("Refuse DXGI exclusive fullscreen (default on). Exclusive fullscreen loses its swapchain in the background."),
     keepvisible: bool("Undo a minimise of a background game (minimised games stop rendering) (default on)."),
+    topmost:z.enum(['strip','keep']).optional().describe('Default strip: demote only the adopted background game window without activating or raising it. keep stops demotion and permits its non-activating topmost reassertions; never restores topmost automatically.'),
     cursor: z.enum(["auto", "virtual", "real"]).optional().describe("Which cursor the game sees: virtual (vinput's own), real, or auto (decided per game)."),
     raw: z.enum(["auto", "post", "buffer", "off"]).optional().describe("How raw-input mouse deltas reach the game: post (WM_INPUT messages), buffer (GetRawInputBuffer), off, or auto."),
     msgs: z.enum(["auto", "on", "off"]).optional().describe("Whether window messages are sent for input: on, off, or auto."),
@@ -357,7 +363,7 @@ tool("config", "Configure vinput for a game",
       "gets a virtual fullscreen window and keeps rendering) or refuse (the request fails, the game stays windowed)."),
   },
   async (a) => {
-    const keys = ["fakefocus", "autoactivate", "isolate", "blockfocus", "nofullscreen", "keepvisible", "cursor", "raw", "msgs", "edge_margin", "fullscreen"] as const;
+    const keys = ["fakefocus", "autoactivate", "isolate", "blockfocus", "nofullscreen", "keepvisible", "topmost", "cursor", "raw", "msgs", "edge_margin", "fullscreen"] as const;
     const want: Record<string, unknown> = {};
     for (const k of keys) if (a[k] !== undefined) want[k] = a[k];
     if (a.for_ms !== undefined && a.isolate !== false) return fail("for_ms applies only together with isolate:false");
@@ -672,6 +678,8 @@ async function look(pid: number, out: ToolReply, ca: boolean | number | undefine
   }
   let j: Record<string, unknown> = {};
   try { j = JSON.parse((out.content[0] as { text: string }).text); } catch { /* keep empty */ }
+  const completionProof=sequenceCaptureEvidence(j,g.r.json);
+  if(completionProof){j.sequence_capture=completionProof;if(completionProof.ok!==true){out.content[0]={type:'text',text:JSON.stringify({...j,...(g.summary?{capture_after:g.summary}:{}),capture_after_ok:false,capture_after_error:completionProof.error??'Final image completion witness unavailable',capture_after_receipt:g.r.json,capture_after_observation:observation})};return out;}}
   if(j.capture_stability&&typeof j.capture_stability==='object'){
     const stability=j.capture_stability as Record<string,unknown>,observed=stability.observation as {sample?:{capture_scope?:unknown}}|undefined;
     const before=canonicalSequenceScope(observed?.sample?.capture_scope),after=canonicalSequenceScope((g.r.json as {capture_scope?:unknown}|null)?.capture_scope),same=before&&after?before===after:null;
@@ -1440,14 +1448,17 @@ tool("pad_rotate", "Rotate a stick for a prompt",
   });
 
 const seqStep = z.object({
-  action: z.enum(["hold", "key", "wait", "retap"]).describe("hold / key: press chord for ms; wait: no input; retap: keep the chord held while re-pressing only retap_key at each every_ms interval."),
+  action: z.enum(["hold", "key", "wait", "retap", "pwm"]).describe("hold/key: chord hold; wait: no input; retap: retain chord and refresh one member; pwm: digital chord-on duty within each native period, expired pulse windows skipped without replay."),
   key: keyCombo.optional().describe("Key or chord (hold / key only), e.g. 'w' or 'w+space'."),
   ms: z.number().int().min(1).max(118000),
   retap_key: keyCombo.optional().describe("retap only: one exact member of key to release/repress; other chord keys stay down."),
   every_ms: z.number().int().min(2).max(118000).optional().describe("retap only: anchored re-tap period, strictly larger than gap_ms."),
   gap_ms: z.number().int().min(1).max(1000).optional().describe("retap only: requested release gap, default 10ms. A short gap may not be read by the game."),
+  duty:z.number().finite().min(0).max(1).optional().describe('pwm only: digital key-on fraction, not analog steering.'),
+  period_ms:z.number().int().min(20).max(1000).optional().describe('pwm only: period; nonzero on/off intervals need at least10ms.'),
 }).strict();
-const seqCondition = z.object({kind:z.enum(['frame_change','region_change','text','image']),region:regionRect.optional(),text:z.string().min(1).max(512).optional(),exact:z.boolean().optional(),fuzzy:z.number().min(.01).max(1).optional(),template:z.string().min(1).max(32768).optional(),threshold:z.number().min(.01).max(1).optional(),grace_ms:z.number().int().min(0).max(30000).optional(),
+const seqCondition = z.object({kind:z.enum(['frame_change','region_change','text','image','colour']),region:regionRect.optional(),text:z.string().min(1).max(512).optional(),exact:z.boolean().optional(),fuzzy:z.number().min(.01).max(1).optional(),template:z.string().min(1).max(32768).optional(),threshold:z.number().min(.01).max(1).optional(),grace_ms:z.number().int().min(0).max(30000).optional(),
+  colour:z.tuple([z.number().int().min(0).max(255),z.number().int().min(0).max(255),z.number().int().min(0).max(255)]).optional(),tolerance:z.number().int().min(0).max(255).optional(),min_match_pct:z.number().min(.01).max(100).optional(),after_step:z.number().int().min(1).max(1024).optional(),
   timeout_ms:z.number().int().min(100).max(60000).optional(),poll_ms:z.number().int().min(20).max(1000).optional(),after_frames:z.number().int().min(1).max(3600).optional(),present_timeout_ms:z.number().int().min(100).max(60000).optional()}).strict();
 tool("key_sequence", "Run a keyboard sequence",
   "Run a validated keyboard sequence as ONE background job inside the game: each step presses a key or chord for ms (hold / key) " +
@@ -1459,9 +1470,10 @@ tool("key_sequence", "Run a keyboard sequence",
     start_on:seqCondition.optional().describe('Bounded scoped capture/OCR event before admission; frame/region compares against first observation, text matches visible normalized text. Optional after_frames:1..3600 anchors deadlines at that future native Present hook index after the matched native capture. present_timeout_ms defaults5000; wait plus declared duration must fit118000ms. An already missed frame refuses/cancels without starting late. PrintWindow cannot supply this anchor. No display scanout, audio onset or exact game-event alignment.'),
     abort_on:seqCondition.omit({timeout_ms:true,after_frames:true,present_timeout_ms:true}).optional().describe('Requires wait:true. Stop the exact job on a scoped hash change, text (optional fuzzy score), or PNG template. Prefer a small region and image/hash for faster observation without OCR. grace_ms arms after the native job starts and rebaselines hash changes after grace. The matched frame is retained when supported. Polling latency and native observer expiry remain bounded, not hard real-time.'),
     progress_check:z.object({region:regionRect.optional(),max_unchanged_ms:z.number().int().min(100).max(20000)}).strict().optional().describe('Requires wait:true. Stop if the selected frame/region hash remains unchanged; choose a meaningful region. This does not establish gameplay success.'),
-    max_lateness_ms:z.number().int().min(1).max(5000).optional().describe('Abort the entire native sequence before an overdue key edge exceeds this bound. start_on defaults1000ms. No input edge is silently skipped or replayed.'),
+    max_lateness_ms:z.number().int().min(1).max(5000).optional().describe('Abort the entire native sequence before an overdue key edge exceeds this bound. start_on defaults1000ms. PWM skips expired pulse windows without replay; strict lateness cancels the sequence. Other step edges retain their existing strict deadline behavior.'),
     capture_every_ms:z.number().int().min(250).max(30000).optional().describe('Requires wait:true. Retain scoped PNGs during THIS same observed native sequence; guarded expiry stays active. First running witness then this interval; missed intervals skipped. Returns frame QPC/job-step brackets and a review sheet, not precise step-to-frame or game-response proof.'),
     capture_max_frames:z.number().int().min(1).max(32).optional().describe('Periodic retained-image cap, default16; recording stops at the cap while the sequence observer continues.'),
+    capture_mode:z.enum(['first','last']).optional().describe('first stops recording at the cap; last keeps the last N generated frames in an owned ring directory. Observer and native bounds remain active.'),
     capture_region:regionRect.optional().describe('Periodic recording crop in client pixels; separate from final capture_after region.'),
     capture_max_width:z.number().int().min(16).max(960).optional().describe('Periodic PNG width cap, default640. Per-frame pixel/file and total saved-file budgets also apply.'),
     capture_out_dir:z.string().optional().describe('Directory for this sequence recording and its review sheet; default capture directory. No duplicate default files.'),
@@ -1482,10 +1494,12 @@ tool("key_sequence", "Run a keyboard sequence",
     let lines: string[] = [];
     if(a.schedule){const built=keyScheduleLines(a.schedule);if(built.error!==undefined)return fail(built.error);lines=built.lines;}
     for (const [i, st] of (a.steps??[]).entries()) {
+      if(st.action!=='pwm'&&(st.duty!==undefined||st.period_ms!==undefined))return fail(`step ${i+1}: duty/period_ms require action:pwm; no input was sent`);
       if(st.action!=="retap"&&(st.retap_key!==undefined||st.every_ms!==undefined||st.gap_ms!==undefined))return fail(`step ${i+1}: retap options require action:retap; no input was sent`);
       if (st.action === "wait") { if (st.key !== undefined) return fail(`step ${i + 1}: wait takes no key`); lines.push(`wait ${st.ms}`); continue; }
       if (!st.key) return fail(`step ${i + 1}: ${st.action} needs a key`);
       if (/\s/.test(st.key)) return fail(`step ${i + 1}: key names cannot contain spaces`);
+      if(st.action==='pwm'){const keyError=sequencePwmKeyError(st.key);if(keyError)return fail('step '+(i+1)+': '+keyError);const period=st.period_ms??100,on=st.duty===undefined?-1:Math.round(period*st.duty);if(st.duty===undefined||st.ms<10||st.ms>60000||st.duty>0&&st.duty<1&&(on<10||period-on<10))return fail(`step ${i+1}: pwm needs duty0..1, ms10..60000 and nonzero on/off intervals>=10ms; no input was sent`);lines.push(`pwm ${st.key} ${st.ms} ${st.duty} ${period}`);continue;}
       if(st.action==="retap"){
         if(!st.retap_key||/\s/.test(st.retap_key)||st.every_ms===undefined||st.every_ms<=(st.gap_ms??10)||st.every_ms+(st.gap_ms??10)>=st.ms)return fail(`step ${i+1}: retap needs retap_key, every_ms > gap_ms and one complete gap before ms; no input was sent`);
         lines.push(`retap ${st.key} ${st.retap_key} ${st.ms} ${st.every_ms} ${st.gap_ms??10}`);continue;
@@ -1623,6 +1637,8 @@ const cameraContext:CameraContext={owner:OWNER,at,run:runVinput,epoch:p=>capture
 registerCameraHelpers(tool,cameraContext,
   actionCaptureArgs, regionSchema, keyCombo);
 registerPadNavigation(tool,cameraContext,actionCaptureArgs,regionSchema);
+registerKeyDrive(tool,{...cameraContext,run:async(args,budget)=>presentInputReads(await runVinput(args,budget))},actionCaptureArgs);
+registerRadarNavigation(tool,cameraContext,actionCaptureArgs);
 
 registerNavigationMotion(tool, { owner: OWNER, at, run: runVinput, epoch: p => captureSessionEpoch.get(p) ?? 0,
   captureError: actionCaptureError, finish: (p, out, options, epoch) => look(p, out, options.capture_after, { ...actionObservation(options), attachment_epoch: epoch }) },

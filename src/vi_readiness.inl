@@ -86,5 +86,5 @@ std::string CommandInputReadiness(const std::string& cmd,const JObj& request) {
  return response;
 }
 bool InputNeedsReady(const std::string& cmd,const JObj& request) {
- (void)request;return cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="down"||cmd=="type"||cmd=="seq"||cmd=="sequence"||cmd=="click"||cmd=="mousedown"||cmd=="drag"||cmd=="placement-drag";
+ (void)request;return cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="key-drive"||cmd=="radar-nav"||cmd=="radar-turn"||cmd=="down"||cmd=="type"||cmd=="seq"||cmd=="sequence"||cmd=="click"||cmd=="mousedown"||cmd=="drag"||cmd=="placement-drag";
 }

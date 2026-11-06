@@ -47,6 +47,7 @@
 #include "vi_qpc.h"
 #include "vi_trace.h"
 #include "vi_vision.h"
+#include "vi_topmost_policy.h"
 #include "vi_motion.h"
 #include "vi_framework_input.h"
 #include "vi_image_encode.h"
@@ -82,6 +83,7 @@ struct Config {
     std::atomic<bool> blockfocus{true};   // while NOT really foreground: game cannot steal focus
     std::atomic<bool> nofullscreen{true}; // keep native DXGI windowed; emulate fullscreen by default
     std::atomic<bool> keepvisible{true};  // while NOT really foreground: refuse/undo minimise (minimised games stop presenting)
+    std::atomic<bool> topmostKeep{false};
     std::atomic<int>  cursor{0};          // 0 auto (virtual when not fg), 1 always virtual, 2 always real
     std::atomic<int>  edgeMargin{8};      // client pixels; 0 disables pointer path protection
     std::atomic<int>  rawmode{0};         // 0 auto, 1 force post WM_INPUT, 2 force GetRawInputBuffer queue, 3 off
@@ -678,11 +680,13 @@ BOOL WINAPI h_BringWindowToTop(HWND h) {
     if (BlockForegroundActivation()) { C.setfg_blocked++; return TRUE; }
     return o_BringWindowToTop(h);
 }
+bool TopmostSetWindowPos(HWND,HWND,int,int,int,int,UINT,BOOL&);
 BOOL WINAPI h_SetWindowPos(HWND h, HWND after, int x, int y, int cx, int cy, UINT f) {
+    BOOL topmostResult=FALSE;if(TopmostSetWindowPos(h,after,x,y,cx,cy,f,topmostResult))return topmostResult;
     if (!(f & SWP_NOACTIVATE) && IsOurWindow(h) && !GetParent(h)) Log("trace SetWindowPos(%p, after=%p, flags=0x%X) fg=%d", h, after, f, (int)RealFg());
     if (BlockForegroundActivation() && IsOurWindow(h)) {
         f |= SWP_NOACTIVATE;
-        if (after == HWND_TOPMOST || after == HWND_TOP) f |= SWP_NOZORDER;
+        if ((after == HWND_TOPMOST && !(h==g_hwnd&&g_cfg.topmostKeep.load())) || after == HWND_TOP) f |= SWP_NOZORDER;
     }
     return o_SetWindowPos(h, after, x, y, cx, cy, f);
 }
@@ -882,6 +886,7 @@ BOOL WINAPI h_RegisterRawInputDevices(PCRAWINPUTDEVICE devices,UINT count,UINT s
 // window subclass: fake focus + isolation of real mouse/raw input in the background
 // ----------------------------------------------------------------------------------------------
 #include "vi_wndproc_binding.inl"
+#include "vi_topmost_native.inl"
 #include "vi_framework_window.inl"
 #include "vi_raw_buffer_routing.inl"
 #include "vi_present_window.inl"
@@ -1280,6 +1285,7 @@ PFN_Present o_Present = nullptr; PFN_Present1 o_Present1 = nullptr; PFN_SetFS o_
 #include "vi_fullscreen.h"
 
 std::atomic<LONG> g_capReq{0};  // 0 idle, 1 requested, 2 in progress
+thread_local HANDLE g_currentClientPipe=INVALID_HANDLE_VALUE;
 HANDLE g_capEvent = nullptr;
 std::vector<BYTE> g_capPix; UINT g_capW = 0, g_capH = 0; std::string g_capErr; DXGI_FORMAT g_capFmt = DXGI_FORMAT_UNKNOWN;
 // Backend scratch is never the coordinate map. Only a successfully encoded single image commits this snapshot.
@@ -1750,6 +1756,7 @@ struct WndConfigCommitBarrier {
 };
 void WndAdoptionNotify(const std::shared_ptr<WndProcBinding>& binding) {
     if(!binding||binding->window!=g_hwnd||!WndBindingLive(binding)||WndBindingFind(binding->window)!=binding)return;
+    TopmostObserve();
     MaybeSynthActivate();
     HWND h=binding->window;RECT rc{};wchar_t cls[128]={0},title[256]={0};
     GetClientRect(h,&rc);GetClassNameW(h,cls,127);GetWindowTextW(h,title,255);
@@ -2064,6 +2071,8 @@ std::string ClaimGate(const std::string& cmd, const JObj& j) {
 
 bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_jobs.inl"
+#include "vi_key_drive_jobs.inl"
+#include "vi_radar_jobs.inl"
 #include "vi_pointer_scope.inl"
 #include "vi_pad_readiness.inl"
 #include "vi_readiness.inl"
@@ -2072,6 +2081,7 @@ bool ResolveXY(const JObj&,LONG&,LONG&);
 #include "vi_claimed_di_status.inl"
 #include "vi_pad_api_census_json.inl"
 #include "vi_d3d9_diagnostics_json.inl"
+#include "vi_topmost_json.inl"
 #include "vi_present_window_json.inl"
 #include "vi_hidden_show_json.inl"
 
@@ -2371,19 +2381,21 @@ bool ResolveXY(const JObj& j, LONG& x, LONG& y) {
 }
 
 #include "vi_type_input.inl"
+#include "vi_radar_command.inl"
 
 std::string Exec(const std::string& line) {
     JObj j;
     bool duplicate = false;
     if (!ParseJson(line, j, &duplicate)) return ErrJ("bad json");
     std::string cmd = JStr(j, "cmd");
+    if(duplicate&&(cmd=="radar-nav"||cmd=="radar-turn"||cmd=="key-drive"))return ErrJ("navigation request has duplicate fields; no input was injected");
     CursorCommandScope cursorCommandScope(cmd);
     if (duplicate && (cmd == "pad" || cmd == "pad-ramp" || cmd == "pad-timeline" || cmd == "pad-arm")) return ErrJ("pad request has duplicate fields; no input was injected");
     if(duplicate&&(cmd=="sequence-observe"||cmd=="sequence"||cmd=="seq"))return ErrJ("sequence request has duplicate fields; no input was changed");
     if(JHas(j,"for_ms")&&cmd!="config")return ErrJ("for_ms applies only to config isolate=false; no input or configuration changed");
     if(JHas(j,"stagger_ms")&&cmd!="pad-timeline")return ErrJ("stagger_ms is only implemented for pad-timeline; no input was injected");
-    if(line.size()>65536&&(cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="seq"||cmd=="sequence"||cmd=="pad"||cmd=="pad-ramp"||cmd=="pad-timeline"))return ErrJ("input job request exceeds64KiB; no input was injected");
-    if((JHas(j,"async")||JHas(j,"replace"))&&cmd!="placement-drag"&&cmd!="key"&&cmd!="hold"&&cmd!="pulse"&&cmd!="seq"&&cmd!="sequence"&&cmd!="pad"&&cmd!="pad-ramp"&&cmd!="pad-timeline"&&cmd!="up"&&cmd!="mouseup"&&cmd!="release")return ErrJ("async/replace only apply to timed input jobs; no input was injected");
+    if(line.size()>65536&&(cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="key-drive"||cmd=="radar-nav"||cmd=="radar-turn"||cmd=="seq"||cmd=="sequence"||cmd=="pad"||cmd=="pad-ramp"||cmd=="pad-timeline"))return ErrJ("input job request exceeds64KiB; no input was injected");
+    if((JHas(j,"async")||JHas(j,"replace"))&&cmd!="placement-drag"&&cmd!="key"&&cmd!="hold"&&cmd!="pulse"&&cmd!="key-drive"&&cmd!="radar-nav"&&cmd!="radar-turn"&&cmd!="seq"&&cmd!="sequence"&&cmd!="pad"&&cmd!="pad-ramp"&&cmd!="pad-timeline"&&cmd!="up"&&cmd!="mouseup"&&cmd!="release")return ErrJ("async/replace only apply to timed input jobs; no input was injected");
     { std::string refused = ClaimGate(cmd, j); if (!refused.empty()) return refused; }
     if (g_acProduct.load() && cmd != "ping" && cmd != "status" && cmd != "log") { EnforceAntiCheat(); return AntiCheatRefusal(); }
     if(cmd=="readiness")return InputReadyCommand(j);
@@ -2396,10 +2408,12 @@ std::string Exec(const std::string& line) {
         // Ownership can change while the window or its queue is becoming ready.
         std::string refused=ClaimGate(cmd,j);if(!refused.empty())return refused;
     }
-    const bool windowInput=cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="down"||cmd=="type"||cmd=="seq"||cmd=="sequence"||cmd=="mouse"||cmd=="move"||cmd=="click"||cmd=="mousedown"||cmd=="drag"||cmd=="placement-drag"||cmd=="wheel";
+    const bool windowInput=cmd=="key"||cmd=="hold"||cmd=="pulse"||cmd=="key-drive"||cmd=="radar-nav"||cmd=="radar-turn"||cmd=="down"||cmd=="type"||cmd=="seq"||cmd=="sequence"||cmd=="mouse"||cmd=="move"||cmd=="click"||cmd=="mousedown"||cmd=="drag"||cmd=="placement-drag"||cmd=="wheel";
     if(windowInput&&!WndBindingInputAllowed(g_hwnd)){WndBindingRecordInputRefusal();JOut out;out.bol("ok",false);out.bol("input_injected",false);out.str("error","window binding lifetime is unconfirmed; release local input, then restart the target or select a fresh safely adoptable window; same-HWND recovery is unsupported");return out.done();}
     if(cmd=="jobs"||cmd=="job-status"||cmd=="job-cancel")return JobCommand(cmd,j);
     if(cmd=="sequence-observe")return SequenceObserve(j);
+    if(cmd=="ping"&&JBool(j,"input_job_support",false)){JOut out;out.bol("ok",true);out.num("pid",g_pid);out.num("key_drive_version",1);out.num("sequence_pwm_version",1);out.num("radar_navigation_version",1);out.num("sequence_observer_reconcile_version",1);return out.done();}
+    if(cmd=="ping"&&JBool(j,"sequence_condition_support",false)){JOut out;out.bol("ok",true);out.num("pid",g_pid);out.num("sequence_abort_colour_version",1);return out.done();}
     const bool coordinateMotion=(cmd=="mouse"||cmd=="move")&&!JHas(j,"dx")&&!JHas(j,"dy");
     const bool positionedPress=(cmd=="click"||cmd=="mousedown")&&(JHas(j,"x")||JHas(j,"y"));
     if((coordinateMotion||positionedPress)&&JStr(j,"space")=="capture"&&!JBool(j,"norm",false)&&!CaptureMapCurrent())return CaptureMapRefusal();
@@ -2407,6 +2421,8 @@ std::string Exec(const std::string& line) {
     if (cmd == "claim" || cmd == "unclaim") { JOut o; o.bol("ok", true); ClaimFields(o); return o.done(); }
     if (cmd == "ping"){if(JBool(j,"capture_scope_support",false)){JOut out;out.bol("ok",true);out.num("capture_scope_version",1);return out.done();}if(JBool(j,"isolation_deadline_support",false)){JOut out;out.bol("ok",true);out.num("isolation_deadline_version",1);return out.done();}if(JBool(j,"pad_timeline_support",false)){JOut out;out.bol("ok",true);out.num("pad_timeline_version",2);return out.done();}return OkJ();}
     if (cmd == "status") return StatusJson();
+    if(cmd=="radar-nav"||cmd=="radar-turn")return RunRadarCommand(j,cmd=="radar-turn");
+    if(cmd=="key-drive")return ScheduleKeyDrive(j);
     if(cmd=="window-status"||cmd=="presentation-status"){
         JOut out;out.bol("ok",true);out.num("pid",g_pid);HWND window=nullptr;{std::lock_guard<std::recursive_mutex> lock(g_inputMx);window=g_hwnd;}char text[32];sprintf_s(text,"0x%llX",(unsigned long long)(ULONG_PTR)window);out.str("hwnd",text);PresentWindowFields(out,window);HiddenShowFields(out);return out.done();
     }
@@ -2426,6 +2442,7 @@ std::string Exec(const std::string& line) {
             isolateFor=(ULONGLONG)value.n;
         }
         // Validate every configuration choice which can reject before changing the lease.
+        if(JHas(j,"topmost")&&(j.at("topmost").t!=1||(JStr(j,"topmost")!="strip"&&JStr(j,"topmost")!="keep")))return ErrJ("topmost must be strip or keep; no configuration changed");
         if(JHas(j,"fullscreen")&&JStr(j,"fullscreen")!="borderless"&&JStr(j,"fullscreen")!="refuse")return ErrJ("fullscreen must be borderless or refuse; no configuration changed");
         if(JHas(j,"edge_margin")){double n=JNum(j,"edge_margin",-1);if(!(n>=0&&n<=4096&&n==std::floor(n))||j.find("edge_margin")->second.t==3)return ErrJ("edge_margin must be integer0..4096 client pixels; no configuration changed");}
         if(JHas(j,"hwnd")){DWORD windowOwner=0;HWND requested=(HWND)(ULONG_PTR)strtoull(JStr(j,"hwnd").c_str(),nullptr,0);if(!IsWindow(requested)||!GetWindowThreadProcessId(requested,&windowOwner)||windowOwner!=g_pid)return ErrJ("hwnd must belong to this target process; no configuration changed");}
@@ -2452,6 +2469,7 @@ std::string Exec(const std::string& line) {
         if (JHas(j, "fullscreen")) {const int policy=JStr(j,"fullscreen")=="refuse"?1:0;if(policy==1)g_d9ProbeAdmissions.fetch_or(1u);g_fullscreenPolicy=policy;} // validated before staging; stop probes before publishing refusal
         if (JHas(j, "nofullscreen")) g_cfg.nofullscreen = JBool(j, "nofullscreen", true);
         if (JHas(j, "keepvisible")) g_cfg.keepvisible = JBool(j, "keepvisible", true);
+        if(JHas(j,"topmost"))g_cfg.topmostKeep=JStr(j,"topmost")=="keep";
         if (JHas(j, "vk")) g_vkEnabled = JBool(j, "vk", true);   // vk=off: Vulkan hooks pass through (no usage change, no capture)
         if (JHas(j, "test_realfg")) { if (!TestHooksEnabled()) return ErrJ("test_realfg needs VINPUT_TEST_HOOKS=1 in the target's environment; no configuration changed"); std::string t = JStr(j, "test_realfg"); g_testRealFg = t == "1" ? 1 : t == "0" ? 0 : -1; }
         if (JHas(j, "cursor")) { std::string c = JStr(j, "cursor"); g_cfg.cursor = c == "virtual" ? 1 : c == "real" ? 2 : 0; }
@@ -2460,6 +2478,7 @@ std::string Exec(const std::string& line) {
         if (JHas(j, "msgs")) { std::string c = JStr(j, "msgs"); g_cfg.msgmode = c == "on" ? 1 : c == "off" ? 2 : 0; }
         if(adoptionCommit.owns_lock())adoptionCommit.unlock();
         configTransition.Finish();
+        TopmostObserve();
         WndAdoptionNotify(notification);
         return StatusJson();
     }
@@ -2846,6 +2865,7 @@ std::string Exec(const std::string& line) {
 #include "vi_action_diagnostics.inl"
 DWORD WINAPI ClientThread(LPVOID p) {
     HANDLE pipe = (HANDLE)p;
+    g_currentClientPipe=pipe;
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     static std::mutex execMx;  // commands from several clients run one at a time
     std::string buf; char tmp[4096];
@@ -2871,6 +2891,7 @@ DWORD WINAPI ClientThread(LPVOID p) {
         }
     }
 out:
+    g_currentClientPipe=INVALID_HANDLE_VALUE;
     FlushFileBuffers(pipe); DisconnectNamedPipe(pipe); CloseHandle(pipe);
     CoUninitialize();
     return 0;
@@ -2933,6 +2954,7 @@ DWORD WINAPI MonitorThread(LPVOID) {
             Log("REAL foreground %s (previous fg: pid %lu '%s')", fg ? "GAINED" : "lost", pp, W2U(t).c_str());
         }
         if (fw) lastFgWnd = fw;
+        TopmostObserve();
         static DWORD lastRestore = 0;
         static RECT goodRect = {0, 0, 0, 0};
         if (g_hwnd && !g_adoptedAsHidden && IsWindowVisible(g_hwnd)) {

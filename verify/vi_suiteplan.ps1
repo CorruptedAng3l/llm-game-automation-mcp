@@ -22,6 +22,28 @@ function Get-VinputForegroundCases {
  }
 }
 function Get-VinputBackgroundCases {
+ New-VinputSuiteCase 'input_receipt_v2' 'run_receipttest.ps1' @{} 'Actual channel counters, receipt serializer and extracted polling callback; dispatch is distinct from polling and application response.'
+ New-VinputSuiteCase 'input_receipt_v2_mcp' 'run_mcpcontracttest.ps1' @{Test='receiptprojection'}
+ New-VinputSuiteCase 'action_visual_feedback' 'run_mcpcontracttest.ps1' @{Test='action_feedback'} 'Promotes existing measured image differences without asserting game consumption.'
+ New-VinputSuiteCase 'radar_policy' 'run_radarmodeltest.ps1'
+ New-VinputSuiteCase 'radar_navigation_native' 'run_radarnativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')} 'Finite native job and guarded keyboard-driven radar plant, not retail navigation.'
+ New-VinputSuiteCase 'radar_navigation_mcp' 'run_mcpcontracttest.ps1' @{Test='radarnavigation'}
+ New-VinputSuiteCase 'key_drive_policy' 'run_keydrivepolicytest.ps1'
+ New-VinputSuiteCase 'key_drive_deadline' 'run_keydrivedeadlinetest.ps1'
+ New-VinputSuiteCase 'key_drive_ack' 'run_keydriveacktest.ps1'
+ New-VinputSuiteCase 'key_drive_native' 'run_keydrivenativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')} 'Actual PWM/KeyDrive scheduler with finite publication, deadlines and exact resource cleanup.'
+ New-VinputSuiteCase 'key_drive_mcp' 'run_mcpcontracttest.ps1' @{Test='keydrive'}
+ New-VinputSuiteCase 'key_drive_protocol' 'run_mcpcontracttest.ps1' @{Test='keydrive_protocol'}
+ New-VinputSuiteCase 'sequence_observer_diagnostics' 'run_mcpcontracttest.ps1' @{Test='sequence_observer'}
+ New-VinputSuiteCase 'sequence_inflight_ack' 'run_mcpcontracttest.ps1' @{Test='sequence_inflight'}
+ New-VinputSuiteCase 'sequence_renewal_reconcile' 'run_mcpcontracttest.ps1' @{Test='sequence_reconcile'}
+ New-VinputSuiteCase 'sequence_last_frames' 'run_mcpcontracttest.ps1' @{Test='sequence_ring'}
+ New-VinputSuiteCase 'sequence_features_protocol' 'run_mcpcontracttest.ps1' @{Test='sequence_features'}
+ New-VinputSuiteCase 'sequence_capture_provenance' 'run_mcpcontracttest.ps1' @{Test='sequence_capture_provenance'}
+ New-VinputSuiteCase 'sequence_observer_native' 'run_sequenceobservernativetest.ps1' @{RepoRoot=(Join-Path $PSScriptRoot '..');CliDir=(Join-Path $PSScriptRoot '..\dist')} 'Actual lost acknowledgements, live leases, colour conditions and bounded last-frame recording; no replay.'
+ New-VinputSuiteCase 'topmost_policy_native' 'run_topmosttest.ps1' @{} 'Owned offscreen HWND demotion and relationship/race controls with terminal desktop boundaries.'
+ New-VinputSuiteCase 'topmost_outer_hook' 'run_topmosthooktest.ps1' @{} 'Actual extracted SetWindowPos hook with fabricated endpoints; keep does not activate.'
+ New-VinputSuiteCase 'topmost_mcp' 'run_mcpcontracttest.ps1' @{Test='topmost'}
  New-VinputSuiteCase 'cli_budget' 'run_clibudgettest.ps1'
  New-VinputSuiteCase 'present_window_memory' 'run_presentwindowmemorytest.ps1'
  New-VinputSuiteCase 'hidden_window_native' 'run_hiddenwindowtest.ps1' @{} 'Retained own offscreen hidden HWNDs, synthetic Present proof, and one explicit guarded SW_SHOWNA; all other desktop writers terminal.'

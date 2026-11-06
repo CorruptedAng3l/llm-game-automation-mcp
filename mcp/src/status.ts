@@ -7,6 +7,15 @@ export const RAW_NAMES = ["auto", "post", "buffer", "off"] as const;
 export const MSGS_NAMES = ["auto", "on", "off"] as const;
 
 const name = (names: readonly string[], v: unknown) => (typeof v === "number" && names[v] !== undefined ? names[v] : undefined);
+export function topmostView(s:Obj):Obj|undefined{
+ const presentation=s.presentation_window as Obj|undefined,value=presentation?.topmost as Obj|undefined;
+ if(!value||typeof value!=='object'||Array.isArray(value)||value.version!==1||!['keep','strip_background'].includes(String(value.policy))||typeof value.reason!=='string'||value.reason.length>256||typeof value.topmost_stripped!=='boolean'||!(typeof value.current_topmost==='boolean'||value.current_topmost===null))return;
+ const count=(v:unknown)=>typeof v==='string'&&/^(0|[1-9][0-9]{0,19})$/.test(v)&&BigInt(v)<=18446744073709551615n;
+ const counters=['demotion_calls','demotions_observed','reapplications_observed','reassertion_requests','reassertions_prevented','refusals'];if(!counters.every(k=>count(value[k])))return;
+ const scoped=typeof value.hwnd==='string'&&/^0x[0-9a-f]{1,16}$/i.test(value.hwnd)&&BigInt(value.hwnd)>0n&&count(value.adoption_generation)&&value.adoption_generation!=='0'&&count(value.binding_lifetime)&&value.binding_lifetime!=='0'&&typeof value.thread==='number'&&Number.isInteger(value.thread)&&value.thread>0&&value.thread<=4294967295;
+ if(value.topmost_stripped&&(!scoped||value.current_topmost!==false||value.demotions_observed==='0'))return;
+ return {...value,scope_confirmed:scoped};
+}
 
 /** The effective vinput config as the `config` command's enums/booleans, read from a status / config reply. */
 export function configView(s: Obj): Obj {
@@ -18,6 +27,7 @@ export function configView(s: Obj): Obj {
     msgs: name(MSGS_NAMES, s.msgmode) ?? s.msgmode,
     ...(s.edge_margin !== undefined ? { edge_margin: s.edge_margin } : {}),
     ...(fsPolicy(s) !== undefined ? { fullscreen: fsPolicy(s) } : {}),
+    ...(topmostView(s)?{topmost:topmostView(s)!.policy==='keep'?'keep':'strip'}:{}),
   };
 }
 /** DXGI fullscreen policy from status.fullscreen.policy (borderless / refuse / native), when the build reports it. */
@@ -140,7 +150,7 @@ export function hiddenWindowView(s: Obj): Obj {
       const flags = ["ambiguous", "capacity_unconfirmed", "evidence_unconfirmed", "candidates_truncated"];
       if (v.version === 1 && typeof v.hidden_candidate_count === "number" && Number.isSafeInteger(v.hidden_candidate_count) &&
           v.hidden_candidate_count >= 0 && v.hidden_candidate_count <= 128 && flags.every(k => typeof v[k] === "boolean"))
-        out.presentation_window = Object.fromEntries(["hidden_candidate_count", ...flags].map(k => [k, v[k]]));
+        out.presentation_window = {...Object.fromEntries(["hidden_candidate_count", ...flags].map(k => [k, v[k]])),...(topmostView(s)?{topmost:topmostView(s)}:{})};
     }
   }
   const h = s.hidden_show;

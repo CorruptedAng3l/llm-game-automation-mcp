@@ -15,7 +15,12 @@ static Reply CmdKeySequence(DWORD pid,const Args& args) {
  FILE* file=nullptr;_wfopen_s(&file,U2W(args.pos[0]).c_str(),L"rb");if(!file)return Fail("cannot open sequence file");
  std::string script;char buffer[4096];size_t count=0;while((count=fread(buffer,1,sizeof(buffer),file))!=0){script.append(buffer,count);if(script.size()>32768)break;}const bool readError=ferror(file)!=0;fclose(file);if(readError)return Fail("cannot read sequence file");
  if(script.compare(0,3,"\xEF\xBB\xBF")==0)script.erase(0,3);
- vi_key_sequence::Plan plan;std::string error;if(!vi_key_sequence::Parse(script,plan,error))return Fail(error);
+ vi_key_sequence::Plan plan;std::string error;if(!vi_key_sequence::Parse(script,plan,error))return Fail(error,"\"input_injected\":false");
+ if(plan.pwm){std::string capability;const bool received=BoundedJobRequest(pid,"{\"cmd\":\"ping\",\"input_job_support\":true}",1000,capability);vi_ready_json::Reader parsed{capability,0,{}};bool ok=false;
+  const bool valid=received&&parsed.Parse()&&parsed.Bool("ok",ok)&&ok;
+  auto exact=[&](const char* key,const std::string& expected){const auto i=parsed.fields.find(key);return i!=parsed.fields.end()&&i->second.type=='n'&&i->second.raw==expected;};
+  if(!valid||!exact("pid",std::to_string(pid))||!exact("sequence_pwm_version","1"))return Fail("PWM sequence steps require the matching native sequence_pwm_version1; no input was injected","\"input_injected\":false");
+ }
  std::string status;if(!Request(pid,"{\"cmd\":\"status\"}",status)||JsonNum(status,"key_sequence_version")<1)return Fail("target lacks key sequence jobs; restart the owned target with the matching updated DLL; no input was injected");
  if(plan.absolute&&JsonNum(status,"sequence_timing_version")<1)return Fail("absolute at schedules require sequence_timing_version >=1; no input was injected");
  if(plan.retap&&JsonNum(status,"sequence_retap_version")<1)return Fail("retap steps require sequence_retap_version >=1; no input was injected");
@@ -23,7 +28,7 @@ static Reply CmdKeySequence(DWORD pid,const Args& args) {
  if(!scope.empty()&&JsonNum(status,"input_scope_version")<1)return Fail("conditional sequences require input_scope_version >=1; no input was injected");
  if(frameAnchor&&JsonNum(status,"sequence_frame_anchor_version")<1)return Fail("Present frame anchor requires sequence_frame_anchor_version >=1; no input was injected");
  std::string command="{\"cmd\":\"sequence\",\"script\":\""+JEsc(script)+"\",\"async\":true";if(replacement=="true")command+=",\"replace\":true";if(guard)command+=",\"guard_ms\":"+std::to_string(guard);if(!scope.empty())command+=",\"expected_capture_scope\":\""+JEsc(scope)+"\"";if(lateness)command+=",\"max_lateness_ms\":"+std::to_string(lateness);if(anchored)command+=std::string(frameAnchor?",\"start_hook_frame_index\":\"":",\"start_qpc_ticks\":\"")+(frameAnchor?startFrame:startQpc)+"\",\"start_qpc_frequency\":\""+startFrequency+"\"";if(frameTimeout)command+=",\"start_hook_timeout_ms\":"+std::to_string(frameTimeout);command+='}';
- std::string reply;const bool received=BoundedJobRequest(pid,command,6500,reply);vi_ready_json::Reader parsed{reply,0,{}};bool ok=false;
+ std::string reply;const bool received=BoundedJobRequest(pid,command,6500,reply);vi_ready_json::Reader parsed{reply,0,{}};parsed.maxTopLevelFields=128;bool ok=false;
  if(received&&parsed.Parse()&&parsed.Bool("ok",ok)){
   if(!ok)return {false,reply};
   bool accepted=false;auto id=parsed.fields.find("job_id");

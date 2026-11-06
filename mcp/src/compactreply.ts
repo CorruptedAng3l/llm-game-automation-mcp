@@ -1,4 +1,5 @@
 // Optional MCP presentation. Native receipts and handler decisions stay untouched.
+import {projectInputReadObservation} from './inputreceiptprojection.js';
 type Obj = Record<string, unknown>;
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type Reply = { content: Content[]; isError?: boolean };
@@ -34,6 +35,7 @@ const fields = new Set((
   "target_exited exit_code injected followed_from process_created launch_state waiting_for launcher_pid follow_pid follow_created " +
   "foreground_restored really_foreground app_active frames frame_api cursor raw msgs virtual_down " +
   "input_session displacement angle_degrees yaw_degrees measured_angle_degrees verification " +
+  "owner requested_ms capture_scope_checked key_drive key_drive_scope input_observed observed_input_channels polling_outcome visual_change_observed visual_observation sequence_capture sequence_guard radar_navigation goal_reached world_yaw_degrees key_drive_version key_drive_phases key_drive_phase key_drive_period_ms key_drive_transition_bound reserved_keys skipped_scheduling_boundaries " +
   "relative_accounting_version requested_dx requested_dy device_dx device_dy applied_dx applied_dy raw_dx raw_dy steps_published cursor_clamped cursor_saturated relative_delivery " +
   "calibration probe_counts_per_axis initial_target final_target degrees_per_count target desired centered error_px cursor_aligned " +
   "requested_yaw_deg requested_pitch_deg submitted_dx submitted_dy counts_per_degree pitch_counts_per_degree calibration_source actual_yaw_deg actual_pitch_deg ms " +
@@ -49,7 +51,7 @@ const fields = new Set((
   "targets keys lines config status mode warnings notes note"
 ).split(/\s+/));
 const semanticQueries = new Set(["list_targets", "list_keys", "config", "doctor", "log", "trace"]);
-const opaqueFields = new Set(["capture_scope", "capture_mapping", "capture_observation", "framework_input", "number_read", "settle_observation", "capture_stability", "relative_delivery", "timing_profile_used", "image", "mapping", "mapping_used", "mapped", "attachment", "next_action", "calibration", "context", "sequence_start", "sequence_captures", "matched_observation"]);
+const opaqueFields = new Set(["key_drive", "sequence_capture", "sequence_guard", "radar_navigation", "visual_observation", "capture_scope", "capture_mapping", "capture_observation", "framework_input", "number_read", "settle_observation", "capture_stability", "relative_delivery", "timing_profile_used", "image", "mapping", "mapping_used", "mapped", "attachment", "next_action", "calibration", "context", "sequence_start", "sequence_captures", "matched_observation"]);
 const batchTools = new Set(["click_many", "click_grid", "hover_many"]);
 const diagnosticKey = /warning|error|refus|fail|not_measured|timed_out|(?:^|_)(?:notes?|hint)$/i;
 const active = (v: unknown): boolean => v !== undefined && v !== null && v !== false && v !== "" && v !== 0 && (!Array.isArray(v) || v.length > 0);
@@ -73,6 +75,7 @@ function diagnostics(value: unknown): unknown {
 }
 
 function reader(value: unknown): Obj | undefined {
+  const v2=projectInputReadObservation(value);if(v2)return v2;
   const o = object(value);
   if (!o) return;
   // Pending, ambiguous, or unmeasured counters must never become named readers.
